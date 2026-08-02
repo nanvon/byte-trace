@@ -79,7 +79,7 @@ ByteTrace 将“看到了多少流量”扩展为“在什么时间段、由哪�
 - HTTPS 下的完整 URL 路径通常不可见，若要支持只能针对特定浏览器/应用做扩展，或在用户明确授权下接入代理/TLS 检查等方案，不能承诺对所有应用通用支持；
 - 首个可行目标应是“应用 → 域名/主机 → 流量”的尽力而为明细，并保留“未知域名/无法识别”分类，不从 IP 反向猜测域名。
 
-访问明细涉及更高的隐私、权限、存储量和性能成本，应作为独立的可选能力评估，默认本地保存、明确告知采集范围，并在数据源和权限方案确定后再实现。详细的数据源评估、验收门和原型步骤见 [DOMAIN_TRAFFIC_REQUIREMENTS.md](DOMAIN_TRAFFIC_REQUIREMENTS.md)。当前继续以 `nettop` 的应用级统计作为稳定基线，不在本阶段接入域名采集。
+访问明细涉及更高的隐私、权限、存储量和性能成本，应作为独立的可选能力评估，默认本地保存、明确告知采集范围，并在数据源和权限方案确定后再实现。详细的数据源评估、验收门和原型步骤见 [DOMAIN_TRAFFIC_REQUIREMENTS.md](DOMAIN_TRAFFIC_REQUIREMENTS.md)；候选 Network Extension 路线见 [DOMAIN_TRAFFIC_SOURCE_DECISION.md](DOMAIN_TRAFFIC_SOURCE_DECISION.md)。当前继续以 `nettop` 的应用级统计作为稳定基线，不在本阶段接入域名采集。
 
 `Scripts/package_app.sh` 会将 Release 可执行文件封装为 `dist/ByteTrace.app`，写入菜单栏应用所需的 `Info.plist`，完成严格签名校验后生成 `dist/ByteTrace.zip`。默认使用 ad-hoc 签名；GitHub Release 固定使用 `-` 身份，不读取 Apple 证书或签名 Secrets。
 
