@@ -160,6 +160,30 @@ public final class UsageStore: @unchecked Sendable {
         return records
     }
 
+    public func bucketStats() throws -> UsageBucketStats {
+        let statement = try database.prepare(
+            "SELECT COUNT(*), MIN(bucket_start), MAX(bucket_start) FROM usage_buckets;"
+        )
+        defer { sqlite3_finalize(statement) }
+
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+        }
+
+        let earliest = sqlite3_column_type(statement, 1) == SQLITE_NULL
+            ? nil
+            : Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 1)))
+        let latest = sqlite3_column_type(statement, 2) == SQLITE_NULL
+            ? nil
+            : Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 2)))
+
+        return UsageBucketStats(
+            bucketCount: sqlite3_column_int64(statement, 0),
+            earliestBucket: earliest,
+            latestBucket: latest
+        )
+    }
+
     public func clearAll() throws {
         try database.execute("DELETE FROM usage_buckets;")
         try database.execute("DELETE FROM daily_usage;")

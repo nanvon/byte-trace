@@ -56,6 +56,11 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(buckets[0].downloadBytes, 103)
         XCTAssertEqual(buckets[0].uploadBytes, 24)
         XCTAssertEqual(buckets[0].sampleCount, 2)
+
+        let stats = try store.bucketStats()
+        XCTAssertEqual(stats.bucketCount, 1)
+        XCTAssertEqual(stats.earliestBucket, firstSample)
+        XCTAssertEqual(stats.latestBucket, firstSample)
     }
 
     func testSamplesInDifferentMinutesPersistSeparateBuckets() throws {

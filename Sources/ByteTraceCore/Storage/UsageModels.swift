@@ -192,3 +192,19 @@ public struct UsageBucketRecord: Equatable, Sendable {
         self.sampleCount = sampleCount
     }
 }
+
+public struct UsageBucketStats: Equatable, Sendable {
+    public let bucketCount: Int64
+    public let earliestBucket: Date?
+    public let latestBucket: Date?
+
+    public init(
+        bucketCount: Int64,
+        earliestBucket: Date?,
+        latestBucket: Date?
+    ) {
+        self.bucketCount = bucketCount
+        self.earliestBucket = earliestBucket
+        self.latestBucket = latestBucket
+    }
+}

@@ -119,6 +119,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
     @Published private(set) var rangeRecords: [DailyUsageRecord] = []
     @Published private(set) var rangeTimeline: [UsageTimelinePoint] = []
+    @Published private(set) var bucketStats: UsageBucketStats?
     private(set) var rangeBuckets: [UsageBucketRecord] = []
     private var dailyRangeRecords: [DailyUsageRecord] = []
     @Published private(set) var launchAtLoginEnabled: Bool
@@ -278,12 +279,14 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             records = []
             rangeRecords = []
             rangeTimeline = []
+            bucketStats = nil
             rangeBuckets = []
             return
         }
 
         do {
             records = try store.dailyUsage(for: dayKey)
+            bucketStats = try store.bucketStats()
             try loadRange(from: store)
         } catch {
             lastError = "读取今日统计失败：\(error.localizedDescription)"
@@ -332,6 +335,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             records = []
             rangeRecords = []
             rangeTimeline = []
+            bucketStats = UsageBucketStats(
+                bucketCount: 0,
+                earliestBucket: nil,
+                latestBucket: nil
+            )
             rangeBuckets = []
             dailyRangeRecords = []
             lastError = nil

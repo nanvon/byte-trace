@@ -54,6 +54,28 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("细粒度统计") {
+                    if let stats = model.bucketStats, stats.bucketCount > 0 {
+                        LabeledContent("分钟桶数量", value: "\(stats.bucketCount)")
+                        LabeledContent(
+                            "最早记录",
+                            value: formattedDate(stats.earliestBucket)
+                        )
+                        LabeledContent(
+                            "最新记录",
+                            value: formattedDate(stats.latestBucket)
+                        )
+                    } else {
+                        Text("尚未积累分钟级统计数据。开始采集后会逐步显示最近时间范围和趋势。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("分钟级数据的保留和清理策略将在后续确定。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("关于 ByteTrace") {
                     LabeledContent("数据源", value: "系统 nettop")
                     LabeledContent("统计口径", value: "应用逻辑流量")
@@ -76,5 +98,13 @@ struct SettingsView: View {
         } message: {
             Text("此操作会删除本机保存的每日应用流量和采集诊断记录，不能撤销。")
         }
+    }
+
+    private func formattedDate(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 }

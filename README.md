@@ -36,7 +36,7 @@ swift run ByteTraceApp
 ~/Library/Application Support/<bundle identifier>/usage.sqlite3
 ```
 
-`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 和独立主窗口：popover 提供今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态和刷新入口；主窗口提供“概览 / 设置”导航、时间范围选择、趋势图和应用详情初版。数据库位置、登录时启动和清空统计设置均已接入。`Scripts/package_app.sh` 可生成 ad-hoc 签名的 `.app` 和 `ByteTrace.zip`，并已完成本机 LaunchServices 启动验证。
+`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 和独立主窗口：popover 提供今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态和刷新入口；主窗口提供“概览 / 设置”导航、时间范围选择、趋势图和应用详情初版。数据库位置、登录时启动、清空统计和分钟级数据积累状态均已接入。`Scripts/package_app.sh` 可生成 ad-hoc 签名的 `.app` 和 `ByteTrace.zip`，并已完成本机 LaunchServices 启动验证。
 
 ## 界面架构约定
 
