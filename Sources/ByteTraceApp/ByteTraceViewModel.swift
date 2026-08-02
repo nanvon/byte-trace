@@ -2,6 +2,7 @@ import AppKit
 import ByteTraceCore
 import Combine
 import Foundation
+import Network
 import ServiceManagement
 
 enum MonitorStatus: Equatable {
@@ -144,6 +145,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var isStarted = false
     private var wantsCollection = false
     private var isSleeping = false
+    private let networkPathMonitor = NWPathMonitor()
+    private let networkPathMonitorQueue = DispatchQueue(
+        label: "com.nanvon.ByteTrace.network-path-monitor"
+    )
+    private var networkPathSignature: String?
+    private var networkPathSatisfied = true
 
     private static let restartDelays: [TimeInterval] = [1, 2, 5, 10, 30]
 
@@ -177,6 +184,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
         configureCollector()
         registerWorkspaceNotifications()
+        registerNetworkPathMonitor()
         refresh()
         if store != nil {
             start()
@@ -217,6 +225,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             status = .failed(lastError ?? "本地存储不可用")
             return
         }
+        guard networkPathSatisfied else {
+            status = .stopped
+            lastError = "当前网络不可用，恢复网络后会自动继续采集。"
+            return
+        }
 
         wantsCollection = true
         lastError = nil
@@ -255,6 +268,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        networkPathMonitor.cancel()
         flushNow()
         status = .stopped
     }
@@ -377,6 +391,24 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
     }
 
+    private func registerNetworkPathMonitor() {
+        networkPathMonitor.pathUpdateHandler = { [weak self] path in
+            let isSatisfied = path.status == .satisfied
+            let signature = path.availableInterfaces
+                .map(\.name)
+                .sorted()
+                .joined(separator: ",")
+
+            Task { @MainActor [weak self] in
+                self?.handleNetworkPathUpdate(
+                    isSatisfied: isSatisfied,
+                    signature: signature
+                )
+            }
+        }
+        networkPathMonitor.start(queue: networkPathMonitorQueue)
+    }
+
     private nonisolated func receive(_ event: NettopCollectorEvent) {
         Task { @MainActor [weak self] in
             self?.handle(event)
@@ -398,7 +430,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
         case let .exited(statusCode):
             isStarted = false
-            if wantsCollection, !isSleeping {
+            if wantsCollection, !isSleeping, networkPathSatisfied {
                 let message = "nettop 已退出（状态码 \(statusCode)），准备重连"
                 lastError = message
                 status = .reconnecting
@@ -411,6 +443,43 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 }
                 recordCollectorEvent(kind: "collector_exited")
             }
+        }
+    }
+
+    private func handleNetworkPathUpdate(isSatisfied: Bool, signature: String) {
+        let isInitialUpdate = networkPathSignature == nil
+        let statusChanged = networkPathSatisfied != isSatisfied
+        let interfaceChanged = networkPathSignature != signature
+
+        networkPathSatisfied = isSatisfied
+        networkPathSignature = signature
+
+        guard !isInitialUpdate, (statusChanged || interfaceChanged), wantsCollection else {
+            return
+        }
+
+        restartTimer?.invalidate()
+        restartTimer = nil
+        restartAttempt = 0
+        isStarted = false
+        if collector.state != .stopped {
+            collector.stop()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        flushNow()
+
+        if isSatisfied {
+            lastError = nil
+            status = .reconnecting
+            recordCollectorEvent(
+                kind: "network_path_changed",
+                details: signature.isEmpty ? "network_available" : signature
+            )
+            scheduleRestart()
+        } else {
+            status = .stopped
+            lastError = "网络不可用，已暂停采集，恢复网络后会自动继续。"
+            recordCollectorEvent(kind: "network_path_lost")
         }
     }
 
@@ -526,7 +595,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private func startCollectorProcess() {
-        guard wantsCollection, !isSleeping, !isStarted else { return }
+        guard wantsCollection, !isSleeping, networkPathSatisfied, !isStarted else { return }
 
         status = .starting
         do {
@@ -544,7 +613,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private func scheduleRestart() {
-        guard wantsCollection, !isSleeping, restartTimer == nil else { return }
+        guard wantsCollection, !isSleeping, networkPathSatisfied, restartTimer == nil else { return }
 
         let index = min(restartAttempt, Self.restartDelays.count - 1)
         let delay = Self.restartDelays[index]
