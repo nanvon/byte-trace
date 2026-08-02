@@ -84,6 +84,68 @@ struct FlowRecord: Codable, Equatable, Sendable {
     }
 }
 
+struct FlowCloseEvent: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let event: String
+    let flowID: UUID
+    let observedAt: Date
+    let startedAt: Date
+    let closedAt: Date
+    let direction: FlowRecordDirection
+    let visibility: FlowRecordVisibility
+    let resolvedBundleIdentifier: String?
+    let remoteHostname: String?
+    let url: String?
+    let bytesInbound: UInt64
+    let bytesOutbound: UInt64
+    let totalBytes: UInt64
+
+    init?(record: FlowRecord, observedAt: Date) {
+        guard let closedAt = record.closedAt else {
+            return nil
+        }
+
+        self.schemaVersion = 1
+        self.event = "flow_closed"
+        self.flowID = record.flowID
+        self.observedAt = observedAt
+        self.startedAt = record.startedAt
+        self.closedAt = closedAt
+        self.direction = record.metadata.direction
+        self.visibility = record.metadata.visibility
+        self.resolvedBundleIdentifier = record.metadata.resolvedBundleIdentifier
+        self.remoteHostname = record.metadata.remoteHostname
+        self.url = record.metadata.url
+        self.bytesInbound = record.bytesInbound
+        self.bytesOutbound = record.bytesOutbound
+        self.totalBytes = record.totalBytes
+    }
+
+    func jsonLine() throws -> String {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(self), as: UTF8.self)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case event
+        case flowID = "flow_id"
+        case observedAt = "observed_at"
+        case startedAt = "started_at"
+        case closedAt = "closed_at"
+        case direction
+        case visibility
+        case resolvedBundleIdentifier = "resolved_bundle_identifier"
+        case remoteHostname = "remote_hostname"
+        case url
+        case bytesInbound = "bytes_inbound"
+        case bytesOutbound = "bytes_outbound"
+        case totalBytes = "total_bytes"
+    }
+}
+
 final class FlowRecordStore: @unchecked Sendable {
     private let lock = NSLock()
     private var openRecords: [UUID: FlowRecord] = [:]

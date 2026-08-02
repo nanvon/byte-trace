@@ -6,9 +6,9 @@
 
 - 宿主：`NEFilterManager`，仅提供显式的保存“禁用配置”命令；默认 `--describe` 不改变系统状态；
 - Provider：`NEFilterDataProvider`，对新 flow 和数据回调一律 pass-through；
-- 统计：给新 flow 返回 `shouldReport = true`，只在 `flowClosed` report 上取入站/出站字节，避免把周期性 report 重复计数；
+- 统计：给新 flow 返回 `shouldReport = true`，只在 `flowClosed` report 上取入站/出站字节，避免把周期性 report 重复计数；同时生成版本化 `flow_closed` JSON 事件，供后续与 `nettop` 对账；
 - 元数据：记录 flow ID、开始/关闭时间、方向、audit token、可选 hostname、可选 WebKit URL；当前 macOS SDK 不提供 `sourceAppIdentifier`，因此还没有稳定的 Bundle ID 归属；
-- 隐私：不保存请求内容、Header、Cookie、查询参数或响应正文；Provider 目前只写 OSLog，未接入正式存储。
+- 隐私：不保存请求内容、Header、Cookie、查询参数或响应正文；结构化事件只进入 private OSLog，且不包含原始 audit token；Provider 尚未接入正式存储。
 
 `NEFilterControlProvider` 没有作为 macOS target 创建：当前 macOS SDK 将它标记为 macOS unavailable，macOS 原型采用 `NEFilterDataProvider + NEFilterManager`。
 
@@ -24,6 +24,19 @@ xcodebuild -project ByteTraceNetworkExtensionLab.xcodeproj \
   -configuration Debug \
   CODE_SIGNING_ALLOWED=NO \
   build
+```
+
+运行前置检查（只读，不安装或启用扩展）：
+
+```bash
+zsh Scripts/preflight.sh
+```
+
+也可以传入已构建的 `.app` 路径，额外检查签名类型：
+
+```bash
+zsh Scripts/preflight.sh \
+  /path/to/ByteTraceNetworkExtensionLab.app
 ```
 
 纯数据模型测试：

@@ -55,12 +55,14 @@ final class FilterDataProvider: NEFilterDataProvider {
 
         let flowID = record.flowID.uuidString
         let visibility = record.metadata.visibility.rawValue
-        let inboundBytes = record.bytesInbound
-        let outboundBytes = record.bytesOutbound
         logger.info("Flow closed id=\(flowID, privacy: .public)")
         logger.info("Flow visibility=\(visibility, privacy: .public)")
-        logger.info("Flow bytes inbound=\(inboundBytes, privacy: .public)")
-        logger.info("Flow bytes outbound=\(outboundBytes, privacy: .public)")
+
+        if let event = FlowCloseEvent(record: record, observedAt: Date()),
+           let eventLine = try? event.jsonLine() {
+            // 结构化事件只进 private OSLog，避免把 hostname、URL 或 audit token 暴露为 public log。
+            logger.debug("flow_close_event=\(eventLine, privacy: .private)")
+        }
     }
 
     override func handleInboundData(

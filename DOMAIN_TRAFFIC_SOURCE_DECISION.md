@@ -43,16 +43,23 @@ Network Extension 需要相应的 entitlement；Apple 列出的能力包括 `con
 - 当前 ad-hoc `.app` 只能证明菜单栏应用本身可启动，不能证明 Network Extension entitlement、用户安装和系统扩展生命周期；
 - 因此本阶段不修改 `Package.swift`、打包脚本、正式 SQLite schema 或主窗口 UI。
 
+## 原型运行门禁记录
+
+2026-08-02 已在当前开发机执行只读前置检查：`security find-identity -v -p codesigning` 返回 `0 valid identities found`，本地 provisioning profile 目录也没有可用 profile。由此可以确认：当前 Network Extension Lab 可以继续编译和测试纯数据模型，但不能进入安装、用户授权或启用阶段。
+
+这不是 `NEFilterDataProvider` 代码编译失败，而是签名与 entitlement 前置条件未满足。可重复执行的检查位于 [NetworkExtensionLab/Scripts/preflight.sh](NetworkExtensionLab/Scripts/preflight.sh)；在获得 Apple Developer 签名身份和对应 Network Extension entitlement 前，不执行 `--save-disabled-config`，也不尝试修改系统网络配置。
+
 ## 第一条原型路线
 
 建立一个独立的 Xcode/System Extension 原型，先不连接正式 ByteTrace 数据库：
 
 1. 只申请一个最小的 Content Filter capability，Provider 对 flow 做明确的 pass-through 决策，不拦截、不修改内容；
 2. 记录最小字段：采样时间、source app audit token / source process audit token、解析后的 App 标识（若可得）、hostname 或远端 endpoint、可选 WebKit URL、方向、flow close 时的入站/出站字节和可见性状态；
-3. 默认不保存请求内容、Cookie、Header、查询参数和响应正文；URL 也只作为明确标注的可选字段；
-4. 用 WebKit 页面、`curl`、Telegram、Dia、`mihomo` 分别制造已知流量，与现有 `nettop` 应用级总量做同时间窗口对账；
-5. 覆盖 flow 复用、HTTPS、UDP/DNS、代理转发、网络切换、睡眠唤醒、Provider 停止和用户关闭；
-6. 只有在来源 App、hostname/URL 可见性、flow close 字节和权限体验都通过后，才设计正式 `domain_usage` 数据表。
+3. 以版本化 `flow_closed` 事件作为第一版对账边界，事件包含 flow 生命周期、可见性和入站/出站字节，但不把原始 audit token 写入 public log；
+4. 默认不保存请求内容、Cookie、Header、查询参数和响应正文；URL 也只作为明确标注的可选字段；
+5. 用 WebKit 页面、`curl`、Telegram、Dia、`mihomo` 分别制造已知流量，与现有 `nettop` 应用级总量做同时间窗口对账；
+6. 覆盖 flow 复用、HTTPS、UDP/DNS、代理转发、网络切换、睡眠唤醒、Provider 停止和用户关闭；
+7. 只有在来源 App、hostname/URL 可见性、flow close 字节和权限体验都通过后，才设计正式 `domain_usage` 数据表。
 
 ## 进入正式产品的门槛
 

@@ -69,4 +69,45 @@ final class FlowRecordTests: XCTestCase {
 
         XCTAssertEqual(metadata.visibility, .url)
     }
+
+    func testFlowCloseEventEncodesReconciliationFieldsWithoutAuditTokens() throws {
+        let flowID = UUID()
+        let metadata = FlowRecordMetadata(
+            sourceAppAuditTokenBase64: "audit-token",
+            sourceProcessAuditTokenBase64: "process-token",
+            resolvedBundleIdentifier: "com.example.App",
+            remoteHostname: "example.com",
+            remoteEndpoint: nil,
+            url: "https://example.com/path",
+            direction: .outbound
+        )
+        let record = FlowRecord(
+            flowID: flowID,
+            startedAt: Date(timeIntervalSince1970: 100),
+            metadata: metadata
+        ).closing(
+            at: Date(timeIntervalSince1970: 105),
+            bytesInbound: 128,
+            bytesOutbound: 256
+        )
+
+        let event = try XCTUnwrap(FlowCloseEvent(record: record, observedAt: Date(timeIntervalSince1970: 106)))
+        let line = try event.jsonLine()
+        let decoded = try JSONDecoder.flowRecordDecoder.decode(FlowCloseEvent.self, from: Data(line.utf8))
+
+        XCTAssertEqual(decoded, event)
+        XCTAssertEqual(decoded.event, "flow_closed")
+        XCTAssertEqual(decoded.schemaVersion, 1)
+        XCTAssertEqual(decoded.totalBytes, 384)
+        XCTAssertFalse(line.contains("audit-token"))
+        XCTAssertFalse(line.contains("process-token"))
+    }
+}
+
+private extension JSONDecoder {
+    static var flowRecordDecoder: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
 }
