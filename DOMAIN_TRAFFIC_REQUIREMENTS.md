@@ -55,6 +55,13 @@ swift run ByteTraceConnectionProbe --duration 5 --process codex
 
 当前决策：连接级 `nettop` 可以作为后续调查和未知流量诊断工具，但不能直接支撑 `domain_usage` 或域名流量排名。下一步应先针对代理转发、UDP/mDNS、连接生命周期和进程分组差异做专项对账；在差异收敛前，不接入正式数据库和 UI。
 
+本轮受控流量基线（浏览器产生普通网页请求，持续 45 秒）：
+
+- 完成 45 帧采集，1 帧基线，0 条 malformed row；
+- hostname 连接 182 条、IP 连接 355 条、未知连接 47 条；这里的 hostname 只是 `nettop` 名称解析结果，不等于已验证的域名流量；
+- 进程摘要与连接明细的绝对差异为 484,904 bytes，即 14.17%，仍为 `WARN`；
+- 主要差异来自 `mihomo`（253,166 bytes）、`Dia`（142,116 bytes）和 `Telegram`（79,271 bytes）；其中部分进程有摘要流量但没有对应 socket 明细，代理转发和连接生命周期仍需专项拆解。
+
 ## 产品定义
 
 第一版只考虑“应用 → 域名/主机 → 流量”的尽力而为明细，不承诺完整 URL：
