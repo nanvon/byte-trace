@@ -10,6 +10,10 @@ public struct NettopConnectionDelta: Equatable, Sendable {
     public let downloadBytes: Int64
     public let uploadBytes: Int64
 
+    public var endpointInfo: NettopEndpointInfo {
+        NettopEndpointClassifier.info(for: remoteEndpoint)
+    }
+
     public init(
         sampledAt: String,
         processName: String,

@@ -47,6 +47,7 @@ final class NettopConnectionCSVParserTests: XCTestCase {
         XCTAssertEqual(deltas.count, 1)
         XCTAssertEqual(deltas[0].processName, "Example.1")
         XCTAssertEqual(deltas[0].remoteEndpoint, "93.184.216.34:443")
+        XCTAssertEqual(deltas[0].endpointInfo, NettopEndpointInfo(kind: .ipAddress))
         XCTAssertEqual(deltas[0].interfaceName, "en0")
         XCTAssertEqual(deltas[0].state, "Established")
         XCTAssertEqual(deltas[0].downloadBytes, 10)
