@@ -12,6 +12,8 @@
 	<string>com.nanvon.ByteTrace</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleIconFile</key>
+	<string>ByteTrace.icns</string>
 	<key>CFBundleName</key>
 	<string>ByteTrace</string>
 	<key>CFBundlePackageType</key>

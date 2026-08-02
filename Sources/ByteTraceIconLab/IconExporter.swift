@@ -14,8 +14,12 @@ enum IconExporter {
         ("icon_512x512", 512, 1), ("icon_512x512@2x", 512, 2)
     ]
 
-    static func exportAll(spec appSpec: TraceMarkSpec, menuBarSpec: TraceMarkSpec) throws -> URL {
-        let root = FileManager.default
+    static func exportAll(
+        spec appSpec: TraceMarkSpec,
+        menuBarSpec: TraceMarkSpec,
+        outputRoot: URL? = nil
+    ) throws -> URL {
+        let root = outputRoot ?? FileManager.default
             .homeDirectoryForCurrentUser
             .appendingPathComponent("Desktop/ByteTraceIcon", isDirectory: true)
 

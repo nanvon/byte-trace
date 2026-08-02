@@ -12,6 +12,7 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 PLIST_SOURCE="$ROOT_DIR/Packaging/Info.plist"
+ICON_SOURCE="$ROOT_DIR/Packaging/Resources/ByteTrace.icns"
 SIGNING_IDENTITY="${BYTE_TRACE_SIGNING_IDENTITY:--}"
 SWIFT_TRIPLE="${BYTE_TRACE_SWIFT_TRIPLE:-}"
 
@@ -26,6 +27,10 @@ fi
 
 if [[ ! -f "$PLIST_SOURCE" ]]; then
     echo "missing packaging plist: $PLIST_SOURCE" >&2
+    exit 1
+fi
+if [[ ! -f "$ICON_SOURCE" ]]; then
+    echo "missing app icon: $ICON_SOURCE" >&2
     exit 1
 fi
 
@@ -47,6 +52,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$EXECUTABLE" "$MACOS_DIR/ByteTraceApp"
 cp "$PLIST_SOURCE" "$CONTENTS_DIR/Info.plist"
+cp "$ICON_SOURCE" "$RESOURCES_DIR/ByteTrace.icns"
 printf 'APPL????' > "$CONTENTS_DIR/PkgInfo"
 
 plutil -convert binary1 "$CONTENTS_DIR/Info.plist"
