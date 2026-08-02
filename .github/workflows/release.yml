@@ -93,13 +93,22 @@ jobs:
 
       - name: Generate SHA-256 checksums
         working-directory: release-assets
+        shell: bash
         run: |
-          find . -maxdepth 1 -type f -name '*.zip' -print0 \
-            | sort -z \
-            | xargs -0 shasum -a 256 > SHA256SUMS.txt
+          zip_files=()
+          while IFS= read -r -d '' file; do
+            zip_files+=("$file")
+          done < <(find . -type f -name '*.zip' -print0 | sort -z)
+          if (( ${#zip_files[@]} == 0 )); then
+            echo "no zip artifacts found under $(pwd)" >&2
+            find . -type f -print >&2
+            exit 1
+          fi
+          shasum -a 256 "${zip_files[@]}" > SHA256SUMS.txt
 
       - name: Create release and upload assets
         working-directory: release-assets
+        shell: bash
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
@@ -107,6 +116,16 @@ jobs:
             --title "ByteTrace ${GITHUB_REF_NAME}" \
             --notes "macOS 产物使用 ad-hoc 签名且未经过 Apple 公证，首次打开可能需要在系统设置中手动放行。" \
             --generate-notes
-          gh release upload "${GITHUB_REF_NAME}" ./*.zip ./*.sha256 SHA256SUMS.txt \
+
+          release_assets=()
+          while IFS= read -r -d '' file; do
+            release_assets+=("$file")
+          done < <(find . -type f \( -name '*.zip' -o -name '*.sha256' \) -print0 | sort -z)
+          if (( ${#release_assets[@]} == 0 )); then
+            echo "no release assets found under $(pwd)" >&2
+            find . -type f -print >&2
+            exit 1
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "${release_assets[@]}" SHA256SUMS.txt \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
