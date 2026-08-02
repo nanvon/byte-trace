@@ -55,24 +55,34 @@ jobs:
           BYTE_TRACE_SWIFT_TRIPLE: ${{ matrix.triple }}
         run: ./Scripts/package_app.sh
 
-      - name: Name release archive
+      - name: Name release archives
         id: archive
         env:
           ASSET_SUFFIX: ${{ matrix.asset_suffix }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          asset="dist/ByteTrace_${version}_${ASSET_SUFFIX}.zip"
-          mv dist/ByteTrace.zip "$asset"
-          shasum -a 256 "$asset" > "${asset%.zip}.sha256"
-          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          zip_asset="dist/ByteTrace_${version}_${ASSET_SUFFIX}.zip"
+          dmg_asset="dist/ByteTrace_${version}_${ASSET_SUFFIX}.dmg"
+          zip_checksum="${zip_asset%.zip}.sha256"
+          dmg_checksum="${dmg_asset%.dmg}.sha256"
+          mv dist/ByteTrace.zip "$zip_asset"
+          mv dist/ByteTrace.dmg "$dmg_asset"
+          shasum -a 256 "$zip_asset" > "$zip_checksum"
+          shasum -a 256 "$dmg_asset" > "$dmg_checksum"
+          echo "zip_asset=$zip_asset" >> "$GITHUB_OUTPUT"
+          echo "dmg_asset=$dmg_asset" >> "$GITHUB_OUTPUT"
+          echo "zip_checksum=$zip_checksum" >> "$GITHUB_OUTPUT"
+          echo "dmg_checksum=$dmg_checksum" >> "$GITHUB_OUTPUT"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
           name: byte-trace-${{ matrix.asset_suffix }}
           path: |
-            ${{ steps.archive.outputs.asset }}
-            ${{ steps.archive.outputs.asset }}.sha256
+            ${{ steps.archive.outputs.zip_asset }}
+            ${{ steps.archive.outputs.zip_checksum }}
+            ${{ steps.archive.outputs.dmg_asset }}
+            ${{ steps.archive.outputs.dmg_checksum }}
           if-no-files-found: error
 
   publish:
@@ -95,16 +105,16 @@ jobs:
         working-directory: release-assets
         shell: bash
         run: |
-          zip_files=()
+          package_files=()
           while IFS= read -r -d '' file; do
-            zip_files+=("$file")
-          done < <(find . -type f -name '*.zip' -print0 | sort -z)
-          if (( ${#zip_files[@]} == 0 )); then
-            echo "no zip artifacts found under $(pwd)" >&2
+            package_files+=("$file")
+          done < <(find . -type f \( -name '*.zip' -o -name '*.dmg' \) -print0 | sort -z)
+          if (( ${#package_files[@]} == 0 )); then
+            echo "no package artifacts found under $(pwd)" >&2
             find . -type f -print >&2
             exit 1
           fi
-          shasum -a 256 "${zip_files[@]}" > SHA256SUMS.txt
+          shasum -a 256 "${package_files[@]}" > SHA256SUMS.txt
 
       - name: Create release and upload assets
         working-directory: release-assets
@@ -120,7 +130,7 @@ jobs:
           release_assets=()
           while IFS= read -r -d '' file; do
             release_assets+=("$file")
-          done < <(find . -type f \( -name '*.zip' -o -name '*.sha256' \) -print0 | sort -z)
+          done < <(find . -type f \( -name '*.zip' -o -name '*.dmg' -o -name '*.sha256' \) -print0 | sort -z)
           if (( ${#release_assets[@]} == 0 )); then
             echo "no release assets found under $(pwd)" >&2
             find . -type f -print >&2

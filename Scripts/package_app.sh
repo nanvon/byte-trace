@@ -7,6 +7,7 @@ ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/ByteTrace.app"
 ZIP_PATH="$DIST_DIR/ByteTrace.zip"
+DMG_PATH="$DIST_DIR/ByteTrace.dmg"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -70,6 +71,21 @@ rm -f "$ZIP_PATH"
 ditto -c -k --keepParent --norsrc "$APP_DIR" "$ZIP_PATH"
 
 echo "[package] app=$APP_DIR"
-echo "[package] archive=$ZIP_PATH"
+echo "[package] zip=$ZIP_PATH"
+
+DMG_STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ByteTrace-dmg.XXXXXX")"
+trap 'rm -rf "$DMG_STAGING_DIR"' EXIT
+ditto "$APP_DIR" "$DMG_STAGING_DIR/ByteTrace.app"
+ln -s /Applications "$DMG_STAGING_DIR/Applications"
+
+rm -f "$DMG_PATH"
+hdiutil create \
+    -volname "ByteTrace" \
+    -srcfolder "$DMG_STAGING_DIR" \
+    -ov \
+    -format UDZO \
+    "$DMG_PATH"
+
+echo "[package] dmg=$DMG_PATH"
 echo "[package] architecture=$(file -b "$MACOS_DIR/ByteTraceApp")"
 echo "[package] signature=$(codesign -dv --verbose=1 "$APP_DIR" 2>&1 | awk -F= '/^(Authority|Signature)=/ { print; exit }')"

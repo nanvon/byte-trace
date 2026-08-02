@@ -42,7 +42,7 @@ swift run ByteTraceApp
 ~/Library/Application Support/<bundle identifier>/usage.sqlite3
 ```
 
-`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 和独立主窗口：popover 提供今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态和刷新入口；主窗口提供“概览 / 设置”导航、时间范围选择、趋势图和应用详情初版。数据库位置、登录时启动、清空统计、分钟级数据积累状态和可选保留策略均已接入。`Scripts/package_app.sh` 可生成 ad-hoc 签名的 `.app` 和 `ByteTrace.zip`，并已完成本机 LaunchServices 启动验证。
+`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 和独立主窗口：popover 提供今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态和刷新入口；主窗口提供“概览 / 设置”导航、时间范围选择、趋势图和应用详情初版。数据库位置、登录时启动、清空统计、分钟级数据积累状态和可选保留策略均已接入。`Scripts/package_app.sh` 可生成 ad-hoc 签名的 `.app`、`ByteTrace.dmg` 和 `ByteTrace.zip`，并已完成本机 LaunchServices 启动验证。
 
 ## 界面架构约定
 
@@ -83,13 +83,13 @@ ByteTrace 将“看到了多少流量”扩展为“在什么时间段、由哪�
 
 访问明细涉及更高的隐私、权限、存储量和性能成本，应作为独立的可选能力评估，默认本地保存、明确告知采集范围，并在数据源和权限方案确定后再实现。详细的数据源评估、验收门和原型步骤见 [DOMAIN_TRAFFIC_REQUIREMENTS.md](DOMAIN_TRAFFIC_REQUIREMENTS.md)；候选 Network Extension 路线见 [DOMAIN_TRAFFIC_SOURCE_DECISION.md](DOMAIN_TRAFFIC_SOURCE_DECISION.md)。当前继续以 `nettop` 的应用级统计作为稳定基线，不在本阶段接入域名采集。
 
-`Scripts/package_app.sh` 会将 Release 可执行文件封装为 `dist/ByteTrace.app`，写入菜单栏应用所需的 `Info.plist`，完成严格签名校验后生成 `dist/ByteTrace.zip`。默认使用 ad-hoc 签名；GitHub Release 固定使用 `-` 身份，不读取 Apple 证书或签名 Secrets。
+`Scripts/package_app.sh` 会将 Release 可执行文件封装为 `dist/ByteTrace.app`，写入菜单栏应用所需的 `Info.plist`，完成严格签名校验后同时生成 `dist/ByteTrace.dmg` 和 `dist/ByteTrace.zip`。DMG 内含 `/Applications` 拖拽快捷方式。默认使用 ad-hoc 签名；GitHub Release 固定使用 `-` 身份，不读取 Apple 证书或签名 Secrets。
 
 GitHub Actions 已按 CI / Release 分离：
 
 - `.github/workflows/ci.yml`：在 macOS Apple Silicon 与 Intel runner 上执行 Swift build、Swift tests、打包输入校验和本地 ad-hoc 包构建；
-- `.github/workflows/release.yml`：推送与版本一致的 `v*` tag 后，构建两个 macOS 架构，使用 ad-hoc 签名，生成 zip 和 SHA-256 checksums，再创建 GitHub Release；
-- `Scripts/check-release-version.py`：要求 tag 必须等于 `Packaging/Info.plist` 的 `CFBundleShortVersionString`，例如当前版本 `0.1.3` 必须推送 `v0.1.3`。
+- `.github/workflows/release.yml`：推送与版本一致的 `v*` tag 后，构建两个 macOS 架构，使用 ad-hoc 签名，生成 DMG、ZIP 和 SHA-256 checksums，再创建 GitHub Release；
+- `Scripts/check-release-version.py`：要求 tag 必须等于 `Packaging/Info.plist` 的 `CFBundleShortVersionString`，例如当前版本 `0.1.4` 必须推送 `v0.1.4`。
 
 与 `cc-trace` 一致，ByteTrace Release 不使用 Apple Developer ID 证书，也不执行 Apple 公证。macOS 产物首次打开可能需要在系统设置中手动放行；这属于 ad-hoc 签名的预期行为。
 

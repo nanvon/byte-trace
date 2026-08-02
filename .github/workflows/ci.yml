@@ -54,3 +54,9 @@ jobs:
           BYTE_TRACE_SIGNING_IDENTITY: "-"
           BYTE_TRACE_SWIFT_TRIPLE: ${{ matrix.triple }}
         run: ./Scripts/package_app.sh
+
+      - name: Validate generated packages
+        run: |
+          test -s dist/ByteTrace.zip
+          test -s dist/ByteTrace.dmg
+          hdiutil imageinfo dist/ByteTrace.dmg >/dev/null
