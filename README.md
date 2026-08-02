@@ -8,6 +8,8 @@ ByteTrace 是面向个人 macOS 的菜单栏应用，应用级流量统计 MVP �
 swift build
 swift test
 swift run ByteTraceProbe --duration 15
+# 连接级只读原型，不写入正式数据库
+swift run ByteTraceConnectionProbe --duration 5
 # macOS 菜单栏原型
 swift run ByteTraceApp
 # 生成可从 Finder 启动的 ad-hoc 签名包

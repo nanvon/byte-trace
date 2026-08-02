@@ -20,16 +20,30 @@ final class NettopConnectionCSVParserTests: XCTestCase {
         XCTAssertEqual(parser.malformedRowCount, 0)
         XCTAssertEqual(events.count, 2)
 
-        guard case let .frameCompleted(_, baselineDeltas, isBaseline) = events[0] else {
+        guard case let .frameCompleted(_, baselineSummaries, baselineDeltas, isBaseline) = events[0] else {
             return XCTFail("expected baseline frame")
         }
         XCTAssertTrue(isBaseline)
         XCTAssertTrue(baselineDeltas.isEmpty)
+        XCTAssertEqual(baselineSummaries, [
+            NettopProcessSummary(
+                processName: "Example.1",
+                downloadBytes: 100,
+                uploadBytes: 50
+            )
+        ])
 
-        guard case let .frameCompleted(_, deltas, isSecondBaseline) = events[1] else {
+        guard case let .frameCompleted(_, summaries, deltas, isSecondBaseline) = events[1] else {
             return XCTFail("expected collecting frame")
         }
         XCTAssertFalse(isSecondBaseline)
+        XCTAssertEqual(summaries, [
+            NettopProcessSummary(
+                processName: "Example.1",
+                downloadBytes: 10,
+                uploadBytes: 20
+            )
+        ])
         XCTAssertEqual(deltas.count, 1)
         XCTAssertEqual(deltas[0].processName, "Example.1")
         XCTAssertEqual(deltas[0].remoteEndpoint, "93.184.216.34:443")
@@ -52,14 +66,14 @@ final class NettopConnectionCSVParserTests: XCTestCase {
         var parser = NettopConnectionCSVParser()
         let events = parser.consume(Data(input.utf8)) + parser.finish()
 
-        guard case let .frameCompleted(rowCount, deltas, isBaseline) = events[0] else {
+        guard case let .frameCompleted(rowCount, _, deltas, isBaseline) = events[0] else {
             return XCTFail("expected baseline frame")
         }
         XCTAssertEqual(rowCount, 1)
         XCTAssertTrue(isBaseline)
         XCTAssertTrue(deltas.isEmpty)
 
-        guard case let .frameCompleted(_, secondDeltas, secondIsBaseline) = events[1] else {
+        guard case let .frameCompleted(_, _, secondDeltas, secondIsBaseline) = events[1] else {
             return XCTFail("expected collecting frame")
         }
         XCTAssertFalse(secondIsBaseline)
@@ -95,5 +109,26 @@ final class NettopConnectionCSVParserTests: XCTestCase {
             [.incompatibleSchema(missingColumns: ["interface", "state"])]
         )
         XCTAssertEqual(parser.state, .incompatible)
+    }
+
+    func testEndpointClassifierSeparatesHostnameIPAddressAndUnknown() {
+        XCTAssertEqual(
+            NettopEndpointClassifier.classify("example.com:443"),
+            .hostname
+        )
+        XCTAssertEqual(
+            NettopEndpointClassifier.classify("93.184.216.34:443"),
+            .ipAddress
+        )
+        XCTAssertEqual(
+            NettopEndpointClassifier.classify("2408:8756:3af0:2042::e.8080"),
+            .ipAddress
+        )
+        XCTAssertEqual(
+            NettopEndpointClassifier.classify("[::1]:443"),
+            .ipAddress
+        )
+        XCTAssertEqual(NettopEndpointClassifier.classify("*:*"), .unknown)
+        XCTAssertEqual(NettopEndpointClassifier.classify(nil), .unknown)
     }
 }

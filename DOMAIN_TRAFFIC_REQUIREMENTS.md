@@ -32,6 +32,29 @@ ByteTrace 当前唯一的正式采集器是 `/usr/bin/nettop`：
 
 因此，第一步可以先稳定“应用 → 连接端点/IP → 字节”的只读解析原型，但它仍不等于域名流量：hostname 解析、代理转发、连接复用和未知流量都需要独立对账。
 
+仓库提供 `ByteTraceConnectionProbe` 作为独立验证入口：
+
+```bash
+swift run ByteTraceConnectionProbe --duration 5
+swift run ByteTraceConnectionProbe --duration 5 --numeric
+swift run ByteTraceConnectionProbe --duration 5 --process codex
+```
+
+探针使用不带 `-P` 的 `nettop` 连接级输出，只在内存中统计 hostname、IP、未知端点和进程摘要/连接明细的字节差异，不写入正式 SQLite、不修改应用级总量，也不显示在 UI。`--numeric` 用于关闭名称解析，`--process` 用于缩小到一个进程进行对账。
+
+### 2026-08-02 实机探针结果
+
+在同一台 macOS 上分别运行 5 秒，两个结果是独立时间窗口，不能直接比较字节总量：
+
+| 模式 | hostname 连接 | IP 连接 | 未知连接 | 进程/连接字节差异 | 结果 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 默认名称解析 | 9 | 33 | 13 | 17.11% | `WARN` |
+| `--numeric` | 0 | 43 | 9 | 25.97% | `WARN` |
+
+默认模式的主要差异来自 `mihomo`、`Telegram` 和 `mDNSResponder`；numeric 对照中还出现过 1 条瞬时格式异常。探针本身能够完成 5 帧采集、首帧基线和端点分类，但连接明细与进程摘要没有达到当前设定的 5% 对账阈值。
+
+当前决策：连接级 `nettop` 可以作为后续调查和未知流量诊断工具，但不能直接支撑 `domain_usage` 或域名流量排名。下一步应先针对代理转发、UDP/mDNS、连接生命周期和进程分组差异做专项对账；在差异收敛前，不接入正式数据库和 UI。
+
 ## 产品定义
 
 第一版只考虑“应用 → 域名/主机 → 流量”的尽力而为明细，不承诺完整 URL：

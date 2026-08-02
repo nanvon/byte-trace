@@ -31,6 +31,22 @@ public struct NettopConnectionDelta: Equatable, Sendable {
     }
 }
 
+public struct NettopProcessSummary: Equatable, Sendable {
+    public let processName: String
+    public let downloadBytes: Int64
+    public let uploadBytes: Int64
+
+    public init(
+        processName: String,
+        downloadBytes: Int64,
+        uploadBytes: Int64
+    ) {
+        self.processName = processName
+        self.downloadBytes = downloadBytes
+        self.uploadBytes = uploadBytes
+    }
+}
+
 public enum NettopConnectionParserState: Equatable, Sendable {
     case waitingForHeader
     case baseline
@@ -41,6 +57,7 @@ public enum NettopConnectionParserState: Equatable, Sendable {
 public enum NettopConnectionParserEvent: Equatable, Sendable {
     case frameCompleted(
         rowCount: Int,
+        processSummaries: [NettopProcessSummary],
         deltas: [NettopConnectionDelta],
         isBaseline: Bool
     )
@@ -71,13 +88,14 @@ public struct NettopConnectionCSVParser: Sendable {
     }
 
     private enum ParsedLine: Sendable {
-        case process(name: String)
+        case process(summary: NettopProcessSummary)
         case connection(ParsedRow)
     }
 
     private var lineBuffer = Data()
     private var schema: Schema?
     private var currentRows: [ParsedRow] = []
+    private var currentProcessSummaries: [NettopProcessSummary] = []
     private var currentProcessName: String?
     private var hasBaseline = false
     private var didFinish = false
@@ -139,8 +157,9 @@ public struct NettopConnectionCSVParser: Sendable {
         }
 
         switch parsedLine {
-        case let .process(name):
-            currentProcessName = name
+        case let .process(summary):
+            currentProcessName = summary.processName
+            currentProcessSummaries.append(summary)
         case let .connection(row):
             currentRows.append(row)
         }
@@ -170,12 +189,15 @@ public struct NettopConnectionCSVParser: Sendable {
     private mutating func completeCurrentFrame() -> [NettopConnectionParserEvent] {
         guard schema != nil else {
             currentRows.removeAll(keepingCapacity: true)
+            currentProcessSummaries.removeAll(keepingCapacity: true)
             currentProcessName = nil
             return []
         }
 
         let rows = currentRows
+        let processSummaries = currentProcessSummaries
         currentRows.removeAll(keepingCapacity: true)
+        currentProcessSummaries.removeAll(keepingCapacity: true)
         currentProcessName = nil
         completeFrameCount += 1
 
@@ -205,6 +227,7 @@ public struct NettopConnectionCSVParser: Sendable {
         return [
             .frameCompleted(
                 rowCount: rows.count,
+                processSummaries: processSummaries,
                 deltas: deltas,
                 isBaseline: isBaseline
             )
@@ -257,11 +280,22 @@ public struct NettopConnectionCSVParser: Sendable {
 
         guard fields[schema.interfaceIndex].isEmpty,
               fields[schema.stateIndex].isEmpty,
-              Self.parseCounter(fields[schema.bytesInIndex], emptyValueIsZero: false) != nil,
-              Self.parseCounter(fields[schema.bytesOutIndex], emptyValueIsZero: false) != nil else {
+              let downloadBytes = Self.parseCounter(
+                  fields[schema.bytesInIndex],
+                  emptyValueIsZero: false
+              ), let uploadBytes = Self.parseCounter(
+                  fields[schema.bytesOutIndex],
+                  emptyValueIsZero: false
+              ) else {
             return nil
         }
-        return .process(name: connection)
+        return .process(
+            summary: NettopProcessSummary(
+                processName: connection,
+                downloadBytes: downloadBytes,
+                uploadBytes: uploadBytes
+            )
+        )
     }
 
     private static func makeSchema(from header: [String]) -> Schema? {
