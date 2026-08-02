@@ -1,3 +1,5 @@
+import AppKit
+import UniformTypeIdentifiers
 import SwiftUI
 
 struct SettingsView: View {
@@ -5,6 +7,7 @@ struct SettingsView: View {
     @State private var isShowingClearConfirmation = false
     @State private var isShowingHostClearConfirmation = false
     @State private var pendingRetentionPolicy: UsageRetentionPolicy?
+    @State private var exportMessage: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,6 +50,19 @@ struct SettingsView: View {
                         model.revealDatabase()
                     } label: {
                         Label("在 Finder 中显示", systemImage: "folder")
+                    }
+
+                    Button {
+                        exportCurrentRange()
+                    } label: {
+                        Label("导出当前范围 JSON", systemImage: "square.and.arrow.up")
+                    }
+
+                    if let exportMessage {
+                        Text(exportMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                     }
 
                     Button(role: .destructive) {
@@ -175,5 +191,21 @@ struct SettingsView: View {
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+
+    private func exportCurrentRange() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "ByteTrace-\(model.selectedRange.rawValue).json"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try model.exportCurrentRange(to: url)
+                exportMessage = "已导出：\(url.path)"
+            } catch {
+                exportMessage = "导出失败：\(error.localizedDescription)"
+            }
+        }
     }
 }

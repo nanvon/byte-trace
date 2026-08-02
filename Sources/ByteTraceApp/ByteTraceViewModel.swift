@@ -461,6 +461,74 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
+    func exportCurrentRange(to url: URL) throws {
+        let end = Date()
+        let start = selectedRange.startDate(
+            relativeTo: end,
+            calendar: Calendar.autoupdatingCurrent
+        )
+        let hostResult = hostUsageResult ?? NettopHostUsageQuery.summarize(
+            [],
+            formalTotalBytes: selectedRangeTotals.totalBytes
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        let document = ByteTraceExportDocument(
+            formatVersion: 1,
+            product: "ByteTrace",
+            exportedAt: end,
+            range: ByteTraceExportDocument.Range(
+                id: selectedRange.rawValue,
+                title: selectedRange.title,
+                start: start,
+                end: end
+            ),
+            applicationUsage: rangeRecords.map {
+                ByteTraceExportDocument.ApplicationUsage(
+                    day: $0.day,
+                    appKey: $0.appKey,
+                    displayName: $0.displayName,
+                    category: $0.category.rawValue,
+                    bundleID: $0.bundleID,
+                    bundlePath: $0.bundlePath,
+                    executablePath: $0.executablePath,
+                    downloadBytes: $0.downloadBytes,
+                    uploadBytes: $0.uploadBytes,
+                    totalBytes: totalBytes(for: $0),
+                    sampleCount: $0.sampleCount
+                )
+            },
+            hostnameExperiment: ByteTraceExportDocument.HostExperiment(
+                note: "连接级 nettop 实验数据，仅展示直接观察到的 hostname；IP-only、缺失名称和无法归属的流量归入无法识别/其他。",
+                coverage: ByteTraceExportDocument.HostCoverage(
+                    visibleHostnameBytes: hostResult.coverage.visibleHostnameBytes,
+                    unrecognizedBytes: hostResult.coverage.unrecognizedBytes,
+                    observedBytes: hostResult.coverage.observedBytes,
+                    formalTotalBytes: hostResult.coverage.formalTotalBytes,
+                    observedVisibilityRatio: hostResult.coverage.observedVisibilityRatio,
+                    formalVisibilityRatio: hostResult.coverage.formalVisibilityRatio
+                ),
+                rows: hostResult.rows.map {
+                    ByteTraceExportDocument.HostUsage(
+                        appKey: $0.appKey,
+                        displayName: $0.displayName,
+                        endpointKind: $0.endpointKind.rawValue,
+                        hostname: $0.hostname,
+                        firstSampleAt: $0.firstSampleAt,
+                        lastSampleAt: $0.lastSampleAt,
+                        connectionCount: $0.connectionCount,
+                        downloadBytes: $0.downloadBytes,
+                        uploadBytes: $0.uploadBytes,
+                        totalBytes: $0.totalBytes
+                    )
+                }
+            )
+        )
+        try encoder.encode(document).write(to: url, options: .atomic)
+    }
+
     func setLaunchAtLogin(_ enabled: Bool) {
         do {
             if enabled {
