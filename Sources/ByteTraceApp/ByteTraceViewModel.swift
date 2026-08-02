@@ -147,8 +147,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var rangeRecords: [DailyUsageRecord] = []
     @Published private(set) var rangeTimeline: [UsageTimelinePoint] = []
     @Published private(set) var bucketStats: UsageBucketStats?
+    @Published private(set) var hostUsageResult: NettopHostUsageQueryResult?
     private(set) var rangeBuckets: [UsageBucketRecord] = []
     private var dailyRangeRecords: [DailyUsageRecord] = []
+    private var rangeHostUsageRecords: [NettopHostUsageRecord] = []
     @Published private(set) var launchAtLoginEnabled: Bool
     @Published var showsSystemProcesses: Bool {
         didSet {
@@ -344,6 +346,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeTimeline = []
             bucketStats = nil
             rangeBuckets = []
+            hostUsageResult = nil
+            rangeHostUsageRecords = []
             return
         }
 
@@ -363,6 +367,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeRecords = []
             rangeTimeline = []
             rangeBuckets = []
+            hostUsageResult = nil
+            rangeHostUsageRecords = []
             return
         }
 
@@ -390,6 +396,22 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
     }
 
+    func hostUsage(for appKey: String) -> NettopHostUsageQueryResult? {
+        guard hostUsageResult != nil else { return nil }
+
+        let records = rangeHostUsageRecords.filter { $0.appKey == appKey }
+        let formalTotalBytes = totals(
+            from: rangeRecords.filter {
+                $0.appKey == appKey && $0.category != .proxyTransport
+            }
+        ).totalBytes
+        return NettopHostUsageQuery.summarize(
+            records,
+            appKey: appKey,
+            formalTotalBytes: formalTotalBytes
+        )
+    }
+
     func clearAllData() {
         guard let store, let aggregator else { return }
 
@@ -410,6 +432,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             )
             rangeBuckets = []
             dailyRangeRecords = []
+            rangeHostUsageRecords = []
+            hostUsageResult = nil
             lastRetentionCleanupDay = nil
             lastError = nil
         } catch {
@@ -935,6 +959,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeTimeline = makeTimeline(
                 from: buckets.filter { $0.category != .proxyTransport }
             )
+            try loadHostUsage(from: start, to: end, store: store)
             return
         }
 
@@ -953,6 +978,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeBuckets = []
             rangeTimeline = makeTimeline(from: daily.filter { $0.category != .proxyTransport })
         }
+        try loadHostUsage(from: start, to: end, store: store)
+    }
+
+    private func loadHostUsage(from start: Date, to end: Date, store: UsageStore) throws {
+        let records = try store.hostUsage(from: start, to: end)
+        rangeHostUsageRecords = records
+        hostUsageResult = NettopHostUsageQuery.summarize(
+            records,
+            formalTotalBytes: selectedRangeTotals.totalBytes
+        )
     }
 
     private func aggregateRecords(_ records: [DailyUsageRecord]) -> [DailyUsageRecord] {
