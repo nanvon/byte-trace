@@ -285,14 +285,23 @@ public final class UsageStore: @unchecked Sendable {
     }
 
     public func purgeBuckets(before date: Date) throws -> Int64 {
-        let statement = try database.prepare(
-            "DELETE FROM usage_buckets WHERE bucket_start < ?;"
-        )
-        defer { sqlite3_finalize(statement) }
-
-        try database.bind(Self.epochSeconds(date), at: 1, in: statement)
-        try database.stepDone(statement)
-        return database.changes()
+        try database.execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let usageDeleted = try deleteBuckets(
+                from: "usage_buckets",
+                before: date
+            )
+            let hostDeleted = try deleteBuckets(
+                from: "host_usage_buckets",
+                before: date
+            )
+            try database.execute("COMMIT;")
+            let result = usageDeleted.addingReportingOverflow(hostDeleted)
+            return result.overflow ? Int64.max : result.partialValue
+        } catch {
+            try? database.execute("ROLLBACK;")
+            throw error
+        }
     }
 
     public func clearAll() throws {
@@ -542,6 +551,17 @@ public final class UsageStore: @unchecked Sendable {
         try database.bind(record.downloadBytes, at: 9, in: statement)
         try database.bind(record.uploadBytes, at: 10, in: statement)
         try database.stepDone(statement)
+    }
+
+    private func deleteBuckets(from table: String, before date: Date) throws -> Int64 {
+        let statement = try database.prepare(
+            "DELETE FROM \(table) WHERE bucket_start < ?;"
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(Self.epochSeconds(date), at: 1, in: statement)
+        try database.stepDone(statement)
+        return database.changes()
     }
 
     private static func timestamp(_ date: Date) -> String {

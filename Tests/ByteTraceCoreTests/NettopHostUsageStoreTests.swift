@@ -125,6 +125,48 @@ final class NettopHostUsageStoreTests: XCTestCase {
         )
     }
 
+    func testRetentionPurgeAlsoRemovesOldHostUsageBuckets() throws {
+        let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let oldBucket = Date(timeIntervalSince1970: 60)
+        let currentBucket = Date(timeIntervalSince1970: 120)
+
+        try store.applyHostUsage([
+            makeRecord(
+                bucketStart: oldBucket,
+                firstSampleAt: oldBucket,
+                lastSampleAt: oldBucket,
+                connectionCount: 1,
+                downloadBytes: 10,
+                uploadBytes: 1,
+                displayName: "Old"
+            ),
+            makeRecord(
+                bucketStart: currentBucket,
+                firstSampleAt: currentBucket,
+                lastSampleAt: currentBucket,
+                connectionCount: 1,
+                downloadBytes: 20,
+                uploadBytes: 2,
+                displayName: "Current"
+            )
+        ])
+
+        XCTAssertEqual(try store.purgeBuckets(before: currentBucket), 1)
+        XCTAssertTrue(
+            try store.hostUsage(
+                from: oldBucket,
+                to: currentBucket
+            ).isEmpty
+        )
+        XCTAssertEqual(
+            try store.hostUsage(
+                from: currentBucket,
+                to: currentBucket.addingTimeInterval(60)
+            ).first?.totalBytes,
+            22
+        )
+    }
+
     private func makeRecord(
         bucketStart: Date,
         firstSampleAt: Date,
