@@ -210,6 +210,7 @@ private struct AppDetailView: View {
                     appHeader(record)
                     appStats(record)
                     appTimeline
+                    appHostUsage
                 } else {
                     Text("当前时间范围内没有这个应用的统计数据")
                         .foregroundStyle(.secondary)
@@ -219,6 +220,59 @@ private struct AppDetailView: View {
             .padding(24)
         }
         .navigationTitle(record?.displayName ?? "应用详情")
+    }
+
+    @ViewBuilder
+    private var appHostUsage: some View {
+        if let result = model.hostUsage(for: appKey) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("可见主机名")
+                        .font(.title3.weight(.semibold))
+                    Text("实验数据")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Text("覆盖率 \(percent(result.coverage.formalVisibilityRatio))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("仅展示能归属到当前应用的连接级主机名；IP-only、缺失名称和未归属流量不会归入此应用。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if result.rows.isEmpty {
+                    Text("当前时间范围内暂无可见主机名数据")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 18)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(result.rows.enumerated()), id: \.offset) { index, row in
+                            HostUsageRow(row: row)
+                            if index < result.rows.count - 1 {
+                                Divider()
+                                    .padding(.leading, 42)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .background(
+                        .quaternary.opacity(0.35),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
+                }
+            }
+            .padding(16)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+
+    private func percent(_ ratio: Double?) -> String {
+        guard let ratio else { return "—" }
+        return ratio.formatted(.percent.precision(.fractionLength(0)))
     }
 
     private func appHeader(_ record: DailyUsageRecord) -> some View {

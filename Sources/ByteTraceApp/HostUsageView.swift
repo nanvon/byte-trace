@@ -179,7 +179,7 @@ private struct HostUsageMetricCard: View {
     }
 }
 
-private struct HostUsageRow: View {
+struct HostUsageRow: View {
     let row: NettopHostUsageRank
 
     var body: some View {
