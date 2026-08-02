@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/ByteTrace.app"
+ZIP_PATH="$DIST_DIR/ByteTrace.zip"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -48,6 +49,7 @@ cp "$PLIST_SOURCE" "$CONTENTS_DIR/Info.plist"
 printf 'APPL????' > "$CONTENTS_DIR/PkgInfo"
 
 plutil -convert binary1 "$CONTENTS_DIR/Info.plist"
+xattr -cr "$APP_DIR"
 
 echo "[package] signing with identity: $SIGNING_IDENTITY"
 CODE_SIGN_ARGS=(
@@ -64,6 +66,10 @@ codesign "${CODE_SIGN_ARGS[@]}" "$APP_DIR"
 
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
+rm -f "$ZIP_PATH"
+ditto -c -k --keepParent --norsrc "$APP_DIR" "$ZIP_PATH"
+
 echo "[package] app=$APP_DIR"
+echo "[package] archive=$ZIP_PATH"
 echo "[package] architecture=$(file -b "$MACOS_DIR/ByteTraceApp")"
 echo "[package] signature=$(codesign -dv --verbose=1 "$APP_DIR" 2>&1 | awk -F= '/^(Authority|Signature)=/ { print; exit }')"
