@@ -1,0 +1,568 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0A0AFC079027974FB5EBCD01 /* FlowRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42FF942E14B30AE82B7299C1 /* FlowRecord.swift */; };
+		1182DFF62257025880F930F9 /* FilterDataProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59778249FFCA44F88B78C1F6 /* FilterDataProvider.swift */; };
+		85F8E87400AF20B2CC12BE64 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8CAE5BC0670F8E892D7B1BE0 /* NetworkExtension.framework */; };
+		86B44C2416C1266B8C841A5D /* FlowRecordTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78FF8AEB59A0FB53E8B636A2 /* FlowRecordTests.swift */; };
+		B1B3775B50F61BA21C80D5A3 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8CAE5BC0670F8E892D7B1BE0 /* NetworkExtension.framework */; };
+		D34D2D57F920CC87E5E0B2E4 /* FlowRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42FF942E14B30AE82B7299C1 /* FlowRecord.swift */; };
+		D91B99A19779562A713F1951 /* ByteTraceFilterProvider.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 966F242A375FC6AA2234A44C /* ByteTraceFilterProvider.systemextension */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		F24501E46A874F9A351D90EE /* NetworkExtensionLabHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEBD2CD872CC6D6DCA806C86 /* NetworkExtensionLabHost.swift */; };
+		FC61E7790C2B9213B2CA8188 /* FlowRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42FF942E14B30AE82B7299C1 /* FlowRecord.swift */; };
+		FE9F2C609C0D2F9024B909BF /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FF62B20D47AF28C0C8FA9513 /* XCTest.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		8D2AAF0DEE4C689AC3462D2A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 335F9423EAA2E7B4AEC57AD5 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9CEAAED044319E7FF8E68EB9;
+			remoteInfo = ByteTraceFilterProvider;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		52BF7D32EFAA7A6D86D15F8E /* Embed System Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(SYSTEM_EXTENSIONS_FOLDER_PATH)";
+			dstSubfolderSpec = 16;
+			files = (
+				D91B99A19779562A713F1951 /* ByteTraceFilterProvider.systemextension in Embed System Extensions */,
+			);
+			name = "Embed System Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		2BA67E2C713D864AA696D933 /* FilterProvider.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FilterProvider.entitlements; sourceTree = "<group>"; };
+		42FF942E14B30AE82B7299C1 /* FlowRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowRecord.swift; sourceTree = "<group>"; };
+		59778249FFCA44F88B78C1F6 /* FilterDataProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilterDataProvider.swift; sourceTree = "<group>"; };
+		5E5AF8E5C066C6608ED08CAC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		7178D67C25B3A6A43832AB22 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		78FF8AEB59A0FB53E8B636A2 /* FlowRecordTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowRecordTests.swift; sourceTree = "<group>"; };
+		8CAE5BC0670F8E892D7B1BE0 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
+		953E07F86F1EC9E040DC7AAF /* ByteTraceNetworkExtensionLab.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ByteTraceNetworkExtensionLab.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		966F242A375FC6AA2234A44C /* ByteTraceFilterProvider.systemextension */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = ByteTraceFilterProvider.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
+		A334A0E2CCC2385FFFAA05C0 /* Host.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Host.entitlements; sourceTree = "<group>"; };
+		EEBD2CD872CC6D6DCA806C86 /* NetworkExtensionLabHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkExtensionLabHost.swift; sourceTree = "<group>"; };
+		F3711EA246A4C4966446A291 /* ByteTraceNetworkExtensionLabTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ByteTraceNetworkExtensionLabTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		FF62B20D47AF28C0C8FA9513 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		29F8E73E08AE8E8F2D5C898F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FE9F2C609C0D2F9024B909BF /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		97FE1FB8263EE43214E8DA3F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				85F8E87400AF20B2CC12BE64 /* NetworkExtension.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BE2518A0BA80D528C2B038E4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1B3775B50F61BA21C80D5A3 /* NetworkExtension.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		25C7141200CA50E583C3CF54 /* FilterProvider */ = {
+			isa = PBXGroup;
+			children = (
+				59778249FFCA44F88B78C1F6 /* FilterDataProvider.swift */,
+				2BA67E2C713D864AA696D933 /* FilterProvider.entitlements */,
+				5E5AF8E5C066C6608ED08CAC /* Info.plist */,
+			);
+			path = FilterProvider;
+			sourceTree = "<group>";
+		};
+		5FD16100AFC1C7CE3258B9DF /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				78FF8AEB59A0FB53E8B636A2 /* FlowRecordTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		91F51D3F49EE81A61423BC82 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				8CAE5BC0670F8E892D7B1BE0 /* NetworkExtension.framework */,
+				FF62B20D47AF28C0C8FA9513 /* XCTest.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		9D71BE3E8F9819AE930E7126 /* Host */ = {
+			isa = PBXGroup;
+			children = (
+				A334A0E2CCC2385FFFAA05C0 /* Host.entitlements */,
+				7178D67C25B3A6A43832AB22 /* Info.plist */,
+				EEBD2CD872CC6D6DCA806C86 /* NetworkExtensionLabHost.swift */,
+			);
+			path = Host;
+			sourceTree = "<group>";
+		};
+		9F7C6A6AFBBE5C98296A54DC /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				966F242A375FC6AA2234A44C /* ByteTraceFilterProvider.systemextension */,
+				953E07F86F1EC9E040DC7AAF /* ByteTraceNetworkExtensionLab.app */,
+				F3711EA246A4C4966446A291 /* ByteTraceNetworkExtensionLabTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E3B46158A749C42782A7624D = {
+			isa = PBXGroup;
+			children = (
+				25C7141200CA50E583C3CF54 /* FilterProvider */,
+				9D71BE3E8F9819AE930E7126 /* Host */,
+				FB785C680E454DA6D2EAE767 /* Shared */,
+				5FD16100AFC1C7CE3258B9DF /* Tests */,
+				91F51D3F49EE81A61423BC82 /* Frameworks */,
+				9F7C6A6AFBBE5C98296A54DC /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		FB785C680E454DA6D2EAE767 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				42FF942E14B30AE82B7299C1 /* FlowRecord.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		187C804D87B474DB4954059F /* ByteTraceNetworkExtensionLabTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F5CF18F7ABA157AE22B6744B /* Build configuration list for PBXNativeTarget "ByteTraceNetworkExtensionLabTests" */;
+			buildPhases = (
+				32715E0AEB92B1000624B2FA /* Sources */,
+				29F8E73E08AE8E8F2D5C898F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ByteTraceNetworkExtensionLabTests;
+			packageProductDependencies = (
+			);
+			productName = ByteTraceNetworkExtensionLabTests;
+			productReference = F3711EA246A4C4966446A291 /* ByteTraceNetworkExtensionLabTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		7239AFF51E9825B756B67B9B /* ByteTraceNetworkExtensionLab */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 44D93C2AA2411E5534398322 /* Build configuration list for PBXNativeTarget "ByteTraceNetworkExtensionLab" */;
+			buildPhases = (
+				E328127FADBD13A054951B45 /* Sources */,
+				97FE1FB8263EE43214E8DA3F /* Frameworks */,
+				52BF7D32EFAA7A6D86D15F8E /* Embed System Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5D62F51CB5E0461520AF64F0 /* PBXTargetDependency */,
+			);
+			name = ByteTraceNetworkExtensionLab;
+			packageProductDependencies = (
+			);
+			productName = ByteTraceNetworkExtensionLab;
+			productReference = 953E07F86F1EC9E040DC7AAF /* ByteTraceNetworkExtensionLab.app */;
+			productType = "com.apple.product-type.application";
+		};
+		9CEAAED044319E7FF8E68EB9 /* ByteTraceFilterProvider */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E83F8FBDFB6F705952894953 /* Build configuration list for PBXNativeTarget "ByteTraceFilterProvider" */;
+			buildPhases = (
+				F3C9A9F6FD2D9B1F296824AF /* Sources */,
+				BE2518A0BA80D528C2B038E4 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ByteTraceFilterProvider;
+			packageProductDependencies = (
+			);
+			productName = ByteTraceFilterProvider;
+			productReference = 966F242A375FC6AA2234A44C /* ByteTraceFilterProvider.systemextension */;
+			productType = "com.apple.product-type.system-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		335F9423EAA2E7B4AEC57AD5 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
+			};
+			buildConfigurationList = E43EDACBD622BBF44171F2A4 /* Build configuration list for PBXProject "ByteTraceNetworkExtensionLab" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = E3B46158A749C42782A7624D;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 9F7C6A6AFBBE5C98296A54DC /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7239AFF51E9825B756B67B9B /* ByteTraceNetworkExtensionLab */,
+				9CEAAED044319E7FF8E68EB9 /* ByteTraceFilterProvider */,
+				187C804D87B474DB4954059F /* ByteTraceNetworkExtensionLabTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		32715E0AEB92B1000624B2FA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D34D2D57F920CC87E5E0B2E4 /* FlowRecord.swift in Sources */,
+				86B44C2416C1266B8C841A5D /* FlowRecordTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E328127FADBD13A054951B45 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0A0AFC079027974FB5EBCD01 /* FlowRecord.swift in Sources */,
+				F24501E46A874F9A351D90EE /* NetworkExtensionLabHost.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F3C9A9F6FD2D9B1F296824AF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1182DFF62257025880F930F9 /* FilterDataProvider.swift in Sources */,
+				FC61E7790C2B9213B2CA8188 /* FlowRecord.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5D62F51CB5E0461520AF64F0 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9CEAAED044319E7FF8E68EB9 /* ByteTraceFilterProvider */;
+			targetProxy = 8D2AAF0DEE4C689AC3462D2A /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0A55F0CD6CCD5E02581782EE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		3587BE765E22723DD168E198 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = FilterProvider/FilterProvider.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = FilterProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-e",
+					_NSExtensionMain,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nanvon.ByteTrace.NetworkExtensionLab.FilterProvider;
+				PRODUCT_MODULE_NAME = ByteTraceFilterProvider;
+				PRODUCT_NAME = ByteTraceFilterProvider;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		358A0CE7988973DA19672ACC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Host/Host.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Host/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nanvon.ByteTrace.NetworkExtensionLab;
+				PRODUCT_NAME = ByteTraceNetworkExtensionLab;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		42D843203C3713A8A99E13FC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nanvon.ByteTrace.NetworkExtensionLabTests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		A33590F0D871CC68F584F66A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nanvon.ByteTrace.NetworkExtensionLabTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A4FB9A48DF98AF159EC1DFA0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = FilterProvider/FilterProvider.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = FilterProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-e",
+					_NSExtensionMain,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nanvon.ByteTrace.NetworkExtensionLab.FilterProvider;
+				PRODUCT_MODULE_NAME = ByteTraceFilterProvider;
+				PRODUCT_NAME = ByteTraceFilterProvider;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		B9A8959DC8731C1D12976D3D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		BB70645C71BF792E0758E087 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Host/Host.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Host/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nanvon.ByteTrace.NetworkExtensionLab;
+				PRODUCT_NAME = ByteTraceNetworkExtensionLab;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		44D93C2AA2411E5534398322 /* Build configuration list for PBXNativeTarget "ByteTraceNetworkExtensionLab" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB70645C71BF792E0758E087 /* Debug */,
+				358A0CE7988973DA19672ACC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E43EDACBD622BBF44171F2A4 /* Build configuration list for PBXProject "ByteTraceNetworkExtensionLab" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B9A8959DC8731C1D12976D3D /* Debug */,
+				0A55F0CD6CCD5E02581782EE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E83F8FBDFB6F705952894953 /* Build configuration list for PBXNativeTarget "ByteTraceFilterProvider" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A4FB9A48DF98AF159EC1DFA0 /* Debug */,
+				3587BE765E22723DD168E198 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F5CF18F7ABA157AE22B6744B /* Build configuration list for PBXNativeTarget "ByteTraceNetworkExtensionLabTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A33590F0D871CC68F584F66A /* Debug */,
+				42D843203C3713A8A99E13FC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 335F9423EAA2E7B4AEC57AD5 /* Project object */;
+}

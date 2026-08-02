@@ -8,13 +8,13 @@
 
 ByteTrace 继续使用 `/usr/bin/nettop -P` 作为应用级流量基线。连接级 `nettop` 只保留为诊断工具：`mihomo`、Telegram、Browser Helper 和 Dia 的多轮实测已经证明，它不能稳定覆盖所有应用的进程流量，也不能稳定提供应用到 hostname 的完整关联。
 
-下一步不在现有菜单栏 App 中直接拼接域名列表，而是先做一个独立的 macOS Network Extension 原型。第一候选是 Content Filter 的 flow/report 链路；第二候选是针对选定应用的 App Proxy。两者都必须先完成权限、签名、生命周期和对账验证，再决定是否进入正式产品。
+下一步不在现有菜单栏 App 中直接拼接域名列表，而是先做一个独立的 macOS Network Extension 原型。第一候选是 macOS `NEFilterDataProvider` 的 flow/report 链路，由宿主侧 `NEFilterManager` 管理配置；第二候选是针对选定应用的 App Proxy。两者都必须先完成权限、签名、生命周期和对账验证，再决定是否进入正式产品。
 
 ## 候选方案
 
 | 方案 | 可获得的信息 | 主要代价和限制 | 当前决策 |
 | --- | --- | --- | --- |
-| `NEFilterDataProvider` + `NEFilterControlProvider` | `NEFilterFlow` 可提供来源 App 标识；socket flow 可提供远端 hostname（如果调用方按 hostname 建连）；WebKit flow 可能提供 HTTP URL；`NEFilterReport` 可提供流关闭时的入站/出站字节 | 需要 Content Filter Network Extension 能力；macOS 的 Filter Data Provider 需要 System Extension 形态；Provider 有严格沙箱，不能把它当普通 SwiftUI App 使用；它本质上是内容过滤链路，默认决策和隐私边界必须明确 | **第一候选，先做只读统计原型** |
+| `NEFilterDataProvider` + 宿主侧 `NEFilterManager` | 当前 macOS SDK 可提供来源 App audit token / source process audit token；socket flow 可提供远端 hostname（如果调用方按 hostname 建连）；WebKit flow 可能提供 HTTP URL；`NEFilterReport` 可提供流关闭时的入站/出站字节 | 需要 Content Filter Network Extension 能力；macOS 的 Filter Data Provider 需要 System Extension 形态；Provider 有严格沙箱，不能把它当普通 SwiftUI App 使用；audit token 到稳定 Bundle ID 的映射还需要单独验证；它本质上是内容过滤链路，默认决策和隐私边界必须明确 | **第一候选，先做只读统计原型** |
 | `NEAppProxyProvider` | 按匹配到的应用接收 TCP/UDP flow；flow 有 source metadata，并可能提供 remote hostname；可以在转发过程中统计字节 | 需要 App Proxy entitlement 和 VPN/Per-App 路由配置；Provider 位于实际网络路径上，转发错误会影响网络；默认不覆盖未纳入规则的应用 | **第二候选，作为选定应用专项** |
 | `NEPacketTunnelProvider` | 可从虚拟接口读取被路由进 tunnel 的 IP packet，覆盖面较广 | 需要自己重建 flow、DNS/hostname 和应用归属；网络路径、性能、权限和故障恢复成本最高；不能直接得到通用 URL | 暂不作为第一条路线 |
 | DNS Proxy / DNS 观察 | 可辅助记录解析关系和时间 | 不能证明域名消耗了多少字节，会遗漏缓存、DoH/DoT、直连 IP 和代理转发 | 只能做辅助数据 |
@@ -22,7 +22,9 @@ ByteTrace 继续使用 `/usr/bin/nettop -P` 作为应用级流量基线。连接
 
 ## 官方能力边界
 
-Apple 文档显示，`NEFilterFlow` 有来源 App 标识；`NEFilterSocketFlow` 的 `remoteHostname` 只在应用按 hostname 建连等条件满足时提供，不能保证所有连接都有 hostname。[sourceAppIdentifier](https://developer.apple.com/documentation/networkextension/nefilterflow/sourceappidentifier)、[remoteHostname](https://developer.apple.com/documentation/networkextension/nefiltersocketflow/remotehostname)
+需要特别区分平台：当前 macOS SDK 将 `NEFilterFlow.sourceAppIdentifier` 标记为 macOS 不可用；macOS Provider 实际可用的是 `sourceAppAuditToken` 和 `sourceProcessAuditToken`，因此第一阶段不能直接承诺稳定的 Bundle ID 归属，需要验证 audit token 的解析链路。[NEFilterFlow](https://developer.apple.com/documentation/networkextension/nefilterflow)
+
+`NEFilterSocketFlow` 的 `remoteHostname` 只在应用按 hostname 建连等条件满足时提供，不能保证所有连接都有 hostname。[remoteHostname](https://developer.apple.com/documentation/networkextension/nefiltersocketflow/remotehostname)
 
 `NEFilterFlow.URL` 只对来自 WebKit browser objects 的 flow 可能非空，因此不能把它当作所有应用的完整 URL 来源。[URL](https://developer.apple.com/documentation/networkextension/nefilterflow/url)
 
@@ -46,7 +48,7 @@ Network Extension 需要相应的 entitlement；Apple 列出的能力包括 `con
 建立一个独立的 Xcode/System Extension 原型，先不连接正式 ByteTrace 数据库：
 
 1. 只申请一个最小的 Content Filter capability，Provider 对 flow 做明确的 pass-through 决策，不拦截、不修改内容；
-2. 记录最小字段：采样时间、source app identifier、可选 PID/audit token、hostname 或远端 endpoint、可选 WebKit URL、方向、flow close 时的入站/出站字节和可见性状态；
+2. 记录最小字段：采样时间、source app audit token / source process audit token、解析后的 App 标识（若可得）、hostname 或远端 endpoint、可选 WebKit URL、方向、flow close 时的入站/出站字节和可见性状态；
 3. 默认不保存请求内容、Cookie、Header、查询参数和响应正文；URL 也只作为明确标注的可选字段；
 4. 用 WebKit 页面、`curl`、Telegram、Dia、`mihomo` 分别制造已知流量，与现有 `nettop` 应用级总量做同时间窗口对账；
 5. 覆盖 flow 复用、HTTPS、UDP/DNS、代理转发、网络切换、睡眠唤醒、Provider 停止和用户关闭；
