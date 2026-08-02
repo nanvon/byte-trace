@@ -48,6 +48,7 @@ struct MenuBarView: View {
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("刷新今日统计")
             .help("刷新今日统计")
 
             Button {
@@ -58,6 +59,7 @@ struct MenuBarView: View {
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("打开主窗口")
             .help("打开主窗口")
 
             Button {
@@ -68,6 +70,7 @@ struct MenuBarView: View {
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("设置")
             .help("设置")
         }
         .padding(.horizontal, 16)
@@ -205,6 +208,7 @@ struct MenuBarView: View {
                     .frame(width: 24, height: 24)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("退出 ByteTrace")
             .help("退出 ByteTrace")
         }
         .padding(.horizontal, 16)
