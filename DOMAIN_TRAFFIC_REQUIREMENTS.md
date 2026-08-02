@@ -104,7 +104,9 @@ swift run ByteTraceConnectionProbe --duration 5 --runs 3 --process mihomo
 
 Telegram 在用户主动发送消息/切换会话后，追加进行 3 轮、每轮 20 秒的有效流量复测：1 轮 `reconciled`、2 轮 `partially_visible`，可对账比例 33.33%；三轮端点均为 IP，没有 hostname。结果证明连接级明细可以看到部分 Telegram 流量，但不能稳定覆盖进程总量，也不能直接形成域名明细。
 
-多轮结论：单轮 `PASS` 不能代表数据源稳定。当前没有一个目标应用满足“连续活跃样本都可对账”的条件；`mihomo` 的 3 轮都存在明显差异，`Browser Helper` 仍有间歇性摘要-only 情况，`Telegram` 在主动流量下仍以部分可见为主，`Dia` 仍需在采样窗口内产生明确业务流量后复测。域名明细仍不进入正式数据库和 UI。
+Dia 在用户主动打开/刷新网页后，追加进行 3 轮、每轮 20 秒的有效流量复测：3 轮均为 `summary_only`，进程摘要分别为 6,672、6,672 和 70,058 bytes，但连接明细始终为 0，未获得 hostname、IP 或未知端点。结果证明 Dia 的进程级流量在当前连接级 `nettop` 输出中不可见。
+
+多轮结论：单轮 `PASS` 不能代表数据源稳定。当前没有一个目标应用满足“连续活跃样本都可对账”的条件；`mihomo` 的 3 轮都存在明显差异，`Browser Helper` 仍有间歇性摘要-only 情况，`Telegram` 在主动流量下仍以部分可见为主，`Dia` 即使在主动网页流量下也只有进程摘要。域名明细仍不进入正式数据库和 UI。
 
 ## 产品定义
 
