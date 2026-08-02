@@ -184,6 +184,17 @@ public final class UsageStore: @unchecked Sendable {
         )
     }
 
+    public func purgeBuckets(before date: Date) throws -> Int64 {
+        let statement = try database.prepare(
+            "DELETE FROM usage_buckets WHERE bucket_start < ?;"
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(Self.epochSeconds(date), at: 1, in: statement)
+        try database.stepDone(statement)
+        return database.changes()
+    }
+
     public func clearAll() throws {
         try database.execute("DELETE FROM usage_buckets;")
         try database.execute("DELETE FROM daily_usage;")

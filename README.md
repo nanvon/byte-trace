@@ -36,7 +36,7 @@ swift run ByteTraceApp
 ~/Library/Application Support/<bundle identifier>/usage.sqlite3
 ```
 
-`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 和独立主窗口：popover 提供今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态和刷新入口；主窗口提供“概览 / 设置”导航、时间范围选择、趋势图和应用详情初版。数据库位置、登录时启动、清空统计和分钟级数据积累状态均已接入。`Scripts/package_app.sh` 可生成 ad-hoc 签名的 `.app` 和 `ByteTrace.zip`，并已完成本机 LaunchServices 启动验证。
+`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 和独立主窗口：popover 提供今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态和刷新入口；主窗口提供“概览 / 设置”导航、时间范围选择、趋势图和应用详情初版。数据库位置、登录时启动、清空统计、分钟级数据积累状态和可选保留策略均已接入。`Scripts/package_app.sh` 可生成 ad-hoc 签名的 `.app` 和 `ByteTrace.zip`，并已完成本机 LaunchServices 启动验证。
 
 ## 界面架构约定
 
@@ -64,7 +64,7 @@ ByteTrace 将“看到了多少流量”扩展为“在什么时间段、由哪�
 
 这些定义为查询范围，而不是强制的采样周期。主窗口初版已展示下载、上传、总量、应用排行、流量趋势和应用详情；时间口径使用系统本地时区和本地日历。
 
-数据层现在保留 `daily_usage` 日汇总和 `usage_buckets` 分钟级时间桶：短时间范围从分钟桶查询，今天/本周/本月从日汇总查询。旧版本已有的日汇总不会被伪造分摊到历史分钟桶；分钟趋势从新版本开始积累。后续仍需补充长时间运行、存储保留策略和真实数据下的趋势验收。
+数据层现在保留 `daily_usage` 日汇总和 `usage_buckets` 分钟级时间桶：短时间范围从分钟桶查询，今天/本周/本月从日汇总查询。旧版本已有的日汇总不会被伪造分摊到历史分钟桶；分钟趋势从新版本开始积累。设置页默认永不自动清理分钟桶，也可选择保留 7/30/90 天；启用后只删除超过周期的 `usage_buckets`，不会影响 `daily_usage` 日汇总。后续仍需补充长时间运行和真实数据下的趋势验收。
 
 ### 2. 应用内访问明细（后续探索）
 

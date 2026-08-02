@@ -132,6 +132,10 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    func changes() -> Int64 {
+        Int64(sqlite3_changes(handle))
+    }
+
     var errorMessage: String {
         String(cString: sqlite3_errmsg(handle))
     }

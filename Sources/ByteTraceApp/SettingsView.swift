@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var model: ByteTraceViewModel
     @State private var isShowingClearConfirmation = false
+    @State private var pendingRetentionPolicy: UsageRetentionPolicy?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,6 +56,25 @@ struct SettingsView: View {
                 }
 
                 Section("细粒度统计") {
+                    Picker(
+                        "分钟级数据保留",
+                        selection: Binding(
+                            get: { model.usageRetentionPolicy },
+                            set: { policy in
+                                guard policy != model.usageRetentionPolicy else { return }
+                                if policy.interval != nil {
+                                    pendingRetentionPolicy = policy
+                                } else {
+                                    model.usageRetentionPolicy = policy
+                                }
+                            }
+                        )
+                    ) {
+                        ForEach(UsageRetentionPolicy.allCases) { policy in
+                            Text(policy.title).tag(policy)
+                        }
+                    }
+
                     if let stats = model.bucketStats, stats.bucketCount > 0 {
                         LabeledContent("分钟桶数量", value: "\(stats.bucketCount)")
                         LabeledContent(
@@ -71,7 +91,7 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("分钟级数据的保留和清理策略将在后续确定。")
+                    Text("默认不自动清理。启用保留周期后，只会删除超过周期的分钟时间桶，日汇总和应用信息不受影响。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -97,6 +117,30 @@ struct SettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("此操作会删除本机保存的每日应用流量和采集诊断记录，不能撤销。")
+        }
+        .confirmationDialog(
+            "启用分钟级数据保留？",
+            isPresented: Binding(
+                get: { pendingRetentionPolicy != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingRetentionPolicy = nil
+                    }
+                }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("启用并清理", role: .destructive) {
+                if let pendingRetentionPolicy {
+                    model.usageRetentionPolicy = pendingRetentionPolicy
+                }
+                pendingRetentionPolicy = nil
+            }
+            Button("取消", role: .cancel) {
+                pendingRetentionPolicy = nil
+            }
+        } message: {
+            Text("将立即删除超过所选周期的分钟时间桶。日汇总和应用信息不受影响，删除后不能恢复。")
         }
     }
 

@@ -89,6 +89,22 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(dailyRecords[0].downloadBytes, 130)
         XCTAssertEqual(dailyRecords[0].uploadBytes, 13)
         XCTAssertEqual(dailyRecords[0].sampleCount, 2)
+
+        let secondBucketStart = calendar.dateInterval(of: .minute, for: secondSample)!.start
+        XCTAssertEqual(try store.purgeBuckets(before: secondBucketStart), 1)
+        XCTAssertEqual(try store.bucketStats().bucketCount, 1)
+        XCTAssertEqual(
+            try store.bucketUsage(
+                from: secondBucketStart,
+                to: secondBucketStart.addingTimeInterval(60)
+            ).map(\.downloadBytes),
+            [30]
+        )
+
+        let dailyAfterPurge = try store.dailyUsage(for: "2026-08-01")
+        XCTAssertEqual(dailyAfterPurge[0].downloadBytes, 130)
+        XCTAssertEqual(dailyAfterPurge[0].uploadBytes, 13)
+        XCTAssertEqual(dailyAfterPurge[0].sampleCount, 2)
     }
 
     func testSamplesAcrossMidnightUseDifferentLocalDays() throws {

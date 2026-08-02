@@ -90,6 +90,33 @@ enum UsageTimeRange: String, CaseIterable, Identifiable {
     }
 }
 
+enum UsageRetentionPolicy: String, CaseIterable, Identifiable {
+    case never
+    case sevenDays
+    case thirtyDays
+    case ninetyDays
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .never: return "永不自动清理"
+        case .sevenDays: return "保留 7 天"
+        case .thirtyDays: return "保留 30 天"
+        case .ninetyDays: return "保留 90 天"
+        }
+    }
+
+    var interval: TimeInterval? {
+        switch self {
+        case .never: return nil
+        case .sevenDays: return 7 * 24 * 60 * 60
+        case .thirtyDays: return 30 * 24 * 60 * 60
+        case .ninetyDays: return 90 * 24 * 60 * 60
+        }
+    }
+}
+
 struct UsageTimelinePoint: Identifiable, Equatable {
     let start: Date
     let downloadBytes: Int64
@@ -131,10 +158,22 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             )
         }
     }
+    @Published var usageRetentionPolicy: UsageRetentionPolicy {
+        didSet {
+            guard oldValue != usageRetentionPolicy else { return }
+            UserDefaults.standard.set(
+                usageRetentionPolicy.rawValue,
+                forKey: Self.usageRetentionPolicyKey
+            )
+            lastRetentionCleanupDay = nil
+            applyRetentionPolicyIfNeeded(force: true)
+        }
+    }
 
     let databaseURL: URL
 
     private static let showSystemProcessesKey = "ByteTrace.showSystemProcesses"
+    private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
     private let collector: NettopCollector
     private let resolver: SystemProcessIdentityResolver
     private let attributionCache: ProcessAttributionCache
@@ -152,6 +191,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     )
     private var networkPathSignature: String?
     private var networkPathSatisfied = true
+    private var lastRetentionCleanupDay: String?
 
     private static let restartDelays: [TimeInterval] = [1, 2, 5, 10, 30]
 
@@ -166,6 +206,13 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             forKey: Self.showSystemProcessesKey
         ) as? Bool
         _showsSystemProcesses = Published(initialValue: storedPreference ?? true)
+
+        let storedRetentionPolicy = UserDefaults.standard.string(
+            forKey: Self.usageRetentionPolicyKey
+        )
+        _usageRetentionPolicy = Published(
+            initialValue: UsageRetentionPolicy(rawValue: storedRetentionPolicy ?? "") ?? .never
+        )
 
         var storageError: String?
         do {
@@ -285,6 +332,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
 
         do {
+            applyRetentionPolicyIfNeeded()
             records = try store.dailyUsage(for: dayKey)
             bucketStats = try store.bucketStats()
             try loadRange(from: store)
@@ -342,6 +390,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             )
             rangeBuckets = []
             dailyRangeRecords = []
+            lastRetentionCleanupDay = nil
             lastError = nil
         } catch {
             lastError = "清空统计失败：\(error.localizedDescription)"
@@ -648,6 +697,28 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             refresh()
         } catch {
             lastError = "数据库写入失败：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "database_error", details: lastError)
+        }
+    }
+
+    private func applyRetentionPolicyIfNeeded(force: Bool = false) {
+        guard let store, let interval = usageRetentionPolicy.interval else { return }
+
+        let cleanupDay = Self.dayKey(for: Date())
+        guard force || lastRetentionCleanupDay != cleanupDay else { return }
+
+        let cutoff = Date().addingTimeInterval(-interval)
+        do {
+            let deletedCount = try store.purgeBuckets(before: cutoff)
+            lastRetentionCleanupDay = cleanupDay
+            guard deletedCount > 0 else { return }
+
+            recordCollectorEvent(
+                kind: "usage_buckets_purged",
+                details: "deleted=\(deletedCount);before=\(Int(cutoff.timeIntervalSince1970))"
+            )
+        } catch {
+            lastError = "分钟级数据清理失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
         }
     }
