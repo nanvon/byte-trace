@@ -2,7 +2,7 @@
 
 ByteTrace 是面向个人 macOS 的菜单栏应用，应用级流量统计 MVP 使用系统 `/usr/bin/nettop` 作为只读数据源。
 
-当前完成：阶段 4 采集、CSV 解析、进程归属、SQLite 日聚合、分钟级时间桶、菜单栏 UI，以及主窗口概览/设置导航和应用级流量详情初版；连接级 `nettop` CSV 解析仅作为诊断原型，尚未接入正式统计。
+当前完成：阶段 4/5 正式应用级采集、CSV 解析、进程归属、SQLite 日聚合、分钟级时间桶、菜单栏 UI，以及主窗口概览、可见主机名实验、设置和应用详情页面；连接级 `nettop` 数据已进入独立的 `host_usage_buckets` 实验表，不写回正式应用统计。
 
 域名/主机流量评估结论已收敛：正式产品不实现通用的完整 URL、HTTP 请求解析或 Network Extension 系统级采集；允许进入后续开发的是基于连接级 `nettop` 的“可见网站/主机名排行”实验能力。该能力只展示能观察到的 hostname，IP-only 和无法归属的流量统一归入“无法识别/其他”，不改变正式应用级统计口径。[Network Extension Lab](NetworkExtensionLab/README.md) 仍仅保留为编译、SDK API 和数据模型研究记录。
 
@@ -12,11 +12,11 @@ ByteTrace 是面向个人 macOS 的菜单栏应用，应用级流量统计 MVP �
 swift build
 swift test
 swift run ByteTraceProbe --duration 15
-# 连接级只读原型，不写入正式数据库
+# 连接级 hostname 实验探针，不写入正式数据库
 swift run ByteTraceConnectionProbe --duration 5
 # 多轮稳定性验证，每轮独立建立基线
 swift run ByteTraceConnectionProbe --duration 5 --runs 3 --process mihomo
-# macOS 菜单栏原型
+# macOS 菜单栏应用（开发运行）
 swift run ByteTraceApp
 # 生成可从 Finder 启动的 ad-hoc 签名包
 ./Scripts/package_app.sh
@@ -35,7 +35,7 @@ swift run ByteTraceApp
 - 流式 CSV 解析：按字段名读取、支持重复表头与分块输入，遇到坏行跳过并记录事件；
 - PID / Bundle / 父进程链归属：按 PID + 启动时间缓存，Helper 仅在位于 `.app/Contents/` 内时合并到外层应用；
 - 精确代理分类：`mihomo`、`ClashBar`、`CCBar` 作为 `proxy_transport` 单独记录，不对应用流量做反向抵扣；
-- SQLite 本地存储：`apps`、`daily_usage`、`usage_buckets`、`collector_events` 四张表，WAL、外键约束、忙等待与 schema version；
+- SQLite 本地存储：`apps`、`daily_usage`、`usage_buckets`、`host_usage_buckets`、`collector_events` 五张表，WAL、外键约束、忙等待与 schema version；hostname 实验表支持独立查询、清理和保留周期；
 - 日聚合与分钟级时间桶：按系统当前本地日历归档，分钟桶用于最近 10 分钟、最近 1 小时和趋势查询，日汇总继续用于今天、本周、本月；内存队列有上限，停止时批量 flush。
 
 真实探针会使用内存 SQLite 做端到端验证；正式应用默认数据库路径为：
@@ -44,7 +44,7 @@ swift run ByteTraceApp
 ~/Library/Application Support/<bundle identifier>/usage.sqlite3
 ```
 
-`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 和独立主窗口：popover 提供今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态和刷新入口；主窗口提供“概览 / 设置”导航、时间范围选择、趋势图和应用详情初版。数据库位置、登录时启动、清空统计、分钟级数据积累状态和可选保留策略均已接入。`Scripts/package_app.sh` 可生成 ad-hoc 签名的 `.app`、`ByteTrace.dmg` 和 `ByteTrace.zip`，并已完成本机 LaunchServices 启动验证。
+`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 和独立主窗口：popover 提供今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态和刷新入口；主窗口提供“概览 / 可见主机名 / 设置”导航、时间范围选择、趋势图、全局 hostname 排行、覆盖率、应用详情和应用内 hostname 排行。设置页支持数据库位置、登录时启动、正式统计与 hostname 实验数据的独立清理、分钟级保留策略和当前范围 JSON 导出。`Scripts/package_app.sh` 可生成带 `ByteTrace.icns` 的 ad-hoc 签名 `.app`、`ByteTrace.dmg` 和 `ByteTrace.zip`；本机 release 构建、资源复制和签名校验已通过，真实 Finder/菜单栏启动仍需在有 WindowServer 的 macOS 桌面会话验收。
 
 ## 界面架构约定
 
@@ -52,7 +52,7 @@ ByteTrace 采用“菜单栏 popover + 主窗口 + 主窗口内页面”的桌�
 
 - 菜单栏 popover：提供今日流量、采集状态、刷新等快速查看和操作，并作为打开主窗口的入口；
 - 主窗口：作为可持续存在的完整应用容器；
-- 主窗口页面：至少包含“概览”和“设置”，后续页面继续纳入主窗口导航。
+- 主窗口页面：包含“概览”“可见主机名”和“设置”，应用详情作为概览内的导航目的地。
 
 设置页属于主窗口内的页面，不作为长期独立的设置窗口维护。打开主窗口后，菜单栏 popover 正常消失是预期行为；主窗口及其内部页面不应再依赖 popover 的生命周期，也不应通过挂在 `MenuBarExtra` 临时窗口上的 `.sheet` 承载最终设置流程。`ByteTraceViewModel` 作为共享模型，由 popover 和主窗口共同使用。
 
@@ -72,7 +72,7 @@ ByteTrace 的目标分为两层：“在什么时间段、由哪个应用、以�
 
 这些定义为查询范围，而不是强制的采样周期。主窗口初版已展示下载、上传、总量、应用排行、流量趋势和应用详情；时间口径使用系统本地时区和本地日历。
 
-数据层现在保留 `daily_usage` 日汇总和 `usage_buckets` 分钟级时间桶：短时间范围从分钟桶查询，今天/本周/本月从日汇总查询。旧版本已有的日汇总不会被伪造分摊到历史分钟桶；分钟趋势从新版本开始积累。设置页默认永不自动清理分钟桶，也可选择保留 7/30/90 天；启用后只删除超过周期的 `usage_buckets`，不会影响 `daily_usage` 日汇总。后续仍需补充长时间运行和真实数据下的趋势验收。
+数据层现在保留 `daily_usage` 日汇总和 `usage_buckets` 分钟级时间桶：短时间范围从分钟桶查询，今天/本周/本月从日汇总查询。旧版本已有的日汇总不会被伪造分摊到历史分钟桶；分钟趋势从新版本开始积累。设置页默认永不自动清理分钟桶，也可选择保留 7/30/90 天；启用后会在同一事务中删除超过周期的 `usage_buckets` 和 `host_usage_buckets`，不会影响 `daily_usage` 日汇总。后续仍需补充长时间运行和真实数据下的趋势验收。
 
 ### 2. 可见网站/主机名排行（有限实验能力）
 
@@ -98,19 +98,19 @@ ByteTrace 的目标分为两层：“在什么时间段、由哪个应用、以�
 - 按应用展示上传、下载和总流量；
 - 支持最近 10 分钟、最近 1 小时、今天、本周和本月；
 - 支持趋势图、应用排行、应用详情、历史查询和本地数据管理；
+- 支持导出当前时间范围 JSON，正式应用汇总与 hostname 实验排行/覆盖率分块保存；
 - 数据默认保存在本机，不上传网络内容；
 - 连接级 hostname 排行作为独立的实验能力，不修改应用级总量；原始 IP、DNS、代理和浏览器扩展结果不作为通用正式数据。
 
 ByteTrace 的产品定位是“本地 macOS 应用级流量统计工具，并提供有限的可见网站/主机名排行实验能力”，不是“通用的应用内 URL 监控工具”。
 
-### 4. 后续开发顺序
+### 4. 剩余验收顺序
 
-1. 完善主窗口骨架和“概览 / 设置”导航；
-2. 完善应用级细粒度数据模型与查询接口；
-3. 完善 10 分钟、1 小时、今天、本周、本月的时间范围 UI 和趋势展示；
-4. 完善应用排行、应用详情和历史数据交互；
-5. 增加独立的“可见网站/主机名排行”实验数据模型和查询：支持全局排行与应用内排行，不显示原始 IP，并保留“无法识别/其他”和覆盖率；
-6. 完成长时间运行、网络切换、睡眠唤醒、应用级数据对账、实验排行数据对账、导出和本地数据管理验收。
+1. 在有 WindowServer 的 macOS 桌面会话中从 Finder 启动 `.app`，验收菜单栏 popover、主窗口三页、应用详情和设置交互；
+2. 验收网络切换、睡眠唤醒、正式 collector 与 hostname collector 的独立退出重启和 flush；
+3. 用已知大小流量对账正式应用总量与 hostname 实验覆盖率，确认实验数据不重复计入正式总量；
+4. 完成 24 小时连续运行、数据库增长和保留策略验收；
+5. 重新执行 release 版本检查、`.app/.zip/.dmg` 产物核对；当前版本为 `0.1.4`，尚未推送新的 release tag。
 
 以上顺序只使用现有 `nettop` 采集链。完整 URL、HTTP 请求解析、Network Extension、系统级代理和限速扩展不作为后续开发任务。
 
@@ -124,4 +124,4 @@ GitHub Actions 已按 CI / Release 分离：
 
 与 `cc-trace` 一致，ByteTrace Release 不使用 Apple Developer ID 证书，也不执行 Apple 公证。macOS 产物首次打开可能需要在系统设置中手动放行；这属于 ad-hoc 签名的预期行为。
 
-阶段 5 的基础生命周期已实现：异常退出按 `1/2/5/10/30` 秒退避重启，网络路径变化时安全停止并 flush、恢复后重建基线，睡眠前 flush、唤醒后重新建立基线，正常退出会回收自己创建的 `nettop`。网络切换、真实睡眠唤醒、已知大小流量对账和 24 小时连续运行仍待 macOS 实机验证。
+阶段 5 的基础生命周期已实现：正式 collector 和 hostname collector 都按 `1/2/5/10/30` 秒独立退避重启，网络路径变化时安全停止并 flush、恢复后重建基线，睡眠前 flush、唤醒后重新建立基线，正常退出会回收自己创建的 `nettop`。当前核心测试 43/43 通过，正式 15 秒探针和连接级 5 秒探针已通过；网络切换、真实睡眠唤醒、已知大小流量对账和 24 小时连续运行仍待有 WindowServer 的 macOS 实机验证。

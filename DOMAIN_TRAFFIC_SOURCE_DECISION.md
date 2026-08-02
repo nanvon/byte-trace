@@ -53,11 +53,11 @@ Apple DTS 明确说明 Network Extension provider 不支持免费 Personal Team�
 
 ## 当前项目边界
 
-当前仓库只有 Swift Package、`Packaging/Info.plist` 和将单一 `ByteTraceApp` 签名打包的 `Scripts/package_app.sh`：
+当前仓库是 Swift Package，包含单一 `ByteTraceApp`、独立 hostname 实验数据模型和将应用签名打包的 `Scripts/package_app.sh`：
 
 - 没有 `.entitlements` 文件；
 - 没有 App Extension 或 System Extension target；
-- 当前 ad-hoc `.app` 只能证明菜单栏应用本身可启动，不能证明 Network Extension entitlement、用户安装和系统扩展生命周期；
+- 当前 ad-hoc `.app` 的 release 构建、图标资源复制和签名校验已通过；它不能证明 Network Extension entitlement、用户安装和系统扩展生命周期，真实 Finder/菜单栏启动仍需有 WindowServer 的桌面会话验收；
 - 因此后续正式开发不修改 `Package.swift`、打包脚本或主窗口 UI 来接入 Network Extension；可在独立的数据模型和查询层增加连接级 hostname 实验排行，但不得修改应用级统计口径；正式产品继续沿用 `nettop` 应用级采集链。
 
 ## 原型运行门禁记录
@@ -98,4 +98,4 @@ Apple DTS 明确说明 Network Extension provider 不支持免费 Personal Team�
 - 口径隔离：实验排行不写回或重复计入应用级总量，不能替代正式应用级统计；
 - 明确不做：Network Extension 运行化、通用域名采集、完整 URL、HTTP 请求解析、系统级透明代理、TLS 检查和限速代理扩展。
 
-后续开发先完成应用级正式能力，再实现可见网站/主机名排行实验。若将来账号、权限或需求边界发生变化，重新开立独立评估，不在当前路线中隐式扩张范围。
+当前实现已经按上述决定完成正式应用级统计和有限 hostname 实验排行；剩余工作只包括 macOS 桌面会话、网络/睡眠、对账和长跑验收。若将来账号、权限或需求边界发生变化，重新开立独立评估，不在当前路线中隐式扩张范围。
