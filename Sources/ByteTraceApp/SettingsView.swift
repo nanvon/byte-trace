@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var model: ByteTraceViewModel
-    @Environment(\.dismiss) private var dismiss
     @State private var isShowingClearConfirmation = false
 
     var body: some View {
@@ -11,10 +10,6 @@ struct SettingsView: View {
                 Text("设置")
                     .font(.headline)
                 Spacer()
-                Button("完成") {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 14)
@@ -69,7 +64,6 @@ struct SettingsView: View {
             }
             .formStyle(.grouped)
         }
-        .frame(width: 430, height: 450)
         .confirmationDialog(
             "确定清空全部统计？",
             isPresented: $isShowingClearConfirmation,

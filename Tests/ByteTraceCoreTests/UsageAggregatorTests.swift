@@ -47,6 +47,43 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(records[0].uploadBytes, 24)
         XCTAssertEqual(records[0].sampleCount, 2)
         XCTAssertEqual(records[0].displayName, "Example Updated")
+
+        let buckets = try store.bucketUsage(
+            from: firstSample,
+            to: firstSample.addingTimeInterval(60)
+        )
+        XCTAssertEqual(buckets.count, 1)
+        XCTAssertEqual(buckets[0].downloadBytes, 103)
+        XCTAssertEqual(buckets[0].uploadBytes, 24)
+        XCTAssertEqual(buckets[0].sampleCount, 2)
+    }
+
+    func testSamplesInDifferentMinutesPersistSeparateBuckets() throws {
+        let calendar = utcCalendar()
+        let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let aggregator = UsageAggregator(store: store, calendar: calendar)
+        let firstSample = calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 1, hour: 10, minute: 0, second: 1)
+        )!
+        let secondSample = firstSample.addingTimeInterval(61)
+
+        try aggregator.ingest(makeDelta(at: firstSample, download: 100, upload: 10))
+        try aggregator.ingest(makeDelta(at: secondSample, download: 30, upload: 3))
+        try aggregator.flush()
+
+        let bucketStart = calendar.dateInterval(of: .minute, for: firstSample)!.start
+        let buckets = try store.bucketUsage(
+            from: bucketStart,
+            to: secondSample.addingTimeInterval(60)
+        )
+        XCTAssertEqual(buckets.count, 2)
+        XCTAssertEqual(buckets.map(\.downloadBytes), [100, 30])
+
+        let dailyRecords = try store.dailyUsage(for: "2026-08-01")
+        XCTAssertEqual(dailyRecords.count, 1)
+        XCTAssertEqual(dailyRecords[0].downloadBytes, 130)
+        XCTAssertEqual(dailyRecords[0].uploadBytes, 13)
+        XCTAssertEqual(dailyRecords[0].sampleCount, 2)
     }
 
     func testSamplesAcrossMidnightUseDifferentLocalDays() throws {

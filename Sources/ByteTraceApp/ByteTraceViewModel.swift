@@ -24,6 +24,84 @@ struct UsageTotals: Equatable {
     }
 }
 
+enum MainWindowPage: String, Hashable, Identifiable {
+    case overview
+    case settings
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .overview: return "概览"
+        case .settings: return "设置"
+        }
+    }
+}
+
+enum UsageTimeRange: String, CaseIterable, Identifiable {
+    case last10Minutes
+    case lastHour
+    case today
+    case thisWeek
+    case thisMonth
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .last10Minutes: return "最近 10 分钟"
+        case .lastHour: return "最近 1 小时"
+        case .today: return "今天"
+        case .thisWeek: return "本周"
+        case .thisMonth: return "本月"
+        }
+    }
+
+    var usesBucketSummary: Bool {
+        switch self {
+        case .last10Minutes, .lastHour: return true
+        case .today, .thisWeek, .thisMonth: return false
+        }
+    }
+
+    var usesFineGrainedTimeline: Bool {
+        switch self {
+        case .last10Minutes, .lastHour, .today: return true
+        case .thisWeek, .thisMonth: return false
+        }
+    }
+
+    func startDate(relativeTo now: Date, calendar: Calendar) -> Date {
+        switch self {
+        case .last10Minutes:
+            return now.addingTimeInterval(-10 * 60)
+        case .lastHour:
+            return now.addingTimeInterval(-60 * 60)
+        case .today:
+            return calendar.startOfDay(for: now)
+        case .thisWeek:
+            return calendar.dateInterval(of: .weekOfYear, for: now)?.start
+                ?? calendar.startOfDay(for: now)
+        case .thisMonth:
+            return calendar.dateInterval(of: .month, for: now)?.start
+                ?? calendar.startOfDay(for: now)
+        }
+    }
+}
+
+struct UsageTimelinePoint: Identifiable, Equatable {
+    let start: Date
+    let downloadBytes: Int64
+    let uploadBytes: Int64
+
+    var id: Date { start }
+
+    var totalBytes: Int64 {
+        let result = downloadBytes.addingReportingOverflow(uploadBytes)
+        return result.overflow ? Int64.max : result.partialValue
+    }
+}
+
 @MainActor
 final class ByteTraceViewModel: NSObject, ObservableObject {
     static let bundleIdentifier = "com.nanvon.ByteTrace"
@@ -31,6 +109,17 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var records: [DailyUsageRecord] = []
     @Published private(set) var status: MonitorStatus = .stopped
     @Published private(set) var lastError: String?
+    @Published var requestedMainWindowPage: MainWindowPage = .overview
+    @Published var selectedRange: UsageTimeRange = .today {
+        didSet {
+            guard oldValue != selectedRange else { return }
+            refreshRange()
+        }
+    }
+    @Published private(set) var rangeRecords: [DailyUsageRecord] = []
+    @Published private(set) var rangeTimeline: [UsageTimelinePoint] = []
+    private(set) var rangeBuckets: [UsageBucketRecord] = []
+    private var dailyRangeRecords: [DailyUsageRecord] = []
     @Published private(set) var launchAtLoginEnabled: Bool
     @Published var showsSystemProcesses: Bool {
         didSet {
@@ -114,6 +203,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         totals(from: records.filter { $0.category != .proxyTransport })
     }
 
+    var selectedRangeTotals: UsageTotals {
+        totals(from: rangeRecords.filter { $0.category != .proxyTransport })
+    }
+
     var dayKey: String {
         Self.dayKey(for: Date())
     }
@@ -169,15 +262,51 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     func refresh() {
         guard let store else {
             records = []
+            rangeRecords = []
+            rangeTimeline = []
+            rangeBuckets = []
             return
         }
 
         do {
             records = try store.dailyUsage(for: dayKey)
+            try loadRange(from: store)
         } catch {
             lastError = "读取今日统计失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
         }
+    }
+
+    func refreshRange() {
+        guard let store else {
+            rangeRecords = []
+            rangeTimeline = []
+            rangeBuckets = []
+            return
+        }
+
+        do {
+            try loadRange(from: store)
+        } catch {
+            lastError = "读取时间范围统计失败：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "database_error", details: lastError)
+        }
+    }
+
+    func timeline(for appKey: String) -> [UsageTimelinePoint] {
+        if selectedRange.usesFineGrainedTimeline, !rangeBuckets.isEmpty {
+            return makeTimeline(
+                from: rangeBuckets.filter {
+                    $0.appKey == appKey && $0.category != .proxyTransport
+                }
+            )
+        }
+
+        return makeTimeline(
+            from: dailyRangeRecords.filter {
+                $0.appKey == appKey && $0.category != .proxyTransport
+            }
+        )
     }
 
     func clearAllData() {
@@ -187,6 +316,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             try store.clearAll()
             aggregator.discardPending()
             records = []
+            rangeRecords = []
+            rangeTimeline = []
+            rangeBuckets = []
+            dailyRangeRecords = []
             lastError = nil
         } catch {
             lastError = "清空统计失败：\(error.localizedDescription)"
@@ -447,6 +580,125 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         try? store.recordCollectorEvent(kind: kind, details: details)
     }
 
+    private func loadRange(from store: UsageStore) throws {
+        let calendar = Calendar.autoupdatingCurrent
+        let end = Date()
+        let start = selectedRange.startDate(relativeTo: end, calendar: calendar)
+
+        if selectedRange.usesBucketSummary {
+            let buckets = try store.bucketUsage(from: start, to: end)
+            rangeBuckets = buckets
+            dailyRangeRecords = []
+            rangeRecords = aggregateRecords(
+                buckets.map {
+                    DailyUsageRecord(
+                        day: Self.dayKey(for: $0.bucketStart),
+                        appKey: $0.appKey,
+                        displayName: $0.displayName,
+                        category: $0.category,
+                        bundleID: $0.bundleID,
+                        bundlePath: $0.bundlePath,
+                        executablePath: $0.executablePath,
+                        downloadBytes: $0.downloadBytes,
+                        uploadBytes: $0.uploadBytes,
+                        sampleCount: $0.sampleCount
+                    )
+                }
+            )
+            rangeTimeline = makeTimeline(
+                from: buckets.filter { $0.category != .proxyTransport }
+            )
+            return
+        }
+
+        let daily = try store.dailyUsage(
+            from: Self.dayKey(for: start),
+            through: Self.dayKey(for: end)
+        )
+        dailyRangeRecords = daily
+        rangeRecords = aggregateRecords(daily)
+        if selectedRange == .today {
+            rangeBuckets = try store.bucketUsage(from: start, to: end)
+            rangeTimeline = makeTimeline(
+                from: rangeBuckets.filter { $0.category != .proxyTransport }
+            )
+        } else {
+            rangeBuckets = []
+            rangeTimeline = makeTimeline(from: daily.filter { $0.category != .proxyTransport })
+        }
+    }
+
+    private func aggregateRecords(_ records: [DailyUsageRecord]) -> [DailyUsageRecord] {
+        var aggregated: [String: DailyUsageRecord] = [:]
+        for record in records {
+            if let existing = aggregated[record.appKey] {
+                aggregated[record.appKey] = merge(existing, with: record)
+            } else {
+                aggregated[record.appKey] = record
+            }
+        }
+        return aggregated.values.sorted {
+            totalBytes(for: $0) > totalBytes(for: $1)
+        }
+    }
+
+    private func merge(
+        _ existing: DailyUsageRecord,
+        with record: DailyUsageRecord
+    ) -> DailyUsageRecord {
+        DailyUsageRecord(
+            day: min(existing.day, record.day),
+            appKey: existing.appKey,
+            displayName: record.displayName,
+            category: record.category,
+            bundleID: record.bundleID,
+            bundlePath: record.bundlePath,
+            executablePath: record.executablePath,
+            downloadBytes: saturatingAdd(existing.downloadBytes, record.downloadBytes),
+            uploadBytes: saturatingAdd(existing.uploadBytes, record.uploadBytes),
+            sampleCount: saturatingAdd(existing.sampleCount, record.sampleCount)
+        )
+    }
+
+    private func makeTimeline(from records: [UsageBucketRecord]) -> [UsageTimelinePoint] {
+        var totals: [Date: UsageTotals] = [:]
+        for record in records {
+            let existing = totals[record.bucketStart] ?? UsageTotals(downloadBytes: 0, uploadBytes: 0)
+            totals[record.bucketStart] = UsageTotals(
+                downloadBytes: saturatingAdd(existing.downloadBytes, record.downloadBytes),
+                uploadBytes: saturatingAdd(existing.uploadBytes, record.uploadBytes)
+            )
+        }
+        return totals.keys.sorted().compactMap { start in
+            guard let value = totals[start] else { return nil }
+            return UsageTimelinePoint(
+                start: start,
+                downloadBytes: value.downloadBytes,
+                uploadBytes: value.uploadBytes
+            )
+        }
+    }
+
+    private func makeTimeline(from records: [DailyUsageRecord]) -> [UsageTimelinePoint] {
+        var totals: [Date: UsageTotals] = [:]
+        for record in records {
+            guard let start = Self.date(from: record.day) else { continue }
+            let existing = totals[start] ?? UsageTotals(downloadBytes: 0, uploadBytes: 0)
+            totals[start] = UsageTotals(
+                downloadBytes: saturatingAdd(existing.downloadBytes, record.downloadBytes),
+                uploadBytes: saturatingAdd(existing.uploadBytes, record.uploadBytes)
+            )
+        }
+        return totals.keys.sorted().compactMap { start in
+            guard let value = totals[start] else { return nil }
+            return UsageTimelinePoint(
+                start: start,
+                downloadBytes: value.downloadBytes,
+                uploadBytes: value.uploadBytes
+            )
+        }
+    }
+
     private func totals(from records: [DailyUsageRecord]) -> UsageTotals {
         var download: Int64 = 0
         var upload: Int64 = 0
@@ -497,5 +749,25 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             components.month ?? 0,
             components.day ?? 0
         )
+    }
+
+    private static func date(from dayKey: String) -> Date? {
+        let parts = dayKey.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        var components = DateComponents()
+        components.year = parts[0]
+        components.month = parts[1]
+        components.day = parts[2]
+        return Calendar.autoupdatingCurrent.date(from: components)
+    }
+
+    private func totalBytes(for record: DailyUsageRecord) -> Int64 {
+        let result = record.downloadBytes.addingReportingOverflow(record.uploadBytes)
+        return result.overflow ? Int64.max : result.partialValue
+    }
+
+    private func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let result = lhs.addingReportingOverflow(rhs)
+        return result.overflow ? Int64.max : result.partialValue
     }
 }

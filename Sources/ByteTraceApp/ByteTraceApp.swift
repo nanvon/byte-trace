@@ -34,5 +34,10 @@ struct ByteTraceApp: App {
             Image(systemName: "arrow.up.arrow.down.circle")
         }
         .menuBarExtraStyle(.window)
+
+        Window("ByteTrace", id: "main") {
+            MainWindowView(model: model)
+        }
+        .defaultSize(width: 1080, height: 720)
     }
 }

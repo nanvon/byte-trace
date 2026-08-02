@@ -17,11 +17,13 @@ public enum UsageAggregatorError: LocalizedError, Equatable {
 public final class UsageAggregator: @unchecked Sendable {
     private struct Key: Hashable {
         let day: String
+        let bucketStart: Date
         let appKey: String
     }
 
     private struct Pending {
-        var delta: DailyUsageAggregate
+        var daily: DailyUsageAggregate
+        var bucket: UsageBucketAggregate
     }
 
     private let lock = NSLock()
@@ -61,13 +63,15 @@ public final class UsageAggregator: @unchecked Sendable {
         guard delta.downloadBytes > 0 || delta.uploadBytes > 0 else { return }
 
         let day = dayKey(for: delta.sampledAt)
-        let key = Key(day: day, appKey: delta.appKey)
+        let bucketStart = bucketStart(for: delta.sampledAt)
+        let key = Key(day: day, bucketStart: bucketStart, appKey: delta.appKey)
 
         lock.lock()
         defer { lock.unlock() }
 
         if var existing = pending[key] {
-            existing.delta = try merge(existing.delta, with: delta)
+            existing.daily = try merge(existing.daily, with: delta)
+            existing.bucket = try merge(existing.bucket, with: delta)
             pending[key] = existing
             return
         }
@@ -77,8 +81,22 @@ public final class UsageAggregator: @unchecked Sendable {
         }
 
         pending[key] = Pending(
-            delta: DailyUsageAggregate(
+            daily: DailyUsageAggregate(
                 day: day,
+                appKey: delta.appKey,
+                displayName: delta.displayName,
+                category: delta.category,
+                bundleID: delta.bundleID,
+                bundlePath: delta.bundlePath,
+                executablePath: delta.executablePath,
+                firstSeenAt: delta.sampledAt,
+                lastSeenAt: delta.sampledAt,
+                downloadBytes: delta.downloadBytes,
+                uploadBytes: delta.uploadBytes,
+                sampleCount: 1
+            ),
+            bucket: UsageBucketAggregate(
+                bucketStart: bucketStart,
                 appKey: delta.appKey,
                 displayName: delta.displayName,
                 category: delta.category,
@@ -99,12 +117,15 @@ public final class UsageAggregator: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let aggregates = pending.values.map(\.delta)
-        guard !aggregates.isEmpty else { return 0 }
+        let values = Array(pending.values)
+        guard !values.isEmpty else { return 0 }
 
-        try store.apply(aggregates)
+        try store.apply(
+            values.map(\.daily),
+            bucketAggregates: values.map(\.bucket)
+        )
         pending.removeAll(keepingCapacity: true)
-        return aggregates.count
+        return values.count
     }
 
     private func merge(
@@ -135,26 +156,26 @@ public final class UsageAggregator: @unchecked Sendable {
     }
 
     private func merge(
-        _ aggregate: DailyUsageAggregate,
-        with other: DailyUsageAggregate
-    ) throws -> DailyUsageAggregate {
-        let downloadResult = aggregate.downloadBytes.addingReportingOverflow(other.downloadBytes)
-        let uploadResult = aggregate.uploadBytes.addingReportingOverflow(other.uploadBytes)
-        let sampleResult = aggregate.sampleCount.addingReportingOverflow(other.sampleCount)
+        _ aggregate: UsageBucketAggregate,
+        with delta: UsageDelta
+    ) throws -> UsageBucketAggregate {
+        let downloadResult = aggregate.downloadBytes.addingReportingOverflow(delta.downloadBytes)
+        let uploadResult = aggregate.uploadBytes.addingReportingOverflow(delta.uploadBytes)
+        let sampleResult = aggregate.sampleCount.addingReportingOverflow(1)
         guard !downloadResult.overflow, !uploadResult.overflow, !sampleResult.overflow else {
             throw UsageAggregatorError.overflow
         }
 
-        return DailyUsageAggregate(
-            day: aggregate.day,
+        return UsageBucketAggregate(
+            bucketStart: aggregate.bucketStart,
             appKey: aggregate.appKey,
-            displayName: other.displayName,
-            category: other.category,
-            bundleID: other.bundleID,
-            bundlePath: other.bundlePath,
-            executablePath: other.executablePath,
-            firstSeenAt: min(aggregate.firstSeenAt, other.firstSeenAt),
-            lastSeenAt: max(aggregate.lastSeenAt, other.lastSeenAt),
+            displayName: delta.displayName,
+            category: delta.category,
+            bundleID: delta.bundleID,
+            bundlePath: delta.bundlePath,
+            executablePath: delta.executablePath,
+            firstSeenAt: min(aggregate.firstSeenAt, delta.sampledAt),
+            lastSeenAt: max(aggregate.lastSeenAt, delta.sampledAt),
             downloadBytes: downloadResult.partialValue,
             uploadBytes: uploadResult.partialValue,
             sampleCount: sampleResult.partialValue
@@ -169,5 +190,9 @@ public final class UsageAggregator: @unchecked Sendable {
             components.month ?? 0,
             components.day ?? 0
         )
+    }
+
+    private func bucketStart(for date: Date) -> Date {
+        calendar.dateInterval(of: .minute, for: date)?.start ?? date
     }
 }

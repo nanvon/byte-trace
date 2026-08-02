@@ -5,7 +5,7 @@ import SwiftUI
 struct MenuBarView: View {
     @ObservedObject var model: ByteTraceViewModel
 
-    @State private var isShowingSettings = false
+    @Environment(\.openWindow) private var openWindow
     @State private var isProxyExpanded = false
     @State private var isSystemExpanded = false
 
@@ -27,9 +27,6 @@ struct MenuBarView: View {
             footer
         }
         .frame(width: 390, height: 560)
-        .sheet(isPresented: $isShowingSettings) {
-            SettingsView(model: model)
-        }
     }
 
     private var header: some View {
@@ -54,7 +51,18 @@ struct MenuBarView: View {
             .help("刷新今日统计")
 
             Button {
-                isShowingSettings = true
+                model.requestedMainWindowPage = .overview
+                openWindow(id: "main")
+            } label: {
+                Image(systemName: "macwindow")
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.plain)
+            .help("打开主窗口")
+
+            Button {
+                model.requestedMainWindowPage = .settings
+                openWindow(id: "main")
             } label: {
                 Image(systemName: "gearshape")
                     .frame(width: 26, height: 26)
