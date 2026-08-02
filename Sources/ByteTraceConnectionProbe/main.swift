@@ -48,42 +48,16 @@ private struct Options {
     }
 }
 
-private struct ByteTotals {
-    var downloadBytes: Int64 = 0
-    var uploadBytes: Int64 = 0
-
-    var totalBytes: Int64 {
-        Self.saturatingAdd(downloadBytes, uploadBytes)
-    }
-
-    mutating func add(downloadBytes: Int64, uploadBytes: Int64) {
-        self.downloadBytes = Self.saturatingAdd(self.downloadBytes, downloadBytes)
-        self.uploadBytes = Self.saturatingAdd(self.uploadBytes, uploadBytes)
-    }
-
-    private static func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
-        let result = lhs.addingReportingOverflow(rhs)
-        return result.overflow ? Int64.max : result.partialValue
-    }
-}
+private typealias ByteTotals = NettopByteTotals
 
 private struct EndpointStats {
     var connectionCount: Int64 = 0
     var bytes = ByteTotals()
 }
 
-private struct ProcessMismatch {
+private struct ProcessVisibility {
     let processName: String
-    let summary: ByteTotals
-    let connections: ByteTotals
-
-    var difference: Int64 {
-        absDifference(summary.totalBytes, connections.totalBytes)
-    }
-
-    private func absDifference(_ lhs: Int64, _ rhs: Int64) -> Int64 {
-        lhs >= rhs ? lhs - rhs : rhs - lhs
-    }
+    let reconciliation: NettopReconciliation
 }
 
 private struct ConnectionProbeReport {
@@ -175,11 +149,14 @@ private struct ConnectionProbeReport {
                 uploadBytes: value.uploadBytes
             )
         }
-        let difference = absoluteDifference(summaryTotals.totalBytes, allConnectionTotals.totalBytes)
-        let differencePercent = summaryTotals.totalBytes == 0
-            ? 0
-            : Double(difference) / Double(summaryTotals.totalBytes) * 100
-        let formattedDifferencePercent = String(format: "%.2f", differencePercent)
+        let reconciliation = NettopReconciliation(
+            summary: summaryTotals,
+            connections: allConnectionTotals
+        )
+        let formattedDifferencePercent = String(
+            format: "%.2f",
+            reconciliation.differencePercent
+        )
 
         print(
             "[reconciliation] summary_download_bytes=\(summaryTotals.downloadBytes) "
@@ -188,40 +165,53 @@ private struct ConnectionProbeReport {
                 + "connection_upload_bytes=\(allConnectionTotals.uploadBytes)"
         )
         print(
-            "[reconciliation] absolute_difference_bytes=\(difference) "
+            "[reconciliation] absolute_difference_bytes=\(reconciliation.absoluteDifferenceBytes) "
                 + "difference_percent=\(formattedDifferencePercent)"
         )
 
-        let mismatches = Set(processSummaryTotals.keys)
+        let processVisibility = Set(processSummaryTotals.keys)
             .union(connectionTotals.keys)
-            .map { processName in
-                ProcessMismatch(
+            .map { processName -> ProcessVisibility in
+                ProcessVisibility(
                     processName: processName,
-                    summary: processSummaryTotals[processName] ?? ByteTotals(),
-                    connections: connectionTotals[processName] ?? ByteTotals()
+                    reconciliation: NettopReconciliation(
+                        summary: processSummaryTotals[processName] ?? ByteTotals(),
+                        connections: connectionTotals[processName] ?? ByteTotals()
+                    )
                 )
             }
-            .filter { $0.difference > 0 }
-            .sorted { $0.difference > $1.difference }
+            .sorted { lhs, rhs in
+                let lhsDifference = lhs.reconciliation.absoluteDifferenceBytes
+                let rhsDifference = rhs.reconciliation.absoluteDifferenceBytes
+                if lhsDifference == rhsDifference {
+                    return lhs.processName < rhs.processName
+                }
+                return lhsDifference > rhsDifference
+            }
 
-        for mismatch in mismatches.prefix(10) {
+        let statusCounts = NettopVisibilityStatus.allCases.map { status in
+            let count = processVisibility.filter {
+                $0.reconciliation.status == status
+            }.count
+            return "\(status.rawValue)=\(count)"
+        }.joined(separator: ",")
+        print("[visibility] status_counts=\(statusCounts)")
+
+        for visibility in processVisibility.prefix(10)
+            where visibility.reconciliation.absoluteDifferenceBytes > 0 {
             print(
-                "[mismatch] process=\(mismatch.processName) "
-                    + "summary_bytes=\(mismatch.summary.totalBytes) "
-                    + "connection_bytes=\(mismatch.connections.totalBytes) "
-                    + "absolute_difference_bytes=\(mismatch.difference)"
+                "[visibility] process=\(visibility.processName) "
+                    + "status=\(visibility.reconciliation.status.rawValue) "
+                    + "summary_bytes=\(visibility.reconciliation.summary.totalBytes) "
+                    + "connection_bytes=\(visibility.reconciliation.connections.totalBytes) "
+                    + "absolute_difference_bytes=\(visibility.reconciliation.absoluteDifferenceBytes)"
             )
         }
 
-        let threshold = max(1024, Int64(Double(summaryTotals.totalBytes) * 0.05))
-        let status = difference <= threshold ? "PASS" : "WARN"
         print(
-            "[reconciliation] status=\(status) allowed_difference_bytes=\(threshold)"
+            "[reconciliation] status=\(reconciliation.status.rawValue) "
+                + "allowed_difference_bytes=\(reconciliation.allowedDifferenceBytes)"
         )
-    }
-
-    private func absoluteDifference(_ lhs: Int64, _ rhs: Int64) -> Int64 {
-        lhs >= rhs ? lhs - rhs : rhs - lhs
     }
 
     private func matches(_ processName: String) -> Bool {
@@ -375,7 +365,10 @@ private func runProbe(options: Options) -> Int32 {
             print("[result] FAIL: 连接级 CSV 表头不兼容")
             return 1
         }
-        print("[result] PASS: 已完成连接级 CSV → 进程分组 → 端点分类 → 对账探针")
+        print(
+            "[result] PASS: 已完成连接级 CSV → 进程分组 → 端点分类 → 对账探针；"
+                + "请以 reconciliation/visibility status 作为对账结论"
+        )
         return 0
     } catch {
         print("[result] FAIL: 无法运行连接级 nettop 探针：\(error.localizedDescription)")
