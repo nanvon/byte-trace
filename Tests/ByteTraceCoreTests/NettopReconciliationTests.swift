@@ -3,6 +3,34 @@ import XCTest
 @testable import ByteTraceCore
 
 final class NettopReconciliationTests: XCTestCase {
+    func testVisibilityStabilityCountsStatusesAndReconciledRate() {
+        let stability = NettopVisibilityStability(
+            statuses: [
+                .reconciled,
+                .partiallyVisible,
+                .reconciled,
+                .summaryOnly,
+                .unknown
+            ]
+        )
+
+        XCTAssertEqual(stability.sampleCount, 5)
+        XCTAssertEqual(stability.reconciledCount, 2)
+        XCTAssertEqual(stability.reconciledRate, 0.4, accuracy: 0.001)
+        XCTAssertEqual(stability.count(for: .partiallyVisible), 1)
+        XCTAssertEqual(stability.count(for: .summaryOnly), 1)
+        XCTAssertEqual(stability.count(for: .unknown), 1)
+    }
+
+    func testEmptyVisibilityStabilityHasZeroCounts() {
+        let stability = NettopVisibilityStability(statuses: [])
+
+        XCTAssertEqual(stability.sampleCount, 0)
+        XCTAssertEqual(stability.reconciledCount, 0)
+        XCTAssertEqual(stability.reconciledRate, 0)
+        XCTAssertEqual(stability.statusCounts.count, NettopVisibilityStatus.allCases.count)
+    }
+
     func testReconciledWhenDifferenceIsWithinFivePercent() {
         let reconciliation = NettopReconciliation(
             summary: NettopByteTotals(downloadBytes: 60_000, uploadBytes: 40_000),

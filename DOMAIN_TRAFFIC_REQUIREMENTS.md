@@ -38,9 +38,12 @@ ByteTrace 当前唯一的正式采集器是 `/usr/bin/nettop`：
 swift run ByteTraceConnectionProbe --duration 5
 swift run ByteTraceConnectionProbe --duration 5 --numeric
 swift run ByteTraceConnectionProbe --duration 5 --process codex
+swift run ByteTraceConnectionProbe --duration 5 --runs 3 --process mihomo
 ```
 
 探针使用不带 `-P` 的 `nettop` 连接级输出，只在内存中统计 hostname、IP、未知端点和进程摘要/连接明细的字节差异，不写入正式 SQLite、不修改应用级总量，也不显示在 UI。`--numeric` 用于关闭名称解析，`--process` 在内存中过滤进程，不把进程名直接传给 `nettop`，以避免短生命周期进程或 PID 变化导致整轮没有数据。
+
+`--runs` 会顺序执行多个彼此独立的采样窗口，每轮重新建立首帧基线，最后输出四类状态的分布和 `reconciled` 百分比。它只用于稳定性验证，不把多轮结果合并进应用级流量统计。
 
 ### 2026-08-02 实机探针结果
 
@@ -86,6 +89,20 @@ swift run ByteTraceConnectionProbe --duration 5 --process codex
 | `unknown` | 没有进程摘要，或只有无法与进程摘要对上的连接流量 |
 
 该分类只用于诊断和后续采集器评估，不改变现有应用级统计口径，也不代表 `hostname` 已经被验证为真实域名。
+
+### 2026-08-02 多轮稳定性采样
+
+使用 `--duration 5 --runs 3 --process <name>` 进行 3 轮独立采样，每轮重新建立基线。下表统计的是每一轮的全局对账状态；`unknown` 表示该轮没有匹配到进程流量，不能当作对账通过或失败。
+
+| 进程 | 轮数 | `reconciled` | `partially_visible` | `summary_only` | `unknown` | 可对账比例 | 当前判断 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `mihomo` | 3 | 0 | 3 | 0 | 0 | 0.00% | 稳定地只能部分可见 |
+| `Browser Helper` | 3 | 2 | 1 | 0 | 0 | 66.67% | 偶发摘要与连接明细不一致 |
+| `Telegram` | 3 | 0 | 0 | 1 | 2 | 0.00% | 有效流量样本不足，需主动操作后复测 |
+| `Dia` | 3 | 0 | 0 | 1 | 2 | 0.00% | 有流量时为仅摘要，需更多场景复测 |
+| `mDNSResponder` | 3 | 2 | 0 | 0 | 1 | 66.67% | 活跃样本可对账，空闲轮不计入结论 |
+
+多轮结论：单轮 `PASS` 不能代表数据源稳定。当前没有一个目标应用满足“连续活跃样本都可对账”的条件；`mihomo` 的 3 轮都存在明显差异，`Browser Helper` 仍有间歇性摘要-only 情况。`Telegram` 和 `Dia` 需要在采样窗口内产生明确业务流量后再复测。域名明细仍不进入正式数据库和 UI。
 
 ## 产品定义
 

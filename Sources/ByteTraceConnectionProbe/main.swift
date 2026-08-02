@@ -4,11 +4,13 @@ import Foundation
 
 private struct Options {
     let duration: TimeInterval
+    let runs: Int
     let numericOnly: Bool
     let process: String?
 
     init(arguments: [String]) {
         var duration: TimeInterval = 5
+        var runs = 1
         var numericOnly = false
         var process: String?
         var index = 1
@@ -18,6 +20,12 @@ private struct Options {
             case "--duration" where index + 1 < arguments.count:
                 if let value = TimeInterval(arguments[index + 1]), value > 0 {
                     duration = value
+                }
+                index += 2
+
+            case "--runs" where index + 1 < arguments.count:
+                if let value = Int(arguments[index + 1]), value > 0 {
+                    runs = value
                 }
                 index += 2
 
@@ -35,6 +43,7 @@ private struct Options {
         }
 
         self.duration = duration
+        self.runs = runs
         self.numericOnly = numericOnly
         self.process = process
     }
@@ -120,6 +129,13 @@ private struct ConnectionProbeReport {
         }
     }
 
+    func overallReconciliation() -> NettopReconciliation {
+        NettopReconciliation(
+            summary: summaryByteTotals(),
+            connections: connectionByteTotals()
+        )
+    }
+
     func printSummary() {
         print("[probe] complete_frames=\(completeFrames)")
         print("[probe] baseline_frames=\(baselineFrames)")
@@ -137,22 +153,9 @@ private struct ConnectionProbeReport {
             )
         }
 
-        let summaryTotals = processSummaryTotals.values.reduce(into: ByteTotals()) { totals, value in
-            totals.add(
-                downloadBytes: value.downloadBytes,
-                uploadBytes: value.uploadBytes
-            )
-        }
-        let allConnectionTotals = connectionTotals.values.reduce(into: ByteTotals()) { totals, value in
-            totals.add(
-                downloadBytes: value.downloadBytes,
-                uploadBytes: value.uploadBytes
-            )
-        }
-        let reconciliation = NettopReconciliation(
-            summary: summaryTotals,
-            connections: allConnectionTotals
-        )
+        let summaryTotals = summaryByteTotals()
+        let allConnectionTotals = connectionByteTotals()
+        let reconciliation = overallReconciliation()
         let formattedDifferencePercent = String(
             format: "%.2f",
             reconciliation.differencePercent
@@ -212,6 +215,24 @@ private struct ConnectionProbeReport {
             "[reconciliation] status=\(reconciliation.status.rawValue) "
                 + "allowed_difference_bytes=\(reconciliation.allowedDifferenceBytes)"
         )
+    }
+
+    private func summaryByteTotals() -> ByteTotals {
+        processSummaryTotals.values.reduce(into: ByteTotals()) { totals, value in
+            totals.add(
+                downloadBytes: value.downloadBytes,
+                uploadBytes: value.uploadBytes
+            )
+        }
+    }
+
+    private func connectionByteTotals() -> ByteTotals {
+        connectionTotals.values.reduce(into: ByteTotals()) { totals, value in
+            totals.add(
+                downloadBytes: value.downloadBytes,
+                uploadBytes: value.uploadBytes
+            )
+        }
     }
 
     private func matches(_ processName: String) -> Bool {
@@ -341,30 +362,49 @@ private func runProbe(options: Options) -> Int32 {
     print("[collector] executable=/usr/bin/nettop")
     print("[collector] arguments=\(options.nettopArguments.joined(separator: " "))")
     print("[collector] duration_seconds=\(options.duration)")
+    print("[collector] runs=\(options.runs)")
     if let process = options.process {
         print("[probe] process_filter=\(process) mode=in_memory")
     }
     print("[collector] storage=none ui=none")
 
     do {
-        let session = ConnectionProbeSession(
-            arguments: options.nettopArguments,
-            processFilter: options.process
-        )
-        let (report, stderr) = try session.run(duration: options.duration)
-        if !stderr.isEmpty {
-            print("[collector] stderr=\(stderr)")
-        }
-        report.printSummary()
+        var statuses: [NettopVisibilityStatus] = []
+        for runIndex in 1...options.runs {
+            print("[run] index=\(runIndex)/\(options.runs)")
+            let session = ConnectionProbeSession(
+                arguments: options.nettopArguments,
+                processFilter: options.process
+            )
+            let (report, stderr) = try session.run(duration: options.duration)
+            if !stderr.isEmpty {
+                print("[collector] run=\(runIndex) stderr=\(stderr)")
+            }
+            report.printSummary()
 
-        guard report.completeFrames > 0 else {
-            print("[result] FAIL: 未获得完整连接级 nettop CSV 帧")
-            return 1
+            guard report.completeFrames > 0 else {
+                print("[result] FAIL: 第 \(runIndex) 轮未获得完整连接级 nettop CSV 帧")
+                return 1
+            }
+            guard report.incompatibleSchemas == 0 else {
+                print("[result] FAIL: 第 \(runIndex) 轮连接级 CSV 表头不兼容")
+                return 1
+            }
+            statuses.append(report.overallReconciliation().status)
         }
-        guard report.incompatibleSchemas == 0 else {
-            print("[result] FAIL: 连接级 CSV 表头不兼容")
-            return 1
-        }
+
+        let stability = NettopVisibilityStability(statuses: statuses)
+        let statusCounts = NettopVisibilityStatus.allCases.map { status in
+            "\(status.rawValue)=\(stability.count(for: status))"
+        }.joined(separator: ",")
+        let reconciledPercent = String(
+            format: "%.2f",
+            stability.reconciledRate * 100
+        )
+        print(
+            "[stability] runs=\(stability.sampleCount) status_counts=\(statusCounts) "
+                + "reconciled_percent=\(reconciledPercent)"
+        )
         print(
             "[result] PASS: 已完成连接级 CSV → 进程分组 → 端点分类 → 对账探针；"
                 + "请以 reconciliation/visibility status 作为对账结论"

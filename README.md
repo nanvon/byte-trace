@@ -10,6 +10,8 @@ swift test
 swift run ByteTraceProbe --duration 15
 # 连接级只读原型，不写入正式数据库
 swift run ByteTraceConnectionProbe --duration 5
+# 多轮稳定性验证，每轮独立建立基线
+swift run ByteTraceConnectionProbe --duration 5 --runs 3 --process mihomo
 # macOS 菜单栏原型
 swift run ByteTraceApp
 # 生成可从 Finder 启动的 ad-hoc 签名包

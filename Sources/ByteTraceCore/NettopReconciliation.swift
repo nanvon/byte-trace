@@ -31,6 +31,36 @@ public enum NettopVisibilityStatus: String, CaseIterable, Sendable {
     case unknown
 }
 
+public struct NettopVisibilityStability: Equatable, Sendable {
+    public let sampleCount: Int
+    public let statusCounts: [NettopVisibilityStatus: Int]
+
+    public init(statuses: [NettopVisibilityStatus]) {
+        self.sampleCount = statuses.count
+
+        var counts = Dictionary(
+            uniqueKeysWithValues: NettopVisibilityStatus.allCases.map { ($0, 0) }
+        )
+        for status in statuses {
+            counts[status, default: 0] += 1
+        }
+        self.statusCounts = counts
+    }
+
+    public var reconciledCount: Int {
+        count(for: .reconciled)
+    }
+
+    public var reconciledRate: Double {
+        guard sampleCount > 0 else { return 0 }
+        return Double(reconciledCount) / Double(sampleCount)
+    }
+
+    public func count(for status: NettopVisibilityStatus) -> Int {
+        statusCounts[status] ?? 0
+    }
+}
+
 public struct NettopReconciliation: Equatable, Sendable {
     public let summary: NettopByteTotals
     public let connections: NettopByteTotals
