@@ -444,6 +444,23 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
+    func clearHostUsageData() {
+        guard let store else { return }
+
+        do {
+            try store.clearHostUsage()
+            if var hostAggregator {
+                hostAggregator.removeAll()
+                self.hostAggregator = hostAggregator
+            }
+            try loadRange(from: store)
+            lastError = nil
+        } catch {
+            lastError = "清空主机名实验数据失败：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "database_error", details: lastError)
+        }
+    }
+
     func setLaunchAtLogin(_ enabled: Bool) {
         do {
             if enabled {

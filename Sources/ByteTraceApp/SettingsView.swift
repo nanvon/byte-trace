@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var model: ByteTraceViewModel
     @State private var isShowingClearConfirmation = false
+    @State private var isShowingHostClearConfirmation = false
     @State private var pendingRetentionPolicy: UsageRetentionPolicy?
 
     var body: some View {
@@ -96,6 +97,18 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("可见主机名实验") {
+                    Text("该实验数据与正式应用统计分开保存。清理这里只会删除主机名、IP-only 和未知端点的连接级桶。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Button(role: .destructive) {
+                        isShowingHostClearConfirmation = true
+                    } label: {
+                        Label("清空主机名实验数据", systemImage: "globe.badge.chevron.backward")
+                    }
+                }
+
                 Section("关于 ByteTrace") {
                     LabeledContent("数据源", value: "系统 nettop")
                     LabeledContent("统计口径", value: "应用逻辑流量")
@@ -117,6 +130,18 @@ struct SettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("此操作会删除本机保存的每日应用流量和采集诊断记录，不能撤销。")
+        }
+        .confirmationDialog(
+            "确定清空主机名实验数据？",
+            isPresented: $isShowingHostClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("清空主机名数据", role: .destructive) {
+                model.clearHostUsageData()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("此操作只删除连接级主机名实验数据，不影响正式应用统计和日汇总。")
         }
         .confirmationDialog(
             "启用分钟级数据保留？",
