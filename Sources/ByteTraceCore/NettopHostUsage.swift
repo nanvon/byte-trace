@@ -40,6 +40,7 @@ public struct NettopHostUsageSample: Equatable, Sendable {
 }
 
 public struct NettopHostUsageRecord: Equatable, Sendable {
+    public let bucketStart: Date
     public let appKey: String?
     public let displayName: String?
     public let endpointKind: NettopEndpointKind
@@ -55,6 +56,7 @@ public struct NettopHostUsageRecord: Equatable, Sendable {
     }
 
     public init(
+        bucketStart: Date,
         appKey: String?,
         displayName: String?,
         endpointKind: NettopEndpointKind,
@@ -65,6 +67,7 @@ public struct NettopHostUsageRecord: Equatable, Sendable {
         downloadBytes: Int64,
         uploadBytes: Int64
     ) {
+        self.bucketStart = bucketStart
         self.appKey = appKey
         self.displayName = displayName
         self.endpointKind = endpointKind
@@ -84,14 +87,18 @@ public struct NettopHostUsageRecord: Equatable, Sendable {
 
 public struct NettopHostUsageAggregator: Sendable {
     private struct Key: Hashable, Sendable {
+        let bucketStart: Date
         let appKey: String?
         let endpointKind: NettopEndpointKind
         let hostname: String?
     }
 
+    private let calendar: Calendar
     private var pending: [Key: NettopHostUsageRecord] = [:]
 
-    public init() {}
+    public init(calendar: Calendar = .autoupdatingCurrent) {
+        self.calendar = calendar
+    }
 
     public var recordCount: Int {
         pending.count
@@ -105,6 +112,7 @@ public struct NettopHostUsageAggregator: Sendable {
 
         let endpoint = normalizedEndpoint(sample.endpoint)
         let key = Key(
+            bucketStart: bucketStart(for: sample.sampledAt),
             appKey: sample.appKey,
             endpointKind: endpoint.kind,
             hostname: endpoint.hostname
@@ -112,6 +120,7 @@ public struct NettopHostUsageAggregator: Sendable {
 
         guard let existing = pending[key] else {
             pending[key] = NettopHostUsageRecord(
+                bucketStart: key.bucketStart,
                 appKey: sample.appKey,
                 displayName: sample.displayName,
                 endpointKind: endpoint.kind,
@@ -133,6 +142,7 @@ public struct NettopHostUsageAggregator: Sendable {
         }
 
         pending[key] = NettopHostUsageRecord(
+            bucketStart: existing.bucketStart,
             appKey: existing.appKey,
             displayName: sample.displayName ?? existing.displayName,
             endpointKind: existing.endpointKind,
@@ -153,6 +163,9 @@ public struct NettopHostUsageAggregator: Sendable {
             if lhs.appKey != rhs.appKey {
                 return (lhs.appKey ?? "") < (rhs.appKey ?? "")
             }
+            if lhs.bucketStart != rhs.bucketStart {
+                return lhs.bucketStart < rhs.bucketStart
+            }
             if lhs.hostname != rhs.hostname {
                 return (lhs.hostname ?? "") < (rhs.hostname ?? "")
             }
@@ -171,5 +184,9 @@ public struct NettopHostUsageAggregator: Sendable {
             return NettopEndpointInfo(kind: endpoint.kind)
         }
         return NettopEndpointInfo(kind: .hostname, hostname: hostname)
+    }
+
+    private func bucketStart(for date: Date) -> Date {
+        calendar.dateInterval(of: .minute, for: date)?.start ?? date
     }
 }

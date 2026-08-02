@@ -75,6 +75,36 @@ final class NettopHostUsageTests: XCTestCase {
         XCTAssertTrue(aggregator.records().allSatisfy { $0.hostname == nil })
     }
 
+    func testSamplesInDifferentMinutesRemainSeparate() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let first = calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 2, hour: 10, minute: 0, second: 1)
+        )!
+        let second = first.addingTimeInterval(60)
+        var aggregator = NettopHostUsageAggregator(calendar: calendar)
+
+        for sampleDate in [first, second] {
+            try aggregator.ingest(
+                NettopHostUsageSample(
+                    sampledAt: sampleDate,
+                    appKey: "bundle:com.example.app",
+                    endpoint: NettopEndpointInfo(kind: .hostname, hostname: "example.com"),
+                    downloadBytes: 10,
+                    uploadBytes: 1
+                )
+            )
+        }
+
+        let records = aggregator.records()
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.map(\.downloadBytes), [10, 10])
+        XCTAssertEqual(records.map(\.bucketStart), [
+            calendar.dateInterval(of: .minute, for: first)!.start,
+            calendar.dateInterval(of: .minute, for: second)!.start
+        ])
+    }
+
     func testZeroSamplesAreIgnoredAndInvalidOrOverflowingSamplesAreRejected() throws {
         let date = Date(timeIntervalSince1970: 100)
         var aggregator = NettopHostUsageAggregator()
