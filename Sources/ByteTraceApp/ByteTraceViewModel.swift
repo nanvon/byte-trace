@@ -175,10 +175,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private static let showSystemProcessesKey = "ByteTrace.showSystemProcesses"
     private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
     private let collector: NettopCollector
+    private let connectionCollector: NettopConnectionCollector
     private let resolver: SystemProcessIdentityResolver
     private let attributionCache: ProcessAttributionCache
     private let store: UsageStore?
     private let aggregator: UsageAggregator?
+    private var hostAggregator: NettopHostUsageAggregator?
     private var flushTimer: Timer?
     private var restartTimer: Timer?
     private var restartAttempt = 0
@@ -198,6 +200,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     override init() {
         databaseURL = UsageStore.defaultDatabaseURL(bundleIdentifier: Self.bundleIdentifier)
         collector = NettopCollector()
+        connectionCollector = NettopConnectionCollector()
         resolver = SystemProcessIdentityResolver()
         attributionCache = ProcessAttributionCache()
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
@@ -219,9 +222,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             let store = try UsageStore(databaseURL: databaseURL)
             self.store = store
             aggregator = UsageAggregator(store: store)
+            hostAggregator = NettopHostUsageAggregator()
         } catch {
             store = nil
             aggregator = nil
+            hostAggregator = nil
             storageError = "无法打开本地数据库：\(error.localizedDescription)"
         }
 
@@ -298,6 +303,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             collector.stop()
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
+        stopConnectionCollector()
         flushNow()
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
@@ -315,6 +321,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             collector.stop()
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
+        stopConnectionCollector()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         networkPathMonitor.cancel()
         flushNow()
@@ -380,6 +387,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         do {
             try store.clearAll()
             aggregator.discardPending()
+            if var hostAggregator {
+                hostAggregator.removeAll()
+                self.hostAggregator = hostAggregator
+            }
             records = []
             rangeRecords = []
             rangeTimeline = []
@@ -430,6 +441,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         collector.onEvent = { [weak self] event in
             self?.receive(event)
         }
+        connectionCollector.onEvent = { [weak self] event in
+            self?.receive(event)
+        }
     }
 
     private func registerWorkspaceNotifications() {
@@ -472,6 +486,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
+    private nonisolated func receive(_ event: NettopConnectionCollectorEvent) {
+        Task { @MainActor [weak self] in
+            self?.handle(event)
+        }
+    }
+
     private func handle(_ event: NettopCollectorEvent) {
         switch event {
         case .started:
@@ -493,6 +513,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 status = .reconnecting
                 recordCollectorEvent(kind: "collector_exited", details: message)
                 collector.stop()
+                stopConnectionCollector()
+                flushNow()
                 scheduleRestart()
             } else {
                 if status != .incompatible {
@@ -500,6 +522,26 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 }
                 recordCollectorEvent(kind: "collector_exited")
             }
+        }
+    }
+
+    private func handle(_ event: NettopConnectionCollectorEvent) {
+        switch event {
+        case .started:
+            recordCollectorEvent(kind: "host_collector_started")
+
+        case let .parser(parserEvent):
+            handleConnection(parserEvent)
+
+        case let .stderr(message):
+            guard !message.isEmpty else { return }
+            recordCollectorEvent(kind: "host_collector_stderr", details: message)
+
+        case let .exited(statusCode):
+            recordCollectorEvent(
+                kind: "host_collector_exited",
+                details: "status=\(statusCode)"
+            )
         }
     }
 
@@ -523,6 +565,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             collector.stop()
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
+        stopConnectionCollector()
         flushNow()
 
         if isSatisfied {
@@ -570,6 +613,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             if collector.state != .stopped {
                 collector.stop()
             }
+            stopConnectionCollector()
             status = .incompatible
             lastError = message
             recordCollectorEvent(kind: "parse_schema_changed", details: message)
@@ -599,6 +643,51 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         } catch {
             lastError = "流量样本未入队：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
+        }
+    }
+
+    private func handleConnection(_ event: NettopConnectionParserEvent) {
+        switch event {
+        case let .frameCompleted(_, _, deltas, isBaseline):
+            guard !isBaseline else { return }
+            for delta in deltas {
+                ingestHostUsage(delta)
+            }
+
+        case .malformedRow, .schemaChanged:
+            break
+
+        case let .incompatibleSchema(missingColumns):
+            recordCollectorEvent(
+                kind: "host_parse_schema_changed",
+                details: "missing=\(missingColumns.joined(separator: ","))"
+            )
+            stopConnectionCollector()
+        }
+    }
+
+    private func ingestHostUsage(_ delta: NettopConnectionDelta) {
+        guard var hostAggregator else { return }
+
+        let token = NettopProcessToken(rawValue: delta.processName)
+        let identity = resolver.resolve(token)
+        let attributed = attributionCache.attribute(identity)
+
+        do {
+            try hostAggregator.ingest(
+                NettopHostUsageSample(
+                    sampledAt: Self.sampleDate(for: delta.sampledAt),
+                    appKey: attributed.appKey,
+                    displayName: attributed.displayName,
+                    endpoint: delta.endpointInfo,
+                    downloadBytes: delta.downloadBytes,
+                    uploadBytes: delta.uploadBytes
+                )
+            )
+            self.hostAggregator = hostAggregator
+        } catch {
+            lastError = "主机名样本未入队：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "host_usage_error", details: lastError)
         }
     }
 
@@ -636,6 +725,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             collector.stop()
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
+        stopConnectionCollector()
         flushNow()
         status = .stopped
         recordCollectorEvent(kind: "sample_gap", details: "system_sleep")
@@ -659,6 +749,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             try collector.start()
             isStarted = true
             recordCollectorEvent(kind: "collector_started")
+            startConnectionCollector()
         } catch {
             isStarted = false
             let message = "nettop 启动失败：\(error.localizedDescription)"
@@ -667,6 +758,26 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             recordCollectorEvent(kind: "collector_error", details: message)
             scheduleRestart()
         }
+    }
+
+    private func startConnectionCollector() {
+        guard wantsCollection, !isSleeping, networkPathSatisfied else { return }
+        guard connectionCollector.state == .stopped else { return }
+
+        do {
+            try connectionCollector.start()
+        } catch {
+            recordCollectorEvent(
+                kind: "host_collector_error",
+                details: error.localizedDescription
+            )
+        }
+    }
+
+    private func stopConnectionCollector() {
+        guard connectionCollector.state != .stopped else { return }
+        connectionCollector.stop()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
 
     private func scheduleRestart() {
@@ -694,6 +805,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         guard let aggregator else { return }
         do {
             _ = try aggregator.flush()
+            if let store, var hostAggregator {
+                _ = try hostAggregator.flush(to: store)
+                self.hostAggregator = hostAggregator
+            }
             refresh()
         } catch {
             lastError = "数据库写入失败：\(error.localizedDescription)"

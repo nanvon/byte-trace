@@ -185,8 +185,12 @@ public final class NettopConnectionCollector: @unchecked Sendable {
 
     private func emitParserEvent(_ event: NettopConnectionParserEvent) {
         guard let callback = onEvent else { return }
-        DispatchQueue.main.async {
+        if Thread.isMainThread {
             callback(.parser(event))
+        } else {
+            DispatchQueue.main.async {
+                callback(.parser(event))
+            }
         }
     }
 
