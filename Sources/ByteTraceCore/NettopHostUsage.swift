@@ -173,6 +173,16 @@ public struct NettopHostUsageAggregator: Sendable {
         }
     }
 
+    @discardableResult
+    public mutating func flush(to store: UsageStore) throws -> Int {
+        let values = records()
+        guard !values.isEmpty else { return 0 }
+
+        try store.applyHostUsage(values)
+        pending.removeAll(keepingCapacity: true)
+        return values.count
+    }
+
     public mutating func removeAll() {
         pending.removeAll(keepingCapacity: true)
     }

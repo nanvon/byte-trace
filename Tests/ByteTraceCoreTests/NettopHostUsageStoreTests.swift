@@ -102,6 +102,29 @@ final class NettopHostUsageStoreTests: XCTestCase {
         XCTAssertEqual(try store.dailyUsage(for: "2026-08-02")[0].downloadBytes, 50)
     }
 
+    func testFlushPersistsAndClearsOnlyAfterStoreAcceptsRecords() throws {
+        let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let date = Date(timeIntervalSince1970: 120)
+        var aggregator = NettopHostUsageAggregator()
+        try aggregator.ingest(
+            NettopHostUsageSample(
+                sampledAt: date,
+                appKey: "bundle:com.example.app",
+                displayName: "Example",
+                endpoint: NettopEndpointInfo(kind: .hostname, hostname: "example.com"),
+                downloadBytes: 12,
+                uploadBytes: 3
+            )
+        )
+
+        XCTAssertEqual(try aggregator.flush(to: store), 1)
+        XCTAssertEqual(aggregator.recordCount, 0)
+        XCTAssertEqual(
+            try store.hostUsage(from: date, to: date.addingTimeInterval(60)).first?.totalBytes,
+            15
+        )
+    }
+
     private func makeRecord(
         bucketStart: Date,
         firstSampleAt: Date,
