@@ -6,13 +6,36 @@ public enum NettopEndpointKind: String, CaseIterable, Hashable, Sendable {
     case unknown
 }
 
+public struct NettopEndpointInfo: Equatable, Sendable {
+    public let kind: NettopEndpointKind
+    public let hostname: String?
+
+    public init(kind: NettopEndpointKind, hostname: String? = nil) {
+        self.kind = kind
+        self.hostname = hostname
+    }
+}
+
 public enum NettopEndpointClassifier {
     public static func classify(_ endpoint: String?) -> NettopEndpointKind {
-        guard let endpoint else { return .unknown }
+        info(for: endpoint).kind
+    }
+
+    /// Returns only a hostname that is directly visible in the nettop endpoint.
+    /// IP addresses and unresolved endpoints deliberately do not expose a value.
+    public static func info(for endpoint: String?) -> NettopEndpointInfo {
+        guard let endpoint else { return NettopEndpointInfo(kind: .unknown) }
         let value = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, !value.contains("*") else { return .unknown }
-        guard let host = host(from: value), !host.isEmpty else { return .unknown }
-        return isIPAddress(host) ? .ipAddress : .hostname
+        guard !value.isEmpty, !value.contains("*") else {
+            return NettopEndpointInfo(kind: .unknown)
+        }
+        guard let host = host(from: value), !host.isEmpty else {
+            return NettopEndpointInfo(kind: .unknown)
+        }
+        guard !isIPAddress(host) else {
+            return NettopEndpointInfo(kind: .ipAddress)
+        }
+        return NettopEndpointInfo(kind: .hostname, hostname: host)
     }
 
     private static func host(from endpoint: String) -> String? {

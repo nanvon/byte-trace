@@ -131,4 +131,19 @@ final class NettopConnectionCSVParserTests: XCTestCase {
         XCTAssertEqual(NettopEndpointClassifier.classify("*:*"), .unknown)
         XCTAssertEqual(NettopEndpointClassifier.classify(nil), .unknown)
     }
+
+    func testEndpointInfoExposesOnlyObservedHostname() {
+        XCTAssertEqual(
+            NettopEndpointClassifier.info(for: "example.com:443"),
+            NettopEndpointInfo(kind: .hostname, hostname: "example.com")
+        )
+        XCTAssertEqual(
+            NettopEndpointClassifier.info(for: "[::1]:443"),
+            NettopEndpointInfo(kind: .ipAddress)
+        )
+        XCTAssertEqual(
+            NettopEndpointClassifier.info(for: "*:*"),
+            NettopEndpointInfo(kind: .unknown)
+        )
+    }
 }
