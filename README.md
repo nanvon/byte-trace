@@ -110,7 +110,7 @@ ByteTrace 的产品定位是“本地 macOS 应用级流量统计工具，并提
 2. 验收网络切换、睡眠唤醒、正式 collector 与 hostname collector 的独立退出重启和 flush；
 3. 用已知大小流量对账正式应用总量与 hostname 实验覆盖率，确认实验数据不重复计入正式总量；
 4. 完成 24 小时连续运行、数据库增长和保留策略验收；
-5. release 版本检查和 `.app/.zip/.dmg` 产物核对已完成；当前版本为 `0.1.4`，尚未创建或推送 release tag，待明确发布时再执行。
+5. release 版本检查和 `.app/.zip/.dmg` 产物核对已完成；当前版本为 `0.1.5`，尚未创建或推送 release tag，待明确发布时再执行。
 
 以上顺序只使用现有 `nettop` 采集链。完整 URL、HTTP 请求解析、Network Extension、系统级代理和限速扩展不作为后续开发任务。
 
@@ -120,7 +120,7 @@ GitHub Actions 已按 CI / Release 分离：
 
 - `.github/workflows/ci.yml`：在 macOS Apple Silicon 与 Intel runner 上执行 Swift build、Swift tests、打包输入校验和本地 ad-hoc 包构建；
 - `.github/workflows/release.yml`：推送与版本一致的 `v*` tag 后，构建两个 macOS 架构，使用 ad-hoc 签名，生成 DMG、ZIP 和 SHA-256 checksums，再创建 GitHub Release；
-- `Scripts/check-release-version.py`：要求 tag 必须等于 `Packaging/Info.plist` 的 `CFBundleShortVersionString`，例如当前版本 `0.1.4` 必须推送 `v0.1.4`。
+- `Scripts/check-release-version.py`：要求 tag 必须等于 `Packaging/Info.plist` 的 `CFBundleShortVersionString`，例如当前版本 `0.1.5` 必须推送 `v0.1.5`。
 
 与 `cc-trace` 一致，ByteTrace Release 不使用 Apple Developer ID 证书，也不执行 Apple 公证。macOS 产物首次打开可能需要在系统设置中手动放行；这属于 ad-hoc 签名的预期行为。
 
