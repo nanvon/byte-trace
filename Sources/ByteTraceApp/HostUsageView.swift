@@ -92,7 +92,7 @@ struct HostUsageView: View {
                 HStack {
                     Text("可识别字节 / 正式应用总量")
                     Spacer()
-                    Text("连接观测内可见 (percent(coverage.observedVisibilityRatio))")
+                    Text("连接观测内可见 \(percent(coverage.observedVisibilityRatio))")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
