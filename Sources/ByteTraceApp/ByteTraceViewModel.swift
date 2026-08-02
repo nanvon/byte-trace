@@ -27,6 +27,7 @@ struct UsageTotals: Equatable {
 
 enum MainWindowPage: String, Hashable, Identifiable {
     case overview
+    case hostUsage
     case settings
 
     var id: Self { self }
@@ -34,6 +35,7 @@ enum MainWindowPage: String, Hashable, Identifiable {
     var title: String {
         switch self {
         case .overview: return "概览"
+        case .hostUsage: return "可见主机名"
         case .settings: return "设置"
         }
     }

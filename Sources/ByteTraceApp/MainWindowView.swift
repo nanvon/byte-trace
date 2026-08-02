@@ -12,6 +12,8 @@ struct MainWindowView: View {
             List(selection: $selection) {
                 Label("概览", systemImage: "chart.bar.xaxis")
                     .tag(MainWindowPage.overview)
+                Label("可见主机名", systemImage: "globe")
+                    .tag(MainWindowPage.hostUsage)
                 Label("设置", systemImage: "gearshape")
                     .tag(MainWindowPage.settings)
             }
@@ -21,6 +23,8 @@ struct MainWindowView: View {
             switch selection {
             case .overview:
                 MainOverviewView(model: model)
+            case .hostUsage:
+                HostUsageView(model: model)
             case .settings:
                 SettingsView(model: model)
             }
