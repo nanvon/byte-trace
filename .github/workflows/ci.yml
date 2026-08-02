@@ -1,0 +1,59 @@
+name: CI
+
+# CI 只负责编译、测试和本地 ad-hoc 包结构检查；不导入证书、不公证、不创建 Release。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            runner: macos-15
+            triple: arm64-apple-macosx14.0
+          - name: macOS Intel
+            runner: macos-15-intel
+            triple: x86_64-apple-macosx14.0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain information
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Swift build
+        run: swift build
+
+      - name: Swift tests
+        run: swift test
+
+      - name: Validate packaging inputs
+        run: |
+          python3 Scripts/check-release-version.py
+          bash -n Scripts/package_app.sh
+          bash -n Scripts/import_macos_signing_certificate.sh
+          bash -n Scripts/cleanup_macos_signing.sh
+          bash -n Scripts/notarize_app.sh
+          plutil -lint Packaging/Info.plist
+
+      - name: Build local ad-hoc app bundle
+        env:
+          BYTE_TRACE_SIGNING_IDENTITY: "-"
+          BYTE_TRACE_SWIFT_TRIPLE: ${{ matrix.triple }}
+        run: ./Scripts/package_app.sh

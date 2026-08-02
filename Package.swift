@@ -1,0 +1,30 @@
+// swift-tools-version: 6.0
+
+import PackageDescription
+
+let package = Package(
+    name: "ByteTrace",
+    platforms: [
+        .macOS(.v14)
+    ],
+    products: [
+        .library(name: "ByteTraceCore", targets: ["ByteTraceCore"]),
+        .executable(name: "ByteTraceProbe", targets: ["ByteTraceProbe"]),
+        .executable(name: "ByteTraceApp", targets: ["ByteTraceApp"])
+    ],
+    targets: [
+        .target(name: "ByteTraceCore"),
+        .executableTarget(
+            name: "ByteTraceApp",
+            dependencies: ["ByteTraceCore"]
+        ),
+        .executableTarget(
+            name: "ByteTraceProbe",
+            dependencies: ["ByteTraceCore"]
+        ),
+        .testTarget(
+            name: "ByteTraceCoreTests",
+            dependencies: ["ByteTraceCore"]
+        )
+    ]
+)

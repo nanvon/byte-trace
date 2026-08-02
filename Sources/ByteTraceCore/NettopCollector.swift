@@ -1,0 +1,239 @@
+import Darwin
+import Foundation
+
+public enum NettopCollectorState: Equatable, Sendable {
+    case stopped
+    case starting
+    case baseline
+    case collecting
+    case incompatible
+    case failed(String)
+}
+
+public enum NettopCollectorEvent: Sendable {
+    case started(pid: Int32)
+    case parser(NettopParserEvent)
+    case stderr(String)
+    case exited(status: Int32)
+}
+
+public enum NettopCollectorError: LocalizedError {
+    case alreadyRunning
+    case launchFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .alreadyRunning:
+            return "nettop collector is already running"
+        case let .launchFailed(message):
+            return "unable to launch nettop: \(message)"
+        }
+    }
+}
+
+public final class NettopCollector: @unchecked Sendable {
+    public static let executablePath = "/usr/bin/nettop"
+    public static let arguments = ["-n", "-P", "-d", "-x", "-L", "0", "-s", "1"]
+
+    public var onEvent: ((NettopCollectorEvent) -> Void)?
+
+    private let stateLock = NSLock()
+    private let parserQueue = DispatchQueue(label: "com.nanvon.ByteTrace.nettop-parser")
+    private var currentState: NettopCollectorState = .stopped
+    private var process: Process?
+    private var processIdentifier: Int32?
+    private var readGroup: DispatchGroup?
+    private var parser = NettopCSVParser()
+    private var didReportExit = false
+    private var stderrData = Data()
+
+    public init() {}
+
+    public var state: NettopCollectorState {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return currentState
+    }
+
+    public var runningProcessIdentifier: Int32? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return processIdentifier
+    }
+
+    public func start() throws {
+        stateLock.lock()
+        guard process == nil, currentState != .starting else {
+            stateLock.unlock()
+            throw NettopCollectorError.alreadyRunning
+        }
+        currentState = .starting
+        parser = NettopCSVParser()
+        stderrData.removeAll(keepingCapacity: false)
+        didReportExit = false
+        stateLock.unlock()
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.executablePath)
+        process.arguments = Self.arguments
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        let stdoutHandle = stdoutPipe.fileHandleForReading
+        let stderrHandle = stderrPipe.fileHandleForReading
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        if let nullInput = FileHandle(forReadingAtPath: "/dev/null") {
+            process.standardInput = nullInput
+        }
+
+        process.terminationHandler = { [weak self] process in
+            self?.reportTermination(status: process.terminationStatus)
+        }
+
+        do {
+            try process.run()
+        } catch {
+            updateState(.failed(error.localizedDescription))
+            throw NettopCollectorError.launchFailed(error.localizedDescription)
+        }
+
+        let readGroup = DispatchGroup()
+        stateLock.lock()
+        self.process = process
+        processIdentifier = process.processIdentifier
+        self.readGroup = readGroup
+        stateLock.unlock()
+
+        emit(.started(pid: process.processIdentifier))
+
+        readGroup.enter()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            Self.readUntilEOF(stdoutHandle) { [weak self] data in
+                self?.consumeStdout(data)
+            }
+            readGroup.leave()
+        }
+
+        readGroup.enter()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            Self.readUntilEOF(stderrHandle) { [weak self] data in
+                self?.consumeStderr(data)
+            }
+            readGroup.leave()
+        }
+    }
+
+    public func stop() {
+        stateLock.lock()
+        let process = self.process
+        let readGroup = self.readGroup
+        stateLock.unlock()
+
+        if let process {
+            Self.terminate(process)
+        }
+        readGroup?.wait()
+
+        let finalEvents = parserQueue.sync {
+            parser.finish()
+        }
+        handleParserEvents(finalEvents)
+
+        stateLock.lock()
+        let stderr = String(decoding: stderrData, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.process = nil
+        processIdentifier = nil
+        self.readGroup = nil
+        currentState = .stopped
+        stateLock.unlock()
+
+        if !stderr.isEmpty {
+            emit(.stderr(stderr))
+        }
+    }
+
+    private func consumeStdout(_ data: Data) {
+        let events = parserQueue.sync {
+            parser.consume(data)
+        }
+        handleParserEvents(events)
+    }
+
+    private func consumeStderr(_ data: Data) {
+        stateLock.lock()
+        stderrData.append(data)
+        stateLock.unlock()
+    }
+
+    private func handleParserEvents(_ events: [NettopParserEvent]) {
+        for event in events {
+            switch event {
+            case let .frameCompleted(_, _, isBaseline):
+                updateState(isBaseline ? .baseline : .collecting)
+            case .incompatibleSchema:
+                updateState(.incompatible)
+            case .malformedRow, .schemaChanged:
+                break
+            }
+            emitParserEvent(event)
+        }
+    }
+
+    private func reportTermination(status: Int32) {
+        stateLock.lock()
+        guard !didReportExit else {
+            stateLock.unlock()
+            return
+        }
+        didReportExit = true
+        stateLock.unlock()
+        emit(.exited(status: status))
+    }
+
+    private func updateState(_ newState: NettopCollectorState) {
+        stateLock.lock()
+        currentState = newState
+        stateLock.unlock()
+    }
+
+    private func emit(_ event: NettopCollectorEvent) {
+        onEvent?(event)
+    }
+
+    private func emitParserEvent(_ event: NettopParserEvent) {
+        guard let callback = onEvent else { return }
+        DispatchQueue.main.async {
+            callback(.parser(event))
+        }
+    }
+
+    private static func readUntilEOF(_ handle: FileHandle, onData: @escaping (Data) -> Void) {
+        while true {
+            do {
+                guard let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty else {
+                    return
+                }
+                onData(chunk)
+            } catch {
+                return
+            }
+        }
+    }
+
+    private static func terminate(_ process: Process) {
+        guard process.isRunning else { return }
+        process.terminate()
+
+        let deadline = Date().addingTimeInterval(2)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        if process.isRunning {
+            _ = kill(process.processIdentifier, SIGKILL)
+        }
+        process.waitUntilExit()
+    }
+}
