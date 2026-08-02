@@ -133,13 +133,15 @@ struct MenuBarView: View {
 
             Spacer(minLength: 0)
 
-            if !model.isCollecting {
-                Button("开始") {
+            Button(model.isCollecting ? "停止" : "开始") {
+                if model.isCollecting {
+                    model.stop()
+                } else {
                     model.start()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
         .padding(12)
         .background(
@@ -195,6 +197,15 @@ struct MenuBarView: View {
             Text("仅保存在本机")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+            Button {
+                model.shutdown()
+                NSApplication.shared.terminate(nil)
+            } label: {
+                Image(systemName: "power")
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("退出 ByteTrace")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
