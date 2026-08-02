@@ -40,7 +40,7 @@ swift run ByteTraceConnectionProbe --duration 5 --numeric
 swift run ByteTraceConnectionProbe --duration 5 --process codex
 ```
 
-探针使用不带 `-P` 的 `nettop` 连接级输出，只在内存中统计 hostname、IP、未知端点和进程摘要/连接明细的字节差异，不写入正式 SQLite、不修改应用级总量，也不显示在 UI。`--numeric` 用于关闭名称解析，`--process` 用于缩小到一个进程进行对账。
+探针使用不带 `-P` 的 `nettop` 连接级输出，只在内存中统计 hostname、IP、未知端点和进程摘要/连接明细的字节差异，不写入正式 SQLite、不修改应用级总量，也不显示在 UI。`--numeric` 用于关闭名称解析，`--process` 在内存中过滤进程，不把进程名直接传给 `nettop`，以避免短生命周期进程或 PID 变化导致整轮没有数据。
 
 ### 2026-08-02 实机探针结果
 
@@ -61,6 +61,20 @@ swift run ByteTraceConnectionProbe --duration 5 --process codex
 - hostname 连接 182 条、IP 连接 355 条、未知连接 47 条；这里的 hostname 只是 `nettop` 名称解析结果，不等于已验证的域名流量；
 - 进程摘要与连接明细的绝对差异为 484,904 bytes，即 14.17%，仍为 `WARN`；
 - 主要差异来自 `mihomo`（253,166 bytes）、`Dia`（142,116 bytes）和 `Telegram`（79,271 bytes）；其中部分进程有摘要流量但没有对应 socket 明细，代理转发和连接生命周期仍需专项拆解。
+
+### 进程专项对账（内存过滤）
+
+为避免把短生命周期进程、PID 变化或 `nettop -p` 的进程筛选行为误认为“没有连接数据”，探针现在先采集完整的连接级输出，再在内存中按进程名及其带 PID 的摘要名过滤。以下是 2026-08-02 的独立 20 秒样本；`PASS` 只表示本轮连接明细与进程摘要达到当前对账门槛，不代表已经具备通用域名采集资格。
+
+| 进程 | 完成帧/基线帧 | hostname / IP / 未知连接 | 差异 | 结果 |
+| --- | ---: | ---: | ---: | --- |
+| `mihomo` | 20 / 1 | 34 / 119 / 0 | 4.81% | `PASS` |
+| `mDNSResponder` | 20 / 1 | 0 / 0 / 6 | 0.00% | `PASS` |
+| `Browser Helper` | 20 / 1 | 7 / 0 / 22 | 30.95% | `WARN` |
+| `Telegram` | 20 / 1 | 0 / 56 / 0 | 49.24% | `WARN` |
+| `Dia` | 20 / 1 | 0 / 0 / 0 | 100.00% | `WARN` |
+
+专项结论：`mihomo` 和 `mDNSResponder` 在本轮可以对账，但 `Browser Helper` 有进程摘要没有对应的连接明细，`Telegram` 的连接明细只覆盖了部分进程流量，`Dia` 则出现摘要流量而没有端点明细。当前连接级数据仍不能作为所有应用的完整域名流量来源，继续停留在只读原型和专项诊断阶段。
 
 ## 产品定义
 

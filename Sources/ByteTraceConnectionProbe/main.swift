@@ -44,9 +44,6 @@ private struct Options {
         if numericOnly {
             result.insert("-n", at: 0)
         }
-        if let process {
-            result.append(contentsOf: ["-p", process])
-        }
         return result
     }
 }
@@ -90,6 +87,7 @@ private struct ProcessMismatch {
 }
 
 private struct ConnectionProbeReport {
+    private let processFilter: String?
     var completeFrames = 0
     var baselineFrames = 0
     var malformedRows = 0
@@ -98,6 +96,10 @@ private struct ConnectionProbeReport {
     var processSummaryTotals: [String: ByteTotals] = [:]
     var connectionTotals: [String: ByteTotals] = [:]
     var endpointStats: [NettopEndpointKind: EndpointStats] = [:]
+
+    init(processFilter: String?) {
+        self.processFilter = processFilter
+    }
 
     mutating func consume(_ event: NettopConnectionParserEvent) {
         switch event {
@@ -108,7 +110,7 @@ private struct ConnectionProbeReport {
                 return
             }
 
-            for summary in processSummaries {
+            for summary in processSummaries where matches(summary.processName) {
                 var totals = processSummaryTotals[summary.processName] ?? ByteTotals()
                 totals.add(
                     downloadBytes: summary.downloadBytes,
@@ -117,7 +119,7 @@ private struct ConnectionProbeReport {
                 processSummaryTotals[summary.processName] = totals
             }
 
-            for delta in deltas {
+            for delta in deltas where matches(delta.processName) {
                 var processTotals = connectionTotals[delta.processName] ?? ByteTotals()
                 processTotals.add(
                     downloadBytes: delta.downloadBytes,
@@ -221,6 +223,12 @@ private struct ConnectionProbeReport {
     private func absoluteDifference(_ lhs: Int64, _ rhs: Int64) -> Int64 {
         lhs >= rhs ? lhs - rhs : rhs - lhs
     }
+
+    private func matches(_ processName: String) -> Bool {
+        guard let processFilter else { return true }
+        return processName == processFilter
+            || processName.hasPrefix("\(processFilter).")
+    }
 }
 
 private final class ConnectionProbeSession: @unchecked Sendable {
@@ -234,11 +242,12 @@ private final class ConnectionProbeSession: @unchecked Sendable {
     private let readGroup = DispatchGroup()
     private let stderrLock = NSLock()
     private var parser = NettopConnectionCSVParser()
-    private var report = ConnectionProbeReport()
+    private var report: ConnectionProbeReport
     private var stderrData = Data()
 
-    init(arguments: [String]) {
+    init(arguments: [String], processFilter: String?) {
         self.arguments = arguments
+        report = ConnectionProbeReport(processFilter: processFilter)
     }
 
     func run(duration: TimeInterval) throws -> (ConnectionProbeReport, String) {
@@ -342,10 +351,16 @@ private func runProbe(options: Options) -> Int32 {
     print("[collector] executable=/usr/bin/nettop")
     print("[collector] arguments=\(options.nettopArguments.joined(separator: " "))")
     print("[collector] duration_seconds=\(options.duration)")
+    if let process = options.process {
+        print("[probe] process_filter=\(process) mode=in_memory")
+    }
     print("[collector] storage=none ui=none")
 
     do {
-        let session = ConnectionProbeSession(arguments: options.nettopArguments)
+        let session = ConnectionProbeSession(
+            arguments: options.nettopArguments,
+            processFilter: options.process
+        )
         let (report, stderr) = try session.run(duration: options.duration)
         if !stderr.isEmpty {
             print("[collector] stderr=\(stderr)")
