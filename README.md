@@ -110,7 +110,7 @@ ByteTrace 的产品定位是“本地 macOS 应用级流量统计工具，并提
 2. 验收网络切换、睡眠唤醒、正式 collector 与 hostname collector 的独立退出重启和 flush；
 3. 用已知大小流量对账正式应用总量与 hostname 实验覆盖率，确认实验数据不重复计入正式总量；
 4. 完成 24 小时连续运行、数据库增长和保留策略验收；
-5. 重新执行 release 版本检查、`.app/.zip/.dmg` 产物核对；当前版本为 `0.1.4`，尚未推送新的 release tag。
+5. release 版本检查和 `.app/.zip/.dmg` 产物核对已完成；当前版本为 `0.1.4`，尚未创建或推送 release tag，待明确发布时再执行。
 
 以上顺序只使用现有 `nettop` 采集链。完整 URL、HTTP 请求解析、Network Extension、系统级代理和限速扩展不作为后续开发任务。
 
