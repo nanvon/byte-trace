@@ -184,6 +184,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var flushTimer: Timer?
     private var restartTimer: Timer?
     private var restartAttempt = 0
+    private var hostRestartTimer: Timer?
+    private var hostRestartAttempt = 0
+    private var hostCollectorIncompatible = false
     private var isStarted = false
     private var wantsCollection = false
     private var isSleeping = false
@@ -296,6 +299,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         restartTimer?.invalidate()
         restartTimer = nil
         restartAttempt = 0
+        hostRestartTimer?.invalidate()
+        hostRestartTimer = nil
+        hostRestartAttempt = 0
+        hostCollectorIncompatible = false
         isStarted = false
         flushTimer?.invalidate()
         flushTimer = nil
@@ -314,6 +321,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         isSleeping = false
         restartTimer?.invalidate()
         restartTimer = nil
+        hostRestartTimer?.invalidate()
+        hostRestartTimer = nil
         isStarted = false
         flushTimer?.invalidate()
         flushTimer = nil
@@ -542,6 +551,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 kind: "host_collector_exited",
                 details: "status=\(statusCode)"
             )
+            if connectionCollector.state != .stopped {
+                stopConnectionCollector()
+            }
+            scheduleHostRestart()
         }
     }
 
@@ -560,6 +573,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         restartTimer?.invalidate()
         restartTimer = nil
         restartAttempt = 0
+        hostRestartTimer?.invalidate()
+        hostRestartTimer = nil
+        hostRestartAttempt = 0
         isStarted = false
         if collector.state != .stopped {
             collector.stop()
@@ -650,6 +666,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         switch event {
         case let .frameCompleted(_, _, deltas, isBaseline):
             guard !isBaseline else { return }
+            hostRestartAttempt = 0
+            hostRestartTimer?.invalidate()
+            hostRestartTimer = nil
             for delta in deltas {
                 ingestHostUsage(delta)
             }
@@ -658,6 +677,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             break
 
         case let .incompatibleSchema(missingColumns):
+            hostCollectorIncompatible = true
+            hostRestartTimer?.invalidate()
+            hostRestartTimer = nil
+            hostRestartAttempt = 0
             recordCollectorEvent(
                 kind: "host_parse_schema_changed",
                 details: "missing=\(missingColumns.joined(separator: ","))"
@@ -714,12 +737,20 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         startCollectorProcess()
     }
 
+    @objc private func hostRestartTimerFired(_ timer: Timer) {
+        hostRestartTimer?.invalidate()
+        hostRestartTimer = nil
+        startConnectionCollector()
+    }
+
     @objc private func handleWillSleep(_ notification: Notification) {
         guard wantsCollection else { return }
 
         isSleeping = true
         restartTimer?.invalidate()
         restartTimer = nil
+        hostRestartTimer?.invalidate()
+        hostRestartTimer = nil
         isStarted = false
         if collector.state != .stopped {
             collector.stop()
@@ -761,16 +792,22 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private func startConnectionCollector() {
-        guard wantsCollection, !isSleeping, networkPathSatisfied else { return }
+        guard wantsCollection, !isSleeping, networkPathSatisfied, !hostCollectorIncompatible else {
+            return
+        }
         guard connectionCollector.state == .stopped else { return }
 
         do {
             try connectionCollector.start()
+            hostRestartTimer?.invalidate()
+            hostRestartTimer = nil
         } catch {
+            connectionCollector.stop()
             recordCollectorEvent(
                 kind: "host_collector_error",
                 details: error.localizedDescription
             )
+            scheduleHostRestart()
         }
     }
 
@@ -778,6 +815,33 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         guard connectionCollector.state != .stopped else { return }
         connectionCollector.stop()
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    }
+
+    private func scheduleHostRestart() {
+        guard wantsCollection,
+              !isSleeping,
+              networkPathSatisfied,
+              !hostCollectorIncompatible,
+              hostRestartTimer == nil else {
+            return
+        }
+
+        let index = min(hostRestartAttempt, Self.restartDelays.count - 1)
+        let delay = Self.restartDelays[index]
+        hostRestartAttempt = min(hostRestartAttempt + 1, Self.restartDelays.count - 1)
+        let timer = Timer(
+            timeInterval: delay,
+            target: self,
+            selector: #selector(hostRestartTimerFired),
+            userInfo: nil,
+            repeats: false
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        hostRestartTimer = timer
+        recordCollectorEvent(
+            kind: "host_collector_backoff",
+            details: "retry_in_seconds=\(Int(delay))"
+        )
     }
 
     private func scheduleRestart() {
