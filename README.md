@@ -36,28 +36,16 @@ swift run ByteTraceApp
 ~/Library/Application Support/<bundle identifier>/usage.sqlite3
 ```
 
-`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 应用：今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态、数据库位置、登录时启动和清空统计设置均已接入。`Scripts/package_app.sh` 可生成 ad-hoc 签名的 `.app`，并已完成本机 LaunchServices 启动验证；Developer ID 签名、公证和 Gatekeeper 验收仍属于后续工作。
+`ByteTraceApp` 已提供 SwiftUI `MenuBarExtra` 应用：今日下载/上传/总量、应用排序列表、代理运输与系统进程折叠区、采集状态、数据库位置、登录时启动和清空统计设置均已接入。`Scripts/package_app.sh` 可生成 ad-hoc 签名的 `.app`，并已完成本机 LaunchServices 启动验证。
 
-`Scripts/package_app.sh` 会将 Release 可执行文件封装为 `dist/ByteTrace.app`，写入菜单栏应用所需的 `Info.plist`，默认使用 ad-hoc 签名。若有 Developer ID，可通过 `BYTE_TRACE_SIGNING_IDENTITY` 指定签名身份。
+`Scripts/package_app.sh` 会将 Release 可执行文件封装为 `dist/ByteTrace.app`，写入菜单栏应用所需的 `Info.plist`，默认使用 ad-hoc 签名。GitHub Release 固定使用 `-` 身份，不读取 Apple 证书或签名 Secrets。
 
 GitHub Actions 已按 CI / Release 分离：
 
 - `.github/workflows/ci.yml`：在 macOS Apple Silicon 与 Intel runner 上执行 Swift build、Swift tests、打包输入校验和本地 ad-hoc 包构建；
-- `.github/workflows/release.yml`：推送与版本一致的 `v*` tag 后，构建两个 macOS 架构，导入 Developer ID 证书，签名、提交 Apple 公证、staple ticket、生成 zip 和 SHA-256 checksums，再创建 GitHub Release；
-- `Scripts/check-release-version.py`：要求 tag 必须等于 `Packaging/Info.plist` 的 `CFBundleShortVersionString`，例如版本 `0.1.0` 必须推送 `v0.1.0`。
+- `.github/workflows/release.yml`：推送与版本一致的 `v*` tag 后，构建两个 macOS 架构，使用 ad-hoc 签名，生成 zip 和 SHA-256 checksums，再创建 GitHub Release；
+- `Scripts/check-release-version.py`：要求 tag 必须等于 `Packaging/Info.plist` 的 `CFBundleShortVersionString`，例如当前版本 `0.1.1` 必须推送 `v0.1.1`。
 
-正式 Release 需要在 GitHub Actions Secrets 配置以下值；证书、私钥和 `.p8` 内容只以 Base64 Secret 注入 runner，不进入仓库：
+与 `cc-trace` 一致，ByteTrace Release 不使用 Apple Developer ID 证书，也不执行 Apple 公证。macOS 产物首次打开可能需要在系统设置中手动放行；这属于 ad-hoc 签名的预期行为。
 
-```text
-MACOS_CERTIFICATE_P12_BASE64
-MACOS_CERTIFICATE_PASSWORD
-MACOS_KEYCHAIN_PASSWORD
-APPLE_DEVELOPER_ID_APPLICATION
-APPLE_API_KEY_ID
-APPLE_API_ISSUER
-APPLE_API_KEY_BASE64
-```
-
-其中 `APPLE_DEVELOPER_ID_APPLICATION` 应是完整的 `Developer ID Application: ... (TEAMID)` 身份；`APPLE_API_KEY_BASE64` 是 App Store Connect API Key 的 `.p8` 文件内容。当前本机只有 Apple Development 证书，所以本地和未配置 Secrets 的环境只使用 ad-hoc 路径，不能代替正式 Developer ID 公证发布。
-
-阶段 5 的基础生命周期已实现：异常退出按 `1/2/5/10/30` 秒退避重启，睡眠前 flush、唤醒后重新建立基线，正常退出会回收自己创建的 `nettop`。仍待网络切换、真实睡眠唤醒、已知大小流量对账、24 小时运行，以及 Developer ID 签名后的 Gatekeeper 验收。
+阶段 5 的基础生命周期已实现：异常退出按 `1/2/5/10/30` 秒退避重启，睡眠前 flush、唤醒后重新建立基线，正常退出会回收自己创建的 `nettop`。仍待网络切换、真实睡眠唤醒、已知大小流量对账和 24 小时运行。

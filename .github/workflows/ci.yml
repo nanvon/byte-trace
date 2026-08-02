@@ -47,9 +47,6 @@ jobs:
         run: |
           python3 Scripts/check-release-version.py
           bash -n Scripts/package_app.sh
-          bash -n Scripts/import_macos_signing_certificate.sh
-          bash -n Scripts/cleanup_macos_signing.sh
-          bash -n Scripts/notarize_app.sh
           plutil -lint Packaging/Info.plist
 
       - name: Build local ad-hoc app bundle
