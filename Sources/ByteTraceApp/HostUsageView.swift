@@ -30,6 +30,7 @@ struct HostUsageView: View {
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
+                    .pointingHandCursor()
                 }
             }
         }
@@ -43,6 +44,7 @@ struct HostUsageView: View {
         }
         .pickerStyle(.segmented)
         .frame(maxWidth: 620)
+        .pointingHandCursor()
     }
 
     private var titleBlock: some View {

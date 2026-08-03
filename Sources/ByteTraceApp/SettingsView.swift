@@ -27,6 +27,7 @@ struct SettingsView: View {
                         "显示系统与后台进程",
                         isOn: $model.showsSystemProcesses
                     )
+                    .pointingHandCursor()
                     Toggle(
                         "登录时启动",
                         isOn: Binding(
@@ -34,6 +35,7 @@ struct SettingsView: View {
                             set: { model.setLaunchAtLogin($0) }
                         )
                     )
+                    .pointingHandCursor()
                 }
 
                 Section("本地存储") {
@@ -51,12 +53,14 @@ struct SettingsView: View {
                     } label: {
                         Label("在 Finder 中显示", systemImage: "folder")
                     }
+                    .pointingHandCursor()
 
                     Button {
                         exportCurrentRange()
                     } label: {
                         Label("导出当前范围 JSON", systemImage: "square.and.arrow.up")
                     }
+                    .pointingHandCursor()
 
                     if let exportMessage {
                         Text(exportMessage)
@@ -70,6 +74,7 @@ struct SettingsView: View {
                     } label: {
                         Label("清空全部统计", systemImage: "trash")
                     }
+                    .pointingHandCursor()
                 }
 
                 Section("细粒度统计") {
@@ -91,6 +96,7 @@ struct SettingsView: View {
                             Text(policy.title).tag(policy)
                         }
                     }
+                    .pointingHandCursor()
 
                     if let stats = model.bucketStats, stats.bucketCount > 0 {
                         LabeledContent("分钟桶数量", value: "\(stats.bucketCount)")
@@ -118,6 +124,7 @@ struct SettingsView: View {
                         "启用连接级采集（实验）",
                         isOn: $model.enableConnectionCollector
                     )
+                    .pointingHandCursor()
                     Text("开启会额外启动一个连接级 nettop 进程，显著增加 CPU 与耗电；默认关闭。关闭状态下已收集的历史数据仍保留，可手动清空。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -131,6 +138,7 @@ struct SettingsView: View {
                     } label: {
                         Label("清空主机名实验数据", systemImage: "globe.badge.chevron.backward")
                     }
+                    .pointingHandCursor()
                 }
 
                 Section("关于 ByteTrace") {

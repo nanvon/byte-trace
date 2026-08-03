@@ -12,10 +12,13 @@ struct MainWindowView: View {
             List(selection: $selection) {
                 Label("概览", systemImage: "chart.bar.xaxis")
                     .tag(MainWindowPage.overview)
+                    .pointingHandCursor()
                 Label("可见主机名", systemImage: "globe")
                     .tag(MainWindowPage.hostUsage)
+                    .pointingHandCursor()
                 Label("设置", systemImage: "gearshape")
                     .tag(MainWindowPage.settings)
+                    .pointingHandCursor()
             }
             .listStyle(.sidebar)
             .navigationTitle("ByteTrace")
@@ -32,11 +35,13 @@ struct MainWindowView: View {
         .frame(minWidth: 900, idealWidth: 1080, minHeight: 620, idealHeight: 720)
         .onAppear {
             selection = model.requestedMainWindowPage
+            ByteTraceAppDelegate.prepareMainWindow()
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
         .onChange(of: model.requestedMainWindowPage) { _, page in
             selection = page
         }
+        .background(MainWindowRegistration())
     }
 }
 
@@ -69,6 +74,7 @@ private struct MainOverviewView: View {
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
+                    .pointingHandCursor()
                 }
             }
             .navigationDestination(for: String.self) { appKey in
@@ -85,6 +91,7 @@ private struct MainOverviewView: View {
         }
         .pickerStyle(.segmented)
         .frame(maxWidth: 620)
+        .pointingHandCursor()
     }
 
     private var summary: some View {
@@ -181,7 +188,8 @@ private struct MainOverviewView: View {
                         NavigationLink(value: record.appKey) {
                             MainUsageRow(record: record)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(ByteTraceActionButtonStyle())
+                        .pointingHandCursor()
                         if record.appKey != records.last?.appKey {
                             Divider()
                                 .padding(.leading, 42)
@@ -191,6 +199,23 @@ private struct MainOverviewView: View {
                 .padding(.horizontal, 12)
                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
+        }
+    }
+}
+
+@MainActor
+private struct MainWindowRegistration: NSViewRepresentable {
+    func makeNSView(context: Context) -> RegistrationView {
+        RegistrationView()
+    }
+
+    func updateNSView(_ nsView: RegistrationView, context: Context) {}
+
+    final class RegistrationView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            ByteTraceAppDelegate.registerMainWindow(window)
         }
     }
 }

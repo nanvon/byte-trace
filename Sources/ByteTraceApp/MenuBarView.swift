@@ -47,29 +47,34 @@ struct MenuBarView: View {
                 Image(systemName: "arrow.clockwise")
                     .frame(width: 26, height: 26)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ByteTraceActionButtonStyle())
+            .pointingHandCursor()
             .accessibilityLabel("刷新今日统计")
             .help("刷新今日统计")
 
             Button {
                 model.requestedMainWindowPage = .overview
+                ByteTraceAppDelegate.prepareMainWindow()
                 openWindow(id: "main")
             } label: {
                 Image(systemName: "macwindow")
                     .frame(width: 26, height: 26)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ByteTraceActionButtonStyle())
+            .pointingHandCursor()
             .accessibilityLabel("打开主窗口")
             .help("打开主窗口")
 
             Button {
                 model.requestedMainWindowPage = .settings
+                ByteTraceAppDelegate.prepareMainWindow()
                 openWindow(id: "main")
             } label: {
                 Image(systemName: "gearshape")
                     .frame(width: 26, height: 26)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ByteTraceActionButtonStyle())
+            .pointingHandCursor()
             .accessibilityLabel("设置")
             .help("设置")
         }
@@ -145,6 +150,7 @@ struct MenuBarView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .pointingHandCursor()
         }
         .padding(12)
         .background(
@@ -170,6 +176,7 @@ struct MenuBarView: View {
                         symbolName: "arrow.triangle.2.circlepath",
                         tint: .purple
                     )
+                    .pointingHandCursor()
                 }
             }
 
@@ -183,6 +190,7 @@ struct MenuBarView: View {
                         symbolName: "gearshape.2",
                         tint: .secondary
                     )
+                    .pointingHandCursor()
                 }
             }
         }
@@ -207,7 +215,8 @@ struct MenuBarView: View {
                 Image(systemName: "power")
                     .frame(width: 24, height: 24)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ByteTraceActionButtonStyle())
+            .pointingHandCursor()
             .accessibilityLabel("退出 ByteTrace")
             .help("退出 ByteTrace")
         }
