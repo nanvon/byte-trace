@@ -304,6 +304,23 @@ public final class UsageStore: @unchecked Sendable {
         }
     }
 
+    /// 按时间清理诊断事件表（occurred_at 是定宽零填充文本时间戳，字典序等于数值序）。
+    public func purgeCollectorEvents(before date: Date) throws -> Int64 {
+        let statement = try database.prepare(
+            "DELETE FROM collector_events WHERE occurred_at < ?;"
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(Self.timestamp(date), at: 1, in: statement)
+        try database.stepDone(statement)
+        return database.changes()
+    }
+
+    /// WAL 下 DELETE 不收缩文件；大量删除后按需调用。阻塞操作，勿在主线程执行。
+    public func vacuum() throws {
+        try database.execute("VACUUM;")
+    }
+
     public func clearAll() throws {
         try clearHostUsage()
         try database.execute("DELETE FROM usage_buckets;")

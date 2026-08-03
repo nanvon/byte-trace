@@ -206,10 +206,16 @@ public final class ProcessAttributionCache: @unchecked Sendable {
 
     private let lock = NSLock()
     private let attributor: ProcessAttributor
+    private let maxCount: Int
     private var cache: [CacheKey: AttributedProcess] = [:]
+    private var accessOrder: [CacheKey] = []
 
-    public init(attributor: ProcessAttributor = ProcessAttributor()) {
+    public init(
+        attributor: ProcessAttributor = ProcessAttributor(),
+        maxCount: Int = 2000
+    ) {
         self.attributor = attributor
+        self.maxCount = max(1, maxCount)
     }
 
     public func attribute(_ identity: ProcessIdentity) -> AttributedProcess {
@@ -221,6 +227,11 @@ public final class ProcessAttributionCache: @unchecked Sendable {
         let key = CacheKey(pid: pid, processStartTime: processStartTime)
         lock.lock()
         if let cached = cache[key] {
+            // LRU：命中项移到队尾（最近使用）。
+            if let index = accessOrder.firstIndex(of: key) {
+                accessOrder.remove(at: index)
+                accessOrder.append(key)
+            }
             lock.unlock()
             return cached
         }
@@ -228,14 +239,26 @@ public final class ProcessAttributionCache: @unchecked Sendable {
 
         let attributed = attributor.attribute(identity)
         lock.lock()
-        cache[key] = attributed
+        if cache[key] == nil {
+            cache[key] = attributed
+            accessOrder.append(key)
+            evictIfNeeded()
+        }
         lock.unlock()
         return attributed
+    }
+
+    private func evictIfNeeded() {
+        while accessOrder.count > maxCount, let oldest = accessOrder.first {
+            accessOrder.removeFirst()
+            cache.removeValue(forKey: oldest)
+        }
     }
 
     public func removeAll() {
         lock.lock()
         cache.removeAll(keepingCapacity: false)
+        accessOrder.removeAll(keepingCapacity: false)
         lock.unlock()
     }
 }

@@ -14,6 +14,8 @@ struct HostUsageView: View {
                     if let result = model.hostUsageResult {
                         coverageSummary(result.coverage)
                         ranking(result.rows)
+                    } else if !model.enableConnectionCollector {
+                        disabledState
                     } else {
                         unavailableState
                     }
@@ -132,6 +134,22 @@ struct HostUsageView: View {
                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
         }
+    }
+
+    private var disabledState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: "globe.badge.minus")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+            Text("连接级采集未启用")
+                .font(.headline)
+            Text("该实验功能默认关闭。可在设置页开启，但会额外运行一个连接级 nettop 进程，显著增加 CPU 与耗电。")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var unavailableState: some View {

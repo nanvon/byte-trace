@@ -85,7 +85,7 @@ public struct NettopHostUsageRecord: Equatable, Sendable {
     }
 }
 
-public struct NettopHostUsageAggregator: Sendable {
+public final class NettopHostUsageAggregator: @unchecked Sendable {
     private struct Key: Hashable, Sendable {
         let bucketStart: Date
         let appKey: String?
@@ -93,6 +93,7 @@ public struct NettopHostUsageAggregator: Sendable {
         let hostname: String?
     }
 
+    private let lock = NSLock()
     private let calendar: Calendar
     private var pending: [Key: NettopHostUsageRecord] = [:]
 
@@ -101,10 +102,12 @@ public struct NettopHostUsageAggregator: Sendable {
     }
 
     public var recordCount: Int {
-        pending.count
+        lock.lock()
+        defer { lock.unlock() }
+        return pending.count
     }
 
-    public mutating func ingest(_ sample: NettopHostUsageSample) throws {
+    public func ingest(_ sample: NettopHostUsageSample) throws {
         guard sample.downloadBytes >= 0, sample.uploadBytes >= 0 else {
             throw NettopHostUsageError.invalidBytes
         }
@@ -118,6 +121,8 @@ public struct NettopHostUsageAggregator: Sendable {
             hostname: endpoint.hostname
         )
 
+        lock.lock()
+        defer { lock.unlock() }
         guard let existing = pending[key] else {
             pending[key] = NettopHostUsageRecord(
                 bucketStart: key.bucketStart,
@@ -156,7 +161,8 @@ public struct NettopHostUsageAggregator: Sendable {
     }
 
     public func records() -> [NettopHostUsageRecord] {
-        pending.values.sorted { lhs, rhs in
+        lock.lock()
+        let values = pending.values.sorted { lhs, rhs in
             if lhs.totalBytes != rhs.totalBytes {
                 return lhs.totalBytes > rhs.totalBytes
             }
@@ -171,20 +177,26 @@ public struct NettopHostUsageAggregator: Sendable {
             }
             return lhs.endpointKind.rawValue < rhs.endpointKind.rawValue
         }
+        lock.unlock()
+        return values
     }
 
     @discardableResult
-    public mutating func flush(to store: UsageStore) throws -> Int {
+    public func flush(to store: UsageStore) throws -> Int {
         let values = records()
         guard !values.isEmpty else { return 0 }
 
         try store.applyHostUsage(values)
+        lock.lock()
         pending.removeAll(keepingCapacity: true)
+        lock.unlock()
         return values.count
     }
 
-    public mutating func removeAll() {
+    public func removeAll() {
+        lock.lock()
         pending.removeAll(keepingCapacity: true)
+        lock.unlock()
     }
 
     private func normalizedEndpoint(_ endpoint: NettopEndpointInfo) -> NettopEndpointInfo {

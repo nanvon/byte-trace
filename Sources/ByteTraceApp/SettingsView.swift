@@ -114,6 +114,14 @@ struct SettingsView: View {
                 }
 
                 Section("可见主机名实验") {
+                    Toggle(
+                        "启用连接级采集（实验）",
+                        isOn: $model.enableConnectionCollector
+                    )
+                    Text("开启会额外启动一个连接级 nettop 进程，显著增加 CPU 与耗电；默认关闭。关闭状态下已收集的历史数据仍保留，可手动清空。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Text("该实验数据与正式应用统计分开保存。清理这里只会删除主机名、IP-only 和未知端点的连接级桶。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -134,6 +142,9 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .onAppear {
+                model.refreshBucketStats()
+            }
         }
         .confirmationDialog(
             "确定清空全部统计？",
@@ -185,12 +196,16 @@ struct SettingsView: View {
         }
     }
 
-    private func formattedDate(_ date: Date?) -> String {
-        guard let date else { return "—" }
+    private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
         formatter.timeStyle = .short
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    private func formattedDate(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        return Self.dateFormatter.string(from: date)
     }
 
     private func exportCurrentRange() {

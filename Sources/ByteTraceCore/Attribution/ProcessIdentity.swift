@@ -94,8 +94,23 @@ public struct ProcessIdentity: Equatable, Sendable {
 public struct SystemProcessIdentityResolver: Sendable {
     public let maxAncestorDepth: Int
 
-    public init(maxAncestorDepth: Int = 8) {
+    private final class ResolverCache: @unchecked Sendable {
+        struct Entry {
+            let identity: ProcessIdentity
+            let cachedAt: Date
+        }
+
+        let lock = NSLock()
+        var entries: [Int32: Entry] = [:]
+    }
+
+    private let cache: ResolverCache
+    private let cacheTTL: TimeInterval
+
+    public init(maxAncestorDepth: Int = 8, cacheTTL: TimeInterval = 15) {
         self.maxAncestorDepth = max(0, maxAncestorDepth)
+        self.cache = ResolverCache()
+        self.cacheTTL = max(0, cacheTTL)
     }
 
     public func resolve(_ token: NettopProcessToken) -> ProcessIdentity {
@@ -103,7 +118,24 @@ public struct SystemProcessIdentityResolver: Sendable {
             return ProcessIdentity(pid: nil, nettopProcessName: token.processName)
         }
 
-        let current = snapshot(for: pid, fallbackName: token.processName)
+        let now = Date()
+        cache.lock.lock()
+        if let entry = cache.entries[pid], now.timeIntervalSince(entry.cachedAt) < cacheTTL {
+            cache.lock.unlock()
+            return entry.identity
+        }
+        cache.lock.unlock()
+
+        let identity = buildIdentity(for: pid, fallbackName: token.processName)
+
+        cache.lock.lock()
+        cache.entries[pid] = ResolverCache.Entry(identity: identity, cachedAt: now)
+        cache.lock.unlock()
+        return identity
+    }
+
+    private func buildIdentity(for pid: Int32, fallbackName: String) -> ProcessIdentity {
+        let current = snapshot(for: pid, fallbackName: fallbackName)
         var ancestors: [ProcessAncestor] = []
         var nextPID = current.parentPID
         var visited: Set<Int32> = [pid]
@@ -133,7 +165,7 @@ public struct SystemProcessIdentityResolver: Sendable {
         return ProcessIdentity(
             pid: pid,
             processStartTime: current.processStartTime,
-            nettopProcessName: token.processName,
+            nettopProcessName: fallbackName,
             executablePath: current.executablePath,
             bundleID: current.bundleID,
             bundlePath: current.bundlePath,

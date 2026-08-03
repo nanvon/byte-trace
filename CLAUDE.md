@@ -34,12 +34,13 @@ swift run ByteTraceConnectionProbe --duration 5 --runs 3 --process mihomo # 多�
 | | 正式应用级 | 实验连接级 |
 | --- | --- | --- |
 | 采集器 | `NettopCollector` | `NettopConnectionCollector` |
-| nettop 参数 | `-n -P -d -x -L 0 -s 1` | `-d -x -L 0 -s 1` |
+| nettop 参数 | `-n -P -d -x -L 0 -s 5` | `-d -x -L 0 -s 1` |
+| 默认启停 | 始终开启 | **默认关闭**（设置项 `ByteTrace.enableConnectionCollector`，默认 `false`） |
 | 解析器 | `NettopCSVParser` | `NettopConnectionCSVParser` |
 | 落库 | `UsageAggregator` → `daily_usage` + `usage_buckets` | `NettopHostUsageAggregator` → `host_usage_buckets` |
 | 用途 | 应用流量总量（产品的正式口径） | 「可见主机名」实验排行 |
 
-参数差异是刻意的：`-P` 让 nettop 按进程汇总；`-n` 关闭名称解析，所以正式管线拿不到也不需要主机名，而连接级管线**省略 `-n` 正是为了让 nettop 暴露部分主机名**。
+参数差异是刻意的：`-P` 让 nettop 按进程汇总；`-n` 关闭名称解析，所以正式管线拿不到也不需要主机名，而连接级管线**省略 `-n` 正是为了让 nettop 暴露部分主机名**。应用级采样间隔为 5 秒（`-s 5`，产品口径是分钟粒度，无需秒级实时性；连接级保持 `-s 1` 不另降频——实测降频对 CPU 无影响）。
 
 连接级数据是「部分可见」的，覆盖率远低于 100%。任何改动都不得用它去修正、抵扣或补全应用级总量——这条边界在 `docs/DOMAIN_TRAFFIC_DECISION.md` 中已作为最终决策记录。
 
@@ -60,6 +61,7 @@ nettop stdout
 - nettop 每个采样周期重复输出一次以 `time` 开头的表头行；解析器**靠下一个表头到来才结束上一帧**（`beginFrame` 内先调 `completeCurrentFrame`）。因此流中最后一帧只会在 `stop()` / `finish()` 时才吐出。
 - **首帧整帧丢弃**（`deltas = []`，仅置 `hasBaseline = true`）：`-d` 模式下首帧携带的是启动时刻的累计值而非增量。每次重启 nettop（重连、唤醒、网络切换）都会重新经历一次基线帧，这个间隙的流量必然丢失，属于已知取舍。
 - 表头缺少 `time` / `bytes_in` / `bytes_out` / 进程列 → `incompatibleSchema`，采集**停止且不再自动重连**，避免写入脏数据。
+- **stdin 必须是父进程持有的空 `Pipe`**（`T0` 修复，勿改回 `/dev/null`）：nettop 是 curses 交互程序，会 poll stdin 等按键；`/dev/null` 永远立即可读并 EOF，导致 poll 死循环、子进程空转占满一个多核心（实测 124%–139% CPU）。空 pipe 写端被父进程持有且永不写入，stdin 永远不就绪（实测降至约 1%）。
 
 ### 连接级解析的行内状态
 
@@ -92,7 +94,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 **时间口径混用，改动前先确认字段类型**：`daily_usage.day` 是本地日历的 `yyyy-MM-dd` 字符串；`*_buckets.bucket_start` 是 epoch 秒 `INTEGER`；`first_seen_at` / `last_seen_at` 是 `String(format: "%.6f")` 的**文本**（`host_usage_buckets` 的 upsert 直接对其做 SQL `MIN`/`MAX`，依赖定宽零填充下字典序等于数值序）。
 
-**保留策略**只删两张分钟桶表（`purgeBuckets`），`daily_usage` 与 `apps` 不受影响；`clearAll()` 才清空全部五张表。
+**保留策略**只删两张分钟桶表（`purgeBuckets`）并按 30 天上限清理 `collector_events`（`purgeCollectorEvents`），`daily_usage` 与 `apps` 不受影响；`clearAll()` 才清空全部五张表。大量删除后按需 `VACUUM`（阻塞操作，在后台队列执行，绝不在主线程）。
 
 ## 应用层
 
@@ -101,12 +103,12 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 `ByteTraceViewModel`（`@MainActor`、`ObservableObject`、1200+ 行）是唯一的编排者，持有两个采集器、`UsageStore`、两个聚合器、所有定时器与生命周期监听。需要留意：
 
 - **并发约定**：`NettopCollector` / `UsageStore` / `UsageAggregator` / `ProcessAttributionCache` 都是 `@unchecked Sendable` + `NSLock`；采集器回调经 `Task { @MainActor }` 跳回主线程。`SystemProcessIdentityResolver` 读 `NSRunningApplication` 时若不在主线程会 `DispatchQueue.main.sync`——不要从任何会阻塞主线程的路径调用它。
-- **`hostAggregator` 是 struct 存成可选属性**，代码里是 `if var hostAggregator { ...; self.hostAggregator = hostAggregator }` 的取出—改—写回模式。忘记写回等于丢数据。
+- **`hostAggregator` 是 `final class`**（`NettopHostUsageAggregator`，自 2026-08 性能修复起由 struct 改为 class，消除 CoW 深拷贝；内部有锁），ViewModel 持有可选引用，直接调用方法即可，无取出—改—写回问题。
 - **重连退避** `[1, 2, 5, 10, 30]` 秒，两条管线各有独立的 timer 与 attempt 计数；睡眠/唤醒（`NSWorkspace` 通知）与网络路径切换（`NWPathMonitor`）都会先停采集 + `flushNow()` 再走重连。
 - **UI 刷新由 5 秒 flush 定时器驱动**（`flushNow()` 内部调 `refresh()`），没有独立的轮询。
 - **「今天」是双数据源**：汇总数字来自 `daily_usage`，趋势图来自 `usage_buckets`（`usesBucketSummary` 与 `usesFineGrainedTimeline` 两个开关分别控制）。「最近 10 分钟 / 1 小时」两者都用分钟桶，「本周 / 本月」两者都用日汇总。
 - **nettop 的时间字段只有时钟没有日期**，`sampleDate(for:)` 把「今天」的年月日嫁接上去，跨零点存在已知误差。
-- 设置持久化：`UserDefaults` 键 `ByteTrace.showSystemProcesses`、`ByteTrace.usageRetentionPolicy`；登录时启动用 `SMAppService.mainApp`。
+- 设置持久化：`UserDefaults` 键 `ByteTrace.showSystemProcesses`、`ByteTrace.usageRetentionPolicy`（默认 90 天）、`ByteTrace.enableConnectionCollector`（默认关闭）；登录时启动用 `SMAppService.mainApp`。
 - 导出 `formatVersion` 硬编码在 `exportCurrentRange(to:)`，结构变更时需同步 bump。
 
 ## 代码风格约定

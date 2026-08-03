@@ -57,6 +57,8 @@ final class SQLiteDatabase: @unchecked Sendable {
             try execute("PRAGMA busy_timeout = 5000;")
             try execute("PRAGMA foreign_keys = ON;")
             try execute("PRAGMA journal_mode = WAL;")
+            // WAL 模式下 NORMAL 不丢数据（仅断电时可能丢最近一个事务），显著降低 fsync 开销。
+            try execute("PRAGMA synchronous = NORMAL;")
         } catch {
             sqlite3_close(database)
             throw error

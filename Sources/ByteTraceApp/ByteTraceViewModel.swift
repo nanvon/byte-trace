@@ -173,11 +173,26 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             applyRetentionPolicyIfNeeded(force: true)
         }
     }
+    @Published var enableConnectionCollector: Bool {
+        didSet {
+            guard oldValue != enableConnectionCollector else { return }
+            UserDefaults.standard.set(
+                enableConnectionCollector,
+                forKey: Self.enableConnectionCollectorKey
+            )
+            if enableConnectionCollector {
+                startConnectionCollector()
+            } else {
+                stopConnectionCollector()
+            }
+        }
+    }
 
     let databaseURL: URL
 
     private static let showSystemProcessesKey = "ByteTrace.showSystemProcesses"
     private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
+    private static let enableConnectionCollectorKey = "ByteTrace.enableConnectionCollector"
     private let collector: NettopCollector
     private let connectionCollector: NettopConnectionCollector
     private let resolver: SystemProcessIdentityResolver
@@ -201,8 +216,14 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var networkPathSignature: String?
     private var networkPathSatisfied = true
     private var lastRetentionCleanupDay: String?
+    private var lastUIRefreshDate: Date?
 
     private static let restartDelays: [TimeInterval] = [1, 2, 5, 10, 30]
+
+    /// 诊断事件保留时长（分钟桶保留策略之外的独立上限）。
+    nonisolated private static let collectorEventRetentionInterval: TimeInterval = 30 * 24 * 60 * 60
+    /// 单次删除超过该阈值才 VACUUM（阻塞操作，放后台）。
+    nonisolated private static let vacuumPurgeThreshold: Int64 = 10_000
 
     override init() {
         databaseURL = UsageStore.defaultDatabaseURL(bundleIdentifier: Self.bundleIdentifier)
@@ -221,8 +242,13 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             forKey: Self.usageRetentionPolicyKey
         )
         _usageRetentionPolicy = Published(
-            initialValue: UsageRetentionPolicy(rawValue: storedRetentionPolicy ?? "") ?? .never
+            initialValue: UsageRetentionPolicy(rawValue: storedRetentionPolicy ?? "") ?? .ninetyDays
         )
+
+        let storedConnectionCollector = UserDefaults.standard.object(
+            forKey: Self.enableConnectionCollectorKey
+        ) as? Bool
+        _enableConnectionCollector = Published(initialValue: storedConnectionCollector ?? false)
 
         var storageError: String?
         do {
@@ -312,10 +338,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         flushTimer = nil
         if collector.state != .stopped {
             collector.stop()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
         stopConnectionCollector()
-        flushNow()
+        flushNow(forceRefresh: true)
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
     }
@@ -332,12 +357,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         flushTimer = nil
         if collector.state != .stopped {
             collector.stop()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
         stopConnectionCollector()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         networkPathMonitor.cancel()
-        flushNow()
+        flushNow(forceRefresh: true)
         status = .stopped
     }
 
@@ -356,10 +380,23 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         do {
             applyRetentionPolicyIfNeeded()
             records = try store.dailyUsage(for: dayKey)
-            bucketStats = try store.bucketStats()
             try loadRange(from: store)
         } catch {
             lastError = "读取今日统计失败：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "database_error", details: lastError)
+        }
+    }
+
+    /// 分钟桶统计（COUNT(*) 全表扫描）只在设置页按需查询，不进入 5 秒周期刷新。
+    func refreshBucketStats() {
+        guard let store else {
+            bucketStats = nil
+            return
+        }
+        do {
+            bucketStats = try store.bucketStats()
+        } catch {
+            lastError = "读取分钟桶统计失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
         }
     }
@@ -420,10 +457,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         do {
             try store.clearAll()
             aggregator.discardPending()
-            if var hostAggregator {
-                hostAggregator.removeAll()
-                self.hostAggregator = hostAggregator
-            }
+            hostAggregator?.removeAll()
             records = []
             rangeRecords = []
             rangeTimeline = []
@@ -449,10 +483,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
         do {
             try store.clearHostUsage()
-            if var hostAggregator {
-                hostAggregator.removeAll()
-                self.hostAggregator = hostAggregator
-            }
+            hostAggregator?.removeAll()
             try loadRange(from: store)
             lastError = nil
         } catch {
@@ -549,12 +580,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         ])
     }
 
-    static func formatBytes(_ bytes: Int64) -> String {
+    private static let byteCountFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB, .useTB]
         formatter.countStyle = .binary
         formatter.includesUnit = true
-        return formatter.string(fromByteCount: max(0, bytes))
+        return formatter
+    }()
+
+    static func formatBytes(_ bytes: Int64) -> String {
+        byteCountFormatter.string(fromByteCount: max(0, bytes))
     }
 
     private func configureCollector() {
@@ -690,10 +725,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         isStarted = false
         if collector.state != .stopped {
             collector.stop()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
         stopConnectionCollector()
-        flushNow()
+        flushNow(forceRefresh: true)
 
         if isSatisfied {
             lastError = nil
@@ -801,7 +835,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private func ingestHostUsage(_ delta: NettopConnectionDelta) {
-        guard var hostAggregator else { return }
+        guard let hostAggregator else { return }
 
         let token = NettopProcessToken(rawValue: delta.processName)
         let identity = resolver.resolve(token)
@@ -818,7 +852,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                     uploadBytes: delta.uploadBytes
                 )
             )
-            self.hostAggregator = hostAggregator
         } catch {
             lastError = "主机名样本未入队：\(error.localizedDescription)"
             recordCollectorEvent(kind: "host_usage_error", details: lastError)
@@ -865,10 +898,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         isStarted = false
         if collector.state != .stopped {
             collector.stop()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         }
         stopConnectionCollector()
-        flushNow()
+        flushNow(forceRefresh: true)
         status = .stopped
         recordCollectorEvent(kind: "sample_gap", details: "system_sleep")
     }
@@ -891,7 +923,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             try collector.start()
             isStarted = true
             recordCollectorEvent(kind: "collector_started")
-            startConnectionCollector()
+            if enableConnectionCollector {
+                startConnectionCollector()
+            }
         } catch {
             isStarted = false
             let message = "nettop 启动失败：\(error.localizedDescription)"
@@ -903,7 +937,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private func startConnectionCollector() {
-        guard wantsCollection, !isSleeping, networkPathSatisfied, !hostCollectorIncompatible else {
+        guard wantsCollection,
+              !isSleeping,
+              networkPathSatisfied,
+              enableConnectionCollector,
+              !hostCollectorIncompatible else {
             return
         }
         guard connectionCollector.state == .stopped else { return }
@@ -925,13 +963,13 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private func stopConnectionCollector() {
         guard connectionCollector.state != .stopped else { return }
         connectionCollector.stop()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
 
     private func scheduleHostRestart() {
         guard wantsCollection,
               !isSleeping,
               networkPathSatisfied,
+              enableConnectionCollector,
               !hostCollectorIncompatible,
               hostRestartTimer == nil else {
             return
@@ -976,19 +1014,31 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
     }
 
-    private func flushNow() {
+    private func flushNow(forceRefresh: Bool = false) {
         guard let aggregator else { return }
         do {
             _ = try aggregator.flush()
-            if let store, var hostAggregator {
+            if let store, let hostAggregator {
                 _ = try hostAggregator.flush(to: store)
-                self.hostAggregator = hostAggregator
             }
-            refresh()
+            refreshIfNeeded(force: forceRefresh)
         } catch {
             lastError = "数据库写入失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
         }
+    }
+
+    /// 落库保持 5 秒节奏；UI 刷新降频到 10 秒一次（分钟粒度数据无需秒级刷新），
+    /// 停止/休眠/网络切换等终止路径强制刷新以展示最终状态。
+    private func refreshIfNeeded(force: Bool) {
+        let now = Date()
+        guard force
+                || lastUIRefreshDate == nil
+                || now.timeIntervalSince(lastUIRefreshDate ?? now) >= 10 else {
+            return
+        }
+        lastUIRefreshDate = now
+        refresh()
     }
 
     private func applyRetentionPolicyIfNeeded(force: Bool = false) {
@@ -998,18 +1048,30 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         guard force || lastRetentionCleanupDay != cleanupDay else { return }
 
         let cutoff = Date().addingTimeInterval(-interval)
-        do {
-            let deletedCount = try store.purgeBuckets(before: cutoff)
-            lastRetentionCleanupDay = cleanupDay
-            guard deletedCount > 0 else { return }
-
-            recordCollectorEvent(
-                kind: "usage_buckets_purged",
-                details: "deleted=\(deletedCount);before=\(Int(cutoff.timeIntervalSince1970))"
-            )
-        } catch {
-            lastError = "分钟级数据清理失败：\(error.localizedDescription)"
-            recordCollectorEvent(kind: "database_error", details: lastError)
+        let eventCutoff = Date().addingTimeInterval(-Self.collectorEventRetentionInterval)
+        // 清理可能涉及数百万行的首次批量删除，必须在后台执行，不能阻塞主线程。
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            do {
+                let deletedCount = try store.purgeBuckets(before: cutoff)
+                let eventsDeleted = try store.purgeCollectorEvents(before: eventCutoff)
+                if deletedCount > Self.vacuumPurgeThreshold {
+                    try? store.vacuum()
+                }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.lastRetentionCleanupDay = cleanupDay
+                    guard deletedCount > 0 || eventsDeleted > 0 else { return }
+                    self.recordCollectorEvent(
+                        kind: "usage_buckets_purged",
+                        details: "deleted=\(deletedCount);events=\(eventsDeleted);before=\(Int(cutoff.timeIntervalSince1970))"
+                    )
+                }
+            } catch {
+                Task { @MainActor [weak self] in
+                    self?.lastError = "分钟级数据清理失败：\(error.localizedDescription)"
+                    self?.recordCollectorEvent(kind: "database_error", details: self?.lastError)
+                }
+            }
         }
     }
 

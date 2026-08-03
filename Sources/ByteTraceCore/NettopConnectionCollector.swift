@@ -24,6 +24,7 @@ public final class NettopConnectionCollector: @unchecked Sendable {
     private var process: Process?
     private var processIdentifier: Int32?
     private var readGroup: DispatchGroup?
+    private var stdinPipe: Pipe?
     private var parser = NettopConnectionCSVParser()
     private var didReportExit = false
     private var stderrData = Data()
@@ -64,9 +65,12 @@ public final class NettopConnectionCollector: @unchecked Sendable {
         let stderrHandle = stderrPipe.fileHandleForReading
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        if let nullInput = FileHandle(forReadingAtPath: "/dev/null") {
-            process.standardInput = nullInput
-        }
+        // stdin 必须是一个父进程持续持有、且永不写入的空 Pipe：
+        // nettop 是 curses 交互程序，会 poll stdin 等待按键；若 stdin 立即可读
+        // （如 /dev/null 的 EOF），poll 永不休眠，子进程会空转占满一个多核心。
+        // 空 pipe 的写端由我们持有且不关闭，stdin 永远不就绪。
+        let stdinPipe = Pipe()
+        process.standardInput = stdinPipe
 
         process.terminationHandler = { [weak self] process in
             self?.reportTermination(status: process.terminationStatus)
@@ -82,6 +86,7 @@ public final class NettopConnectionCollector: @unchecked Sendable {
         let readGroup = DispatchGroup()
         stateLock.lock()
         self.process = process
+        self.stdinPipe = stdinPipe
         processIdentifier = process.processIdentifier
         self.readGroup = readGroup
         stateLock.unlock()
@@ -125,6 +130,7 @@ public final class NettopConnectionCollector: @unchecked Sendable {
         let stderr = String(decoding: stderrData, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.process = nil
+        self.stdinPipe = nil
         processIdentifier = nil
         self.readGroup = nil
         currentState = .stopped
