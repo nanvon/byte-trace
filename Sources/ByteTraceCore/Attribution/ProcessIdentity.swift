@@ -106,11 +106,17 @@ public struct SystemProcessIdentityResolver: Sendable {
 
     private let cache: ResolverCache
     private let cacheTTL: TimeInterval
+    private let maxCacheCount: Int
 
-    public init(maxAncestorDepth: Int = 8, cacheTTL: TimeInterval = 15) {
+    public init(
+        maxAncestorDepth: Int = 8,
+        cacheTTL: TimeInterval = 15,
+        maxCacheCount: Int = 512
+    ) {
         self.maxAncestorDepth = max(0, maxAncestorDepth)
         self.cache = ResolverCache()
         self.cacheTTL = max(0, cacheTTL)
+        self.maxCacheCount = max(1, maxCacheCount)
     }
 
     public func resolve(_ token: NettopProcessToken) -> ProcessIdentity {
@@ -119,8 +125,16 @@ public struct SystemProcessIdentityResolver: Sendable {
         }
 
         let now = Date()
+        // 一次 proc_pidinfo 即可拿到当前进程的启动时间，用它校验缓存项是否仍属于同一个
+        // 进程：pid 会被系统复用，只按 pid 命中会把新进程的流量记到已退出的旧进程头上。
+        // 这次 syscall 比一次完整 buildIdentity（最多 9 次 snapshot，含 LaunchServices
+        // 查询与读取 Info.plist）便宜数个数量级，缓存收益不受影响。
+        let currentStartTime = Self.processInfo(for: pid)?.startTime
+
         cache.lock.lock()
-        if let entry = cache.entries[pid], now.timeIntervalSince(entry.cachedAt) < cacheTTL {
+        if let entry = cache.entries[pid],
+           now.timeIntervalSince(entry.cachedAt) < cacheTTL,
+           entry.identity.processStartTime == currentStartTime {
             cache.lock.unlock()
             return entry.identity
         }
@@ -130,8 +144,32 @@ public struct SystemProcessIdentityResolver: Sendable {
 
         cache.lock.lock()
         cache.entries[pid] = ResolverCache.Entry(identity: identity, cachedAt: now)
+        pruneLocked(now: now)
         cache.lock.unlock()
         return identity
+    }
+
+    /// 淘汰缓存条目，调用方必须已持有 `cache.lock`。
+    ///
+    /// TTL 只决定「能否命中」，不会让条目消失；短命进程（shell、xpc helper、更新器）
+    /// 每个都会占用一条，不清理则随运行时长单调增长。仅在超过上限时才整理一次，
+    /// 摊销后成本可忽略。
+    private func pruneLocked(now: Date) {
+        guard cache.entries.count > maxCacheCount else { return }
+
+        cache.entries = cache.entries.filter {
+            now.timeIntervalSince($0.value.cachedAt) < cacheTTL
+        }
+        guard cache.entries.count > maxCacheCount else { return }
+
+        // 过期项清完仍超限：丢弃最久未刷新的条目。
+        let overflow = cache.entries.count - maxCacheCount
+        let stalest = cache.entries
+            .sorted { $0.value.cachedAt < $1.value.cachedAt }
+            .prefix(overflow)
+        for (pid, _) in stalest {
+            cache.entries.removeValue(forKey: pid)
+        }
     }
 
     private func buildIdentity(for pid: Int32, fallbackName: String) -> ProcessIdentity {

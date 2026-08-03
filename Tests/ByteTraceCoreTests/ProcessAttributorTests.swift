@@ -125,4 +125,50 @@ final class ProcessAttributorTests: XCTestCase {
         XCTAssertEqual(cache.attribute(first).appKey, "bundle:com.example.first")
         XCTAssertEqual(cache.attribute(second).appKey, "bundle:com.example.second")
     }
+
+    func testAttributionCacheStaysCorrectAfterEviction() {
+        // 上限压到 1，使每次写入都触发淘汰，验证淘汰只影响命中率、不影响归属结果。
+        let cache = ProcessAttributionCache(maxCount: 1)
+        let first = ProcessIdentity(
+            pid: 1,
+            processStartTime: Date(timeIntervalSince1970: 100),
+            nettopProcessName: "first.1",
+            bundleID: "com.example.first"
+        )
+        let second = ProcessIdentity(
+            pid: 2,
+            processStartTime: Date(timeIntervalSince1970: 100),
+            nettopProcessName: "second.2",
+            bundleID: "com.example.second"
+        )
+
+        XCTAssertEqual(cache.attribute(first).appKey, "bundle:com.example.first")
+        XCTAssertEqual(cache.attribute(second).appKey, "bundle:com.example.second")
+        XCTAssertEqual(cache.attribute(first).appKey, "bundle:com.example.first")
+    }
+
+    func testResolverReturnsConsistentIdentityForTheSameProcess() {
+        let resolver = SystemProcessIdentityResolver()
+        let token = NettopProcessToken(rawValue: "probe.\(getpid())")
+
+        let first = resolver.resolve(token)
+        let second = resolver.resolve(token)
+
+        XCTAssertEqual(first.pid, getpid())
+        XCTAssertEqual(first, second)
+    }
+
+    func testResolverStaysCorrectWhenCacheEvicts() {
+        // 上限压到 1：解析另一个 pid 会挤掉前一条，再次解析必须重建出相同身份。
+        let resolver = SystemProcessIdentityResolver(maxCacheCount: 1)
+        let selfToken = NettopProcessToken(rawValue: "probe.\(getpid())")
+        let parentToken = NettopProcessToken(rawValue: "parent.\(getppid())")
+
+        let before = resolver.resolve(selfToken)
+        _ = resolver.resolve(parentToken)
+        let after = resolver.resolve(selfToken)
+
+        XCTAssertEqual(before.pid, getpid())
+        XCTAssertEqual(before, after)
+    }
 }
