@@ -22,7 +22,7 @@
 | 存储层 | `UsageStore.swift`、`UsageAggregator.swift`、`SQLiteDatabase.swift`、`UsageModels.swift`（部分） |
 | 主机名实验 | `NettopHostUsage.swift`、`NettopHostUsageQuery.swift`、`NettopReconciliation.swift` |
 | 应用层 | `ByteTraceViewModel.swift`、`ByteTraceApp.swift`、`MainWindowView.swift`、`MenuBarView.swift`、`HostUsageView.swift`、`SettingsView.swift` |
-| 文档 | `README.md`、`DOMAIN_TRAFFIC_REQUIREMENTS.md`、`DOMAIN_TRAFFIC_SOURCE_DECISION.md` |
+| 文档 | `README.md`、`docs/DOMAIN_TRAFFIC_EXPERIMENT.md`、`docs/DOMAIN_TRAFFIC_DECISION.md` |
 
 ### 未覆盖（须知悉，避免误认为已审）
 
@@ -36,7 +36,7 @@
 
 **所有标记为【需实测】的条目在本次审查中均未实际测量。** 审查期间 Bash 工具不可用，无法运行 `nettop` 采样、`sample`、`fs_usage`、`sqlite3 EXPLAIN QUERY PLAN` 等验证命令。第十一节给出的验证方案**尚未执行**。
 
-定量校准（第九节）使用的是 `DOMAIN_TRAFFIC_REQUIREMENTS.md` 中已有的 2026-08-02 实机探针数据，非本次新测。
+定量校准（第九节）使用的是 `docs/DOMAIN_TRAFFIC_EXPERIMENT.md` 中已有的 2026-08-02 实机探针数据，非本次新测。
 
 ---
 
@@ -143,7 +143,7 @@ case let .frameCompleted(_, _, deltas, isBaseline):  // 第 2 个 _ 就是 proce
 
 后果：① 每个新 IP 触发 DNS PTR 查询；② **这些查询自身产生的流量又被 ByteTrace 采集**，形成观测回环；③ 解析延迟可能拖慢出帧节奏。
 
-**已由项目自身实测数据证实**（`DOMAIN_TRAFFIC_REQUIREMENTS.md:69-73`）：
+**已由项目自身实测数据证实**（`docs/DOMAIN_TRAFFIC_EXPERIMENT.md:69-73`）：
 
 | 模式 | hostname 连接 | IP 连接 | 未知 |
 | --- | ---: | ---: | ---: |
@@ -319,7 +319,7 @@ self.hostAggregator = hostAggregator       // ③ 写回
 | R-2 | 隐私章节未披露 DNS 反解副作用。「不上传、不联网回传任何统计结果」就统计结果而言属实，但连接级采集器主动请求名称解析 ⇒ 间接触发出站 DNS 查询。**项目内部已知**（需求文档 `:47` 写明），用户侧未告知 | P2 |
 | R-3 | 项目结构（`:204-211`）漏列 `ByteTraceIconLab`，而 `Package.swift:15,23` 中它是第 5 个 product 且为独立 SwiftUI 应用 | P2 |
 
-### 7.2 `DOMAIN_TRAFFIC_REQUIREMENTS.md`
+### 7.2 `docs/DOMAIN_TRAFFIC_EXPERIMENT.md`
 
 **三份文档中工程价值最高的一份** —— 记录了带数字的负面结果，而非只记成功。
 
@@ -343,7 +343,7 @@ self.hostAggregator = hostAggregator       // ③ 写回
 - **D-1**（P1）：验收门 7 强调重建基线保证「不污染下一轮」—— 正确，但未写代价。`-d` 增量模式下被丢弃的首帧承载真实流量，丢弃即永久丢失（对应 E4）。叠加 E3 的接口抖动会显著放大。
 - **D-2**（P1）：验收门 5「时间一致」成立，但 `sampleDate` 的跨午夜归日错误（E2）会让正式与实验**一致地错**。文档未涉及。
 
-### 7.3 `DOMAIN_TRAFFIC_SOURCE_DECISION.md`
+### 7.3 `docs/DOMAIN_TRAFFIC_DECISION.md`
 
 **优点**：
 
@@ -367,15 +367,15 @@ self.hostAggregator = hostAggregator       // ③ 写回
 
 **共同盲区**：三篇**都只讨论「能不能做、准不准」，完全没有讨论「代价是多少」** —— 无一处提及 CPU、内存、电量、主线程占用或长期运行开销。
 
-`DOMAIN_TRAFFIC_SOURCE_DECISION.md:101` 称「剩余工作只包括…长跑验收」，但从 S2 / S3 的存在看，该长跑验收验的是**功能存活**（还在跑吗），不是**资源代价**（跑一天花多少）。
+`docs/DOMAIN_TRAFFIC_DECISION.md:101` 称「剩余工作只包括…长跑验收」，但从 S2 / S3 的存在看，该长跑验收验的是**功能存活**（还在跑吗），不是**资源代价**（跑一天花多少）。
 
 ---
 
 ## 九、严重度校准说明
 
-初版审查基于「每秒数百行」的假设推导。`DOMAIN_TRAFFIC_REQUIREMENTS.md` 提供了这台机器的真实测量值，据此**下调两处估算**，记录于此以免后续误用初版数字。
+初版审查基于「每秒数百行」的假设推导。`docs/DOMAIN_TRAFFIC_EXPERIMENT.md` 提供了这台机器的真实测量值，据此**下调两处估算**，记录于此以免后续误用初版数字。
 
-**校准依据**（`DOMAIN_TRAFFIC_REQUIREMENTS.md:78-83`，45 秒受控浏览器基线）：
+**校准依据**（`docs/DOMAIN_TRAFFIC_EXPERIMENT.md:78-83`，45 秒受控浏览器基线）：
 
 ```text
 45 帧采集，1 帧基线，0 条 malformed row
@@ -524,8 +524,8 @@ Instruments **Time Profiler** + **Hangs**，在触发睡眠 / 网络切换时观
 | 对象 | 结论 |
 | --- | --- |
 | `README.md` | **通过**，需 1 处 P0 修订（R-1）。功能与口径描述经代码逐条核对基本属实，时间范围取数表逐格吻合 |
-| `DOMAIN_TRAFFIC_REQUIREMENTS.md` | **通过**，工程价值最高。8 条验收门 7 条经代码验证落实，其中「不展示 IP」「口径隔离」是结构性保证而非约定俗成 |
-| `DOMAIN_TRAFFIC_SOURCE_DECISION.md` | **通过**。Apple 能力边界考证准确，决策建立在可复现检查上。2 处措辞不准（P2），1 处未核实 |
+| `docs/DOMAIN_TRAFFIC_EXPERIMENT.md` | **通过**，工程价值最高。8 条验收门 7 条经代码验证落实，其中「不展示 IP」「口径隔离」是结构性保证而非约定俗成 |
+| `docs/DOMAIN_TRAFFIC_DECISION.md` | **通过**。Apple 能力边界考证准确，决策建立在可复现检查上。2 处措辞不准（P2），1 处未核实 |
 | 代码 | **正确性通过，性能不通过**。S2 / S3 为需优先处理的缺陷 |
 
 **总体判断**：正确性纪律很强、性能纪律缺位。凡文档立过验收门的地方代码执行到位；凡文档未提要求的地方（CPU、内存、主线程、长期增长）就出现随时间恶化的缺陷。**三份文档无一处提及资源开销是根因。**

@@ -41,7 +41,7 @@ swift run ByteTraceConnectionProbe --duration 5 --runs 3 --process mihomo # 多�
 
 参数差异是刻意的：`-P` 让 nettop 按进程汇总；`-n` 关闭名称解析，所以正式管线拿不到也不需要主机名，而连接级管线**省略 `-n` 正是为了让 nettop 暴露部分主机名**。
 
-连接级数据是「部分可见」的，覆盖率远低于 100%。任何改动都不得用它去修正、抵扣或补全应用级总量——这条边界在 `DOMAIN_TRAFFIC_SOURCE_DECISION.md` 中已作为最终决策记录。
+连接级数据是「部分可见」的，覆盖率远低于 100%。任何改动都不得用它去修正、抵扣或补全应用级总量——这条边界在 `docs/DOMAIN_TRAFFIC_DECISION.md` 中已作为最终决策记录。
 
 ### 数据流（正式管线）
 
@@ -128,4 +128,4 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 - `NetworkExtensionLab/` — **已冻结的研究工程**，独立 Xcode 项目（XcodeGen 生成），不在 `Package.swift` 里，不属于产品链路。除非明确要求，不要改动或尝试把它接入主应用。
 - `Sources/ByteTraceIconLab/` — 独立的图标生成工具（不依赖 `ByteTraceCore`），仅在需要重新导出 `Packaging/Resources/` 下的图标资源时使用。
-- `DOMAIN_TRAFFIC_REQUIREMENTS.md` / `DOMAIN_TRAFFIC_SOURCE_DECISION.md` — 域名流量数据源的调研与最终决策，涉及主机名能力边界的改动前应先读结论部分。
+- `docs/DOMAIN_TRAFFIC_EXPERIMENT.md` / `docs/DOMAIN_TRAFFIC_DECISION.md` — 域名流量数据源的调研、hostname 实验和最终决策，涉及主机名能力边界的改动前应先读结论部分。

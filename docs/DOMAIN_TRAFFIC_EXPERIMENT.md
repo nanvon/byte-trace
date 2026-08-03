@@ -142,7 +142,7 @@ Dia 在用户主动打开/刷新网页后，追加进行 3 轮、每轮 20 秒�
 
 候选方案必须回答“这条连接由哪个应用产生、对应哪个远端主机、产生了多少字节、何时产生”四个问题。
 
-当前候选数据源的权限、部署和历史原型记录见 [DOMAIN_TRAFFIC_SOURCE_DECISION.md](DOMAIN_TRAFFIC_SOURCE_DECISION.md)。以下方案表用于界定实验能力和明确不做的方案。
+当前候选数据源的权限、部署和历史原型记录见 [DOMAIN_TRAFFIC_DECISION.md](DOMAIN_TRAFFIC_DECISION.md)。以下方案表用于界定实验能力和明确不做的方案。
 
 | 方案 | 能解决的问题 | 主要缺口 | 结论 |
 | --- | --- | --- | --- |
