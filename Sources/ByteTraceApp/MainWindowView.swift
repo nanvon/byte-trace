@@ -260,7 +260,6 @@ private struct MainOverviewView: View {
     }
 
     private func usageRows(_ records: [DailyUsageRecord]) -> some View {
-        let maxTotal = max(records.map(totalBytes(for:)).max() ?? 1, 1)
         let duplicateNames = ByteTraceViewModel.duplicateDisplayNames(in: records)
         return VStack(spacing: 0) {
             ForEach(records, id: \.appKey) { record in
@@ -268,10 +267,6 @@ private struct MainOverviewView: View {
                     MainUsageRow(
                         record: record,
                         showsPathHint: duplicateNames.contains(record.displayName)
-                    )
-                    .usageBarBackground(
-                        fraction: Double(totalBytes(for: record)) / Double(maxTotal),
-                        tint: .accentColor
                     )
                     .rowHoverHighlight()
                 }
@@ -298,6 +293,7 @@ private struct UsageTimelineChart: View {
     let points: [UsageTimelinePoint]
 
     @State private var hoverPoint: UsageTimelinePoint?
+    @State private var hoverLocation: CGPoint?
 
     private struct Slice: Identifiable {
         let id: String
@@ -383,14 +379,23 @@ private struct UsageTimelineChart: View {
                             updateHover(at: location, proxy: proxy, geometry: geometry)
                         case .ended:
                             hoverPoint = nil
+                            hoverLocation = nil
                         }
                     }
             }
         }
-        .overlay(alignment: .topLeading) {
-            if let hoverPoint {
-                hoverBubble(for: hoverPoint)
-                    .padding(8)
+        .overlay {
+            GeometryReader { geometry in
+                if let hoverPoint, let hoverLocation {
+                    let bubbleWidth: CGFloat = 150
+                    let clampedX = min(
+                        max(hoverLocation.x, bubbleWidth / 2 + 4),
+                        geometry.size.width - bubbleWidth / 2 - 4
+                    )
+                    hoverBubble(for: hoverPoint)
+                        .frame(width: bubbleWidth, alignment: .leading)
+                        .position(x: clampedX, y: 24)
+                }
             }
         }
         .frame(height: 220)
@@ -404,6 +409,7 @@ private struct UsageTimelineChart: View {
         hoverPoint = points.min {
             abs($0.start.timeIntervalSince(date)) < abs($1.start.timeIntervalSince(date))
         }
+        hoverLocation = location
     }
 
     private func hoverBubble(for point: UsageTimelinePoint) -> some View {

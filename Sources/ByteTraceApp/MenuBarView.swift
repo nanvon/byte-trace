@@ -24,9 +24,6 @@ struct MenuBarView: View {
                 }
                 .padding(16)
             }
-
-            Divider()
-            footer
         }
         .frame(width: 390, height: 560)
     }
@@ -36,9 +33,14 @@ struct MenuBarView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("ByteTrace")
                     .font(.headline)
-                Text("今天 · \(model.todayDisplayText)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(model.status.tint)
+                        .frame(width: 7, height: 7)
+                    Text(model.status.title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer(minLength: 8)
@@ -64,6 +66,18 @@ struct MenuBarView: View {
             .pointingHandCursor()
             .accessibilityLabel("设置")
             .help("设置")
+
+            Button {
+                model.shutdown()
+                NSApplication.shared.terminate(nil)
+            } label: {
+                Image(systemName: "power")
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(ByteTraceActionButtonStyle())
+            .pointingHandCursor()
+            .accessibilityLabel("退出 ByteTrace")
+            .help("退出 ByteTrace")
         }
         .padding(.horizontal, 16)
         .padding(.top, 14)
@@ -243,33 +257,6 @@ struct MenuBarView: View {
         openWindow(id: "main")
     }
 
-    private var footer: some View {
-        HStack(spacing: 7) {
-            Circle()
-                .fill(model.status.tint)
-                .frame(width: 7, height: 7)
-            Text(model.status.title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text("仅保存在本机")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            Button {
-                model.shutdown()
-                NSApplication.shared.terminate(nil)
-            } label: {
-                Image(systemName: "power")
-                    .frame(width: 24, height: 24)
-            }
-            .buttonStyle(ByteTraceActionButtonStyle())
-            .pointingHandCursor()
-            .accessibilityLabel("退出 ByteTrace")
-            .help("退出 ByteTrace")
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
 }
 
 private struct MetricView: View {
@@ -301,7 +288,6 @@ private struct UsageRows: View {
     let onSelect: (DailyUsageRecord) -> Void
 
     var body: some View {
-        let maxTotal = max(records.map(totalBytes).max() ?? 1, 1)
         let duplicateNames = ByteTraceViewModel.duplicateDisplayNames(in: records)
         VStack(spacing: 0) {
             ForEach(records, id: \.appKey) { record in
@@ -311,10 +297,6 @@ private struct UsageRows: View {
                     UsageRowView(
                         record: record,
                         showsPathHint: duplicateNames.contains(record.displayName)
-                    )
-                    .usageBarBackground(
-                        fraction: Double(totalBytes(record)) / Double(maxTotal),
-                        tint: .accentColor
                     )
                     .rowHoverHighlight()
                 }
@@ -329,11 +311,6 @@ private struct UsageRows: View {
         .padding(.horizontal, 10)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .animation(.smooth, value: records)
-    }
-
-    private func totalBytes(_ record: DailyUsageRecord) -> Int64 {
-        let result = record.downloadBytes.addingReportingOverflow(record.uploadBytes)
-        return result.overflow ? Int64.max : result.partialValue
     }
 }
 
