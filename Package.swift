@@ -11,8 +11,7 @@ let package = Package(
         .library(name: "ByteTraceCore", targets: ["ByteTraceCore"]),
         .executable(name: "ByteTraceProbe", targets: ["ByteTraceProbe"]),
         .executable(name: "ByteTraceConnectionProbe", targets: ["ByteTraceConnectionProbe"]),
-        .executable(name: "ByteTraceApp", targets: ["ByteTraceApp"]),
-        .executable(name: "ByteTraceIconLab", targets: ["ByteTraceIconLab"])
+        .executable(name: "ByteTraceApp", targets: ["ByteTraceApp"])
     ],
     targets: [
         .target(name: "ByteTraceCore"),
@@ -20,7 +19,6 @@ let package = Package(
             name: "ByteTraceApp",
             dependencies: ["ByteTraceCore"]
         ),
-        .executableTarget(name: "ByteTraceIconLab"),
         .executableTarget(
             name: "ByteTraceProbe",
             dependencies: ["ByteTraceCore"]

@@ -241,7 +241,6 @@ Sources/
   ByteTraceApp/             SwiftUI 菜单栏与主窗口
   ByteTraceProbe/           应用级采集探针
   ByteTraceConnectionProbe/ 连接级主机名探针
-  ByteTraceIconLab/         应用图标设计与导出工具（不进发布产物）
 Tests/ByteTraceCoreTests/   ByteTraceCore 的单元测试
 Scripts/
   package_app.sh            打包与签名

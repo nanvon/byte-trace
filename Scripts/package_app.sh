@@ -13,7 +13,7 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 PLIST_SOURCE="$ROOT_DIR/Packaging/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Packaging/Resources/ByteTrace.icns"
-MENUBAR_ICON_SOURCE="$ROOT_DIR/Packaging/Resources/MenuBar/MenuBarIcon.pdf"
+MENUBAR_ICON_DIR="$ROOT_DIR/Packaging/Resources/MenuBar"
 SIGNING_IDENTITY="${BYTE_TRACE_SIGNING_IDENTITY:--}"
 SWIFT_TRIPLE="${BYTE_TRACE_SWIFT_TRIPLE:-}"
 
@@ -34,10 +34,13 @@ if [[ ! -f "$ICON_SOURCE" ]]; then
     echo "missing app icon: $ICON_SOURCE" >&2
     exit 1
 fi
-if [[ ! -f "$MENUBAR_ICON_SOURCE" ]]; then
-    echo "missing menu bar icon: $MENUBAR_ICON_SOURCE" >&2
-    exit 1
-fi
+for menubar_scale in "" "@2x" "@3x"; do
+    menubar_icon="$MENUBAR_ICON_DIR/MenuBarIcon${menubar_scale}.png"
+    if [[ ! -f "$menubar_icon" ]]; then
+        echo "missing menu bar icon: $menubar_icon" >&2
+        exit 1
+    fi
+done
 
 echo "[package] building ByteTraceApp in release mode"
 swift build "${SWIFT_BUILD_ARGS[@]}"
@@ -58,7 +61,12 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$EXECUTABLE" "$MACOS_DIR/ByteTraceApp"
 cp "$PLIST_SOURCE" "$CONTENTS_DIR/Info.plist"
 cp "$ICON_SOURCE" "$RESOURCES_DIR/ByteTrace.icns"
-cp "$MENUBAR_ICON_SOURCE" "$RESOURCES_DIR/MenuBarIcon.pdf"
+# 菜单栏图标按 1x/2x/3x 三档打包：url(forResource:) 不做 @2x 变体匹配，
+# 由 ByteTraceMenuBarIcon 显式组装成多 representation 的 NSImage。
+for menubar_scale in "" "@2x" "@3x"; do
+    cp "$MENUBAR_ICON_DIR/MenuBarIcon${menubar_scale}.png" \
+       "$RESOURCES_DIR/MenuBarIcon${menubar_scale}.png"
+done
 printf 'APPL????' > "$CONTENTS_DIR/PkgInfo"
 
 plutil -convert binary1 "$CONTENTS_DIR/Info.plist"
