@@ -31,7 +31,7 @@ struct ByteTraceApp: App {
         MenuBarExtra {
             MenuBarView(model: model)
         } label: {
-            Image(systemName: "arrow.up.arrow.down.circle")
+            ByteTraceMenuBarIcon()
         }
         .menuBarExtraStyle(.window)
 

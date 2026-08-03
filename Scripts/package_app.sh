@@ -13,6 +13,7 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 PLIST_SOURCE="$ROOT_DIR/Packaging/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Packaging/Resources/ByteTrace.icns"
+MENUBAR_ICON_SOURCE="$ROOT_DIR/Packaging/Resources/MenuBar/MenuBarIcon@3x.png"
 SIGNING_IDENTITY="${BYTE_TRACE_SIGNING_IDENTITY:--}"
 SWIFT_TRIPLE="${BYTE_TRACE_SWIFT_TRIPLE:-}"
 
@@ -31,6 +32,10 @@ if [[ ! -f "$PLIST_SOURCE" ]]; then
 fi
 if [[ ! -f "$ICON_SOURCE" ]]; then
     echo "missing app icon: $ICON_SOURCE" >&2
+    exit 1
+fi
+if [[ ! -f "$MENUBAR_ICON_SOURCE" ]]; then
+    echo "missing menu bar icon: $MENUBAR_ICON_SOURCE" >&2
     exit 1
 fi
 
@@ -53,6 +58,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$EXECUTABLE" "$MACOS_DIR/ByteTraceApp"
 cp "$PLIST_SOURCE" "$CONTENTS_DIR/Info.plist"
 cp "$ICON_SOURCE" "$RESOURCES_DIR/ByteTrace.icns"
+cp "$MENUBAR_ICON_SOURCE" "$RESOURCES_DIR/MenuBarIcon@3x.png"
 printf 'APPL????' > "$CONTENTS_DIR/PkgInfo"
 
 plutil -convert binary1 "$CONTENTS_DIR/Info.plist"

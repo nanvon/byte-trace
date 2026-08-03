@@ -1,90 +1,117 @@
 import SwiftUI
 
-/// 图标在 24×24 设计网格上定义，所有坐标与线宽都是网格单位。
+/// 图标在 24×24 设计网格上定义，App Icon 与菜单栏共用同一条几何路径。
 enum TraceGeometry {
     static let grid: CGFloat = 24
-    static let baseY: CGFloat = 13
-    static let entryX: CGFloat = 2.6
-    static let upperForkX: CGFloat = 10
-    static let lowerForkX: CGFloat = 13.4
-    static let rightX: CGFloat = 21.2
+
+    static let upLeftX: CGFloat = 5.0
+    static let upRightX: CGFloat = 16.0
+    static let downLeftX: CGFloat = 7.0
+    static let downRightX: CGFloat = 18.0
+    static let upTipY: CGFloat = 1.6
+    static let downTipY: CGFloat = 22.4
 }
 
 struct TraceMarkSpec: Equatable {
-    var strokeWidth: CGFloat = 2.0
-    var branchCount: Int = 3
-    var spread: CGFloat = 4.0
-    var padScale: CGFloat = 1.0
-    var trunkBoost: CGFloat = 1.0
+    var strokeWidth: CGFloat
+    var arrowScale: CGFloat
 
     static let menuBar = TraceMarkSpec(
-        strokeWidth: 2.4,
-        branchCount: 2,
-        spread: 4.8,
-        padScale: 1.05,
-        trunkBoost: 1.0
+        strokeWidth: 2.6,
+        arrowScale: 1.02
     )
 
     static let appIcon = TraceMarkSpec(
-        strokeWidth: 2.0,
-        branchCount: 3,
-        spread: 4.0,
-        padScale: 1.0,
-        trunkBoost: 1.25
+        strokeWidth: 2.75,
+        arrowScale: 1.0
     )
 }
 
-extension TraceMarkSpec {
-    /// 下支比上支略短、略缓，避免上下对称。
-    var upperSpread: CGFloat { spread }
-    var lowerSpread: CGFloat { spread * 0.88 }
+enum TraceDirection {
+    case up
+    case down
 }
 
 enum TraceMark {
-    /// 主干：入口焊盘一路直达最右侧，是唯一贯穿全宽的线。
-    static func trunk(_ spec: TraceMarkSpec) -> Path {
+    /// 蓝色上行路径：左下进入，经过两段柔和转折后向右上离开。
+    static func upPath(_ spec: TraceMarkSpec) -> Path {
         var path = Path()
-        path.move(to: CGPoint(x: TraceGeometry.entryX, y: TraceGeometry.baseY))
-        path.addLine(to: CGPoint(x: TraceGeometry.rightX, y: TraceGeometry.baseY))
+        path.move(to: CGPoint(x: TraceGeometry.upLeftX, y: 18.4))
+        path.addLine(to: CGPoint(x: TraceGeometry.upLeftX, y: 14.0))
+        path.addCurve(
+            to: CGPoint(x: 8.5, y: 10.2),
+            control1: CGPoint(x: TraceGeometry.upLeftX, y: 12.3),
+            control2: CGPoint(x: 7.0, y: 10.2)
+        )
+        path.addLine(to: CGPoint(x: 12.8, y: 10.2))
+        path.addCurve(
+            to: CGPoint(x: TraceGeometry.upRightX, y: 6.8),
+            control1: CGPoint(x: 14.8, y: 10.2),
+            control2: CGPoint(x: TraceGeometry.upRightX, y: 8.8)
+        )
+        path.addLine(to: CGPoint(x: TraceGeometry.upRightX, y: 5.1))
         return path
     }
 
-    /// 分支：从主干上引出，各走一段 45° 斜切后转回水平。
-    static func branches(_ spec: TraceMarkSpec) -> Path {
+    /// 白色下行路径：右上进入，经过两段柔和转折后向左下离开。
+    static func downPath(_ spec: TraceMarkSpec) -> Path {
         var path = Path()
-        let up = spec.upperSpread
-        let down = spec.lowerSpread
-
-        path.move(to: CGPoint(x: TraceGeometry.upperForkX, y: TraceGeometry.baseY))
-        path.addLine(to: CGPoint(x: TraceGeometry.upperForkX + up, y: TraceGeometry.baseY - up))
-        path.addLine(to: CGPoint(x: TraceGeometry.rightX, y: TraceGeometry.baseY - up))
-
-        if spec.branchCount >= 3 {
-            path.move(to: CGPoint(x: TraceGeometry.lowerForkX, y: TraceGeometry.baseY))
-            path.addLine(to: CGPoint(x: TraceGeometry.lowerForkX + down, y: TraceGeometry.baseY + down))
-            path.addLine(to: CGPoint(x: TraceGeometry.rightX, y: TraceGeometry.baseY + down))
-        }
+        path.move(to: CGPoint(x: TraceGeometry.downRightX, y: 7.0))
+        path.addLine(to: CGPoint(x: TraceGeometry.downRightX, y: 9.4))
+        path.addCurve(
+            to: CGPoint(x: 14.5, y: 14.0),
+            control1: CGPoint(x: TraceGeometry.downRightX, y: 12.2),
+            control2: CGPoint(x: 16.0, y: 14.0)
+        )
+        path.addLine(to: CGPoint(x: 10.0, y: 14.0))
+        path.addCurve(
+            to: CGPoint(x: TraceGeometry.downLeftX, y: 16.8),
+            control1: CGPoint(x: 8.5, y: 14.0),
+            control2: CGPoint(x: TraceGeometry.downLeftX, y: 15.1)
+        )
+        path.addLine(to: CGPoint(x: TraceGeometry.downLeftX, y: 18.9))
         return path
     }
 
-    /// 焊盘半径依次递减，读作“同一入口分给不同应用的流量排行”。
-    static func pads(_ spec: TraceMarkSpec) -> [(center: CGPoint, radius: CGFloat)] {
-        var list: [(CGPoint, CGFloat)] = [
-            (CGPoint(x: TraceGeometry.entryX, y: TraceGeometry.baseY), 1.55),
-            (CGPoint(x: TraceGeometry.rightX, y: TraceGeometry.baseY - spec.upperSpread), 2.25),
-            (CGPoint(x: TraceGeometry.rightX, y: TraceGeometry.baseY), 1.5)
-        ]
-        if spec.branchCount >= 3 {
-            list.append((CGPoint(x: TraceGeometry.rightX, y: TraceGeometry.baseY + spec.lowerSpread), 1.05))
+    static func arrowhead(
+        tip: CGPoint,
+        direction: TraceDirection,
+        scale: CGFloat
+    ) -> Path {
+        let length = 3.8 * scale
+        let width = 4.8 * scale
+        let stemWidth = 1.45 * scale
+        let halfWidth = width / 2
+        let halfStem = stemWidth / 2
+
+        var path = Path()
+        switch direction {
+        case .up:
+            path.move(to: tip)
+            path.addLine(to: CGPoint(x: tip.x - halfWidth, y: tip.y + length * 0.72))
+            path.addLine(to: CGPoint(x: tip.x - halfStem, y: tip.y + length * 0.72))
+            path.addLine(to: CGPoint(x: tip.x - halfStem, y: tip.y + length))
+            path.addLine(to: CGPoint(x: tip.x + halfStem, y: tip.y + length))
+            path.addLine(to: CGPoint(x: tip.x + halfStem, y: tip.y + length * 0.72))
+            path.addLine(to: CGPoint(x: tip.x + halfWidth, y: tip.y + length * 0.72))
+        case .down:
+            path.move(to: tip)
+            path.addLine(to: CGPoint(x: tip.x - halfWidth, y: tip.y - length * 0.72))
+            path.addLine(to: CGPoint(x: tip.x - halfStem, y: tip.y - length * 0.72))
+            path.addLine(to: CGPoint(x: tip.x - halfStem, y: tip.y - length))
+            path.addLine(to: CGPoint(x: tip.x + halfStem, y: tip.y - length))
+            path.addLine(to: CGPoint(x: tip.x + halfStem, y: tip.y - length * 0.72))
+            path.addLine(to: CGPoint(x: tip.x + halfWidth, y: tip.y - length * 0.72))
         }
-        return list.map { (center: $0.0, radius: $0.1 * spec.padScale) }
+        path.closeSubpath()
+        return path
     }
 }
 
 struct TraceMarkView: View {
     var spec: TraceMarkSpec
-    var color: Color
-    var padColor: Color
+    var upColor: Color
+    var downColor: Color
     var showGrid: Bool = false
 
     var body: some View {
@@ -102,26 +129,25 @@ struct TraceMarkView: View {
                 lineJoin: .round
             )
 
-            context.stroke(
-                TraceMark.trunk(spec),
-                with: .color(color),
-                style: StrokeStyle(
-                    lineWidth: spec.strokeWidth * spec.trunkBoost,
-                    lineCap: .round,
-                    lineJoin: .round
-                )
+            context.stroke(TraceMark.upPath(spec), with: .color(upColor), style: style)
+            context.fill(
+                TraceMark.arrowhead(
+                    tip: CGPoint(x: TraceGeometry.upRightX, y: TraceGeometry.upTipY),
+                    direction: .up,
+                    scale: spec.arrowScale
+                ),
+                with: .color(upColor)
             )
-            context.stroke(TraceMark.branches(spec), with: .color(color), style: style)
 
-            for pad in TraceMark.pads(spec) {
-                let rect = CGRect(
-                    x: pad.center.x - pad.radius,
-                    y: pad.center.y - pad.radius,
-                    width: pad.radius * 2,
-                    height: pad.radius * 2
-                )
-                context.fill(Path(ellipseIn: rect), with: .color(padColor))
-            }
+            context.stroke(TraceMark.downPath(spec), with: .color(downColor), style: style)
+            context.fill(
+                TraceMark.arrowhead(
+                    tip: CGPoint(x: TraceGeometry.downLeftX, y: TraceGeometry.downTipY),
+                    direction: .down,
+                    scale: spec.arrowScale
+                ),
+                with: .color(downColor)
+            )
         }
     }
 

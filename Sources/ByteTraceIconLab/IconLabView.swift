@@ -31,15 +31,7 @@ struct IconLabView: View {
                 .labelsHidden()
 
                 slider("线宽", value: spec.strokeWidth, range: 1.2...3.6)
-                slider("分支间距", value: spec.spread, range: 2.5...6.5)
-                slider("焊盘大小", value: spec.padScale, range: 0.6...1.6)
-                slider("主干加粗", value: spec.trunkBoost, range: 1.0...1.8)
-
-                Picker("分支数", selection: spec.branchCount) {
-                    Text("2 条").tag(2)
-                    Text("3 条").tag(3)
-                }
-                .pickerStyle(.segmented)
+                slider("箭头倍率", value: spec.arrowScale, range: 0.78...1.2)
 
                 Toggle("显示 24 网格", isOn: $showGrid)
 

@@ -8,11 +8,12 @@ enum IconMode: String, CaseIterable, Identifiable {
 }
 
 enum TracePalette {
-    /// 近黑石墨，不用纯黑：纯黑在 Retina 上会显得比周围图标“陷下去”。
-    static let graphiteTop = Color(red: 0.153, green: 0.149, blue: 0.141)
-    static let graphiteBottom = Color(red: 0.086, green: 0.082, blue: 0.078)
-    static let amber = Color(red: 0.910, green: 0.639, blue: 0.239)
-    static let amberBright = Color(red: 0.965, green: 0.788, blue: 0.435)
+    /// 深石墨底，配蓝色上行与柔白下行，菜单栏则统一交给系统着色。
+    static let graphiteTop = Color(red: 0.094, green: 0.133, blue: 0.176)
+    static let graphiteBottom = Color(red: 0.043, green: 0.063, blue: 0.082)
+    static let cobalt = Color(red: 0.306, green: 0.471, blue: 1.0)
+    static let cloud = Color(red: 0.949, green: 0.961, blue: 0.969)
+    static let slate = Color(red: 0.490, green: 0.537, blue: 0.588)
 }
 
 /// 应用图标里图形不满格，留出系统圆角壳体的呼吸区。
@@ -31,8 +32,8 @@ struct AppIconTile: View {
 
             TraceMarkView(
                 spec: spec,
-                color: TracePalette.amber,
-                padColor: TracePalette.amberBright,
+                upColor: TracePalette.cobalt,
+                downColor: TracePalette.cloud,
                 showGrid: showGrid
             )
             .padding(size * 0.19)
@@ -52,8 +53,8 @@ struct MenuBarTile: View {
     var body: some View {
         TraceMarkView(
             spec: spec,
-            color: tint,
-            padColor: tint,
+            upColor: tint,
+            downColor: tint,
             showGrid: showGrid
         )
         .frame(width: size, height: size)
@@ -66,7 +67,7 @@ struct TemplateExportTile: View {
     var size: CGFloat
 
     var body: some View {
-        TraceMarkView(spec: spec, color: .black, padColor: .black)
+        TraceMarkView(spec: spec, upColor: .black, downColor: .black)
             .frame(width: size, height: size)
     }
 }
