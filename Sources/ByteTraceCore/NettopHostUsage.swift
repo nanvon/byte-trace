@@ -162,7 +162,26 @@ public final class NettopHostUsageAggregator: @unchecked Sendable {
 
     public func records() -> [NettopHostUsageRecord] {
         lock.lock()
-        let values = pending.values.sorted { lhs, rhs in
+        let values = lockedSortedRecords()
+        lock.unlock()
+        return values
+    }
+
+    /// 取快照并清空在同一锁区间内完成，避免写库期间新 ingest 的样本被连带清掉。
+    @discardableResult
+    public func flush(to store: UsageStore) throws -> Int {
+        lock.lock()
+        let values = lockedSortedRecords()
+        pending.removeAll(keepingCapacity: true)
+        lock.unlock()
+
+        guard !values.isEmpty else { return 0 }
+        try store.applyHostUsage(values)
+        return values.count
+    }
+
+    private func lockedSortedRecords() -> [NettopHostUsageRecord] {
+        pending.values.sorted { lhs, rhs in
             if lhs.totalBytes != rhs.totalBytes {
                 return lhs.totalBytes > rhs.totalBytes
             }
@@ -177,20 +196,6 @@ public final class NettopHostUsageAggregator: @unchecked Sendable {
             }
             return lhs.endpointKind.rawValue < rhs.endpointKind.rawValue
         }
-        lock.unlock()
-        return values
-    }
-
-    @discardableResult
-    public func flush(to store: UsageStore) throws -> Int {
-        let values = records()
-        guard !values.isEmpty else { return 0 }
-
-        try store.applyHostUsage(values)
-        lock.lock()
-        pending.removeAll(keepingCapacity: true)
-        lock.unlock()
-        return values.count
     }
 
     public func removeAll() {

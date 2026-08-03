@@ -340,7 +340,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             collector.stop()
         }
         stopConnectionCollector()
-        flushNow(forceRefresh: true)
+        flushAfterStop()
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
     }
@@ -359,6 +359,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             collector.stop()
         }
         stopConnectionCollector()
+        // 退出路径必须同步排空主队列：采集器最后一帧事件是 main.async 投递的，
+        // 应用终止后排队 block 不保证执行，这里转一圈 runloop 让最后一帧先入聚合器，
+        // 随后 flushNow 才能把它落库（仅退出瞬间发生一次，代价可忽略）。
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         networkPathMonitor.cancel()
         flushNow(forceRefresh: true)
@@ -727,7 +731,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             collector.stop()
         }
         stopConnectionCollector()
-        flushNow(forceRefresh: true)
+        flushAfterStop()
 
         if isSatisfied {
             lastError = nil
@@ -900,7 +904,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             collector.stop()
         }
         stopConnectionCollector()
-        flushNow(forceRefresh: true)
+        flushAfterStop()
         status = .stopped
         recordCollectorEvent(kind: "sample_gap", details: "system_sleep")
     }
@@ -1025,6 +1029,15 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         } catch {
             lastError = "数据库写入失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
+        }
+    }
+
+    /// 停止采集后调用：采集器最后一帧事件经 `DispatchQueue.main.async` 投递，
+    /// 这里同样入主队列并排在其后，保证最后一帧先进入聚合器再落库。
+    /// 退出路径不能用它（应用终止前 async block 不保证执行），shutdown() 单独同步排空。
+    private func flushAfterStop() {
+        DispatchQueue.main.async { [weak self] in
+            self?.flushNow(forceRefresh: true)
         }
     }
 
