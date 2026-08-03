@@ -5,6 +5,7 @@ import SwiftUI
 final class ByteTraceAppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: ByteTraceViewModel?
     private(set) static weak var mainWindow: NSWindow?
+    static var openMainWindowAction: (() -> Void)?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -18,6 +19,13 @@ final class ByteTraceAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         Self.model?.shutdown()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            Self.openMainWindowAction?()
+        }
+        return true
     }
 
     static func prepareMainWindow() {

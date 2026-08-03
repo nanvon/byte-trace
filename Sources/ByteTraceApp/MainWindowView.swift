@@ -6,7 +6,7 @@ import SwiftUI
 struct MainWindowView: View {
     @ObservedObject var model: ByteTraceViewModel
     @State private var selection: MainWindowPage = .overview
-
+    @Environment(\.openWindow) private var openWindow
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
@@ -32,6 +32,7 @@ struct MainWindowView: View {
         .frame(minWidth: 900, idealWidth: 1080, minHeight: 620, idealHeight: 720)
         .onAppear {
             selection = model.requestedMainWindowPage
+            ByteTraceAppDelegate.openMainWindowAction = { openWindow(id: "main") }
             ByteTraceAppDelegate.prepareMainWindow()
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
