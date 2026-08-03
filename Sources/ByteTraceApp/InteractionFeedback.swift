@@ -36,6 +36,48 @@ extension View {
     }
 }
 
+/// 在行内容背后画一条相对最大值的占比条，让用户一眼比出大小而不必逐行读数字。
+struct UsageBarBackground: ViewModifier {
+    let fraction: Double
+    let tint: Color
+
+    func body(content: Content) -> some View {
+        content.background(alignment: .leading) {
+            GeometryReader { proxy in
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(tint.opacity(0.1))
+                    .frame(width: proxy.size.width * max(0, min(1, fraction)))
+            }
+        }
+    }
+}
+
+extension View {
+    func usageBarBackground(fraction: Double, tint: Color = .accentColor) -> some View {
+        modifier(UsageBarBackground(fraction: fraction, tint: tint))
+    }
+}
+
+/// 鼠标悬停时给列表行加一层淡背景，弥补菜单栏/列表缺失的原生 hover 反馈。
+struct RowHoverHighlight: ViewModifier {
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(isHovering ? 0.05 : 0))
+            )
+            .onHover { isHovering = $0 }
+    }
+}
+
+extension View {
+    func rowHoverHighlight() -> some View {
+        modifier(RowHoverHighlight())
+    }
+}
+
 /// 保留 plain button 的轻量外观，同时在按下瞬间给出直接反馈。
 struct ByteTraceActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {

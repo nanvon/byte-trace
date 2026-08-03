@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var isShowingHostClearConfirmation = false
     @State private var pendingRetentionPolicy: UsageRetentionPolicy?
     @State private var exportMessage: String?
+    @State private var exportedFileURL: URL?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,7 +28,6 @@ struct SettingsView: View {
                         "显示系统与后台进程",
                         isOn: $model.showsSystemProcesses
                     )
-                    .pointingHandCursor()
                     Toggle(
                         "登录时启动",
                         isOn: Binding(
@@ -35,7 +35,6 @@ struct SettingsView: View {
                             set: { model.setLaunchAtLogin($0) }
                         )
                     )
-                    .pointingHandCursor()
                 }
 
                 Section("本地存储") {
@@ -53,20 +52,27 @@ struct SettingsView: View {
                     } label: {
                         Label("在 Finder 中显示", systemImage: "folder")
                     }
-                    .pointingHandCursor()
 
                     Button {
                         exportCurrentRange()
                     } label: {
                         Label("导出当前范围 JSON", systemImage: "square.and.arrow.up")
                     }
-                    .pointingHandCursor()
 
                     if let exportMessage {
-                        Text(exportMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
+                        HStack(spacing: 8) {
+                            Text(exportMessage)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            if let exportedFileURL {
+                                Spacer()
+                                Button("在 Finder 中显示") {
+                                    NSWorkspace.shared.activateFileViewerSelecting([exportedFileURL])
+                                }
+                                .font(.caption)
+                            }
+                        }
                     }
 
                     Button(role: .destructive) {
@@ -74,7 +80,6 @@ struct SettingsView: View {
                     } label: {
                         Label("清空全部统计", systemImage: "trash")
                     }
-                    .pointingHandCursor()
                 }
 
                 Section("细粒度统计") {
@@ -96,10 +101,9 @@ struct SettingsView: View {
                             Text(policy.title).tag(policy)
                         }
                     }
-                    .pointingHandCursor()
 
                     if let stats = model.bucketStats, stats.bucketCount > 0 {
-                        LabeledContent("分钟桶数量", value: "\(stats.bucketCount)")
+                        LabeledContent("已记录的时间点", value: "\(stats.bucketCount)")
                         LabeledContent(
                             "最早记录",
                             value: formattedDate(stats.earliestBucket)
@@ -109,12 +113,12 @@ struct SettingsView: View {
                             value: formattedDate(stats.latestBucket)
                         )
                     } else {
-                        Text("尚未积累分钟级统计数据。开始采集后会逐步显示最近时间范围和趋势。")
+                        Text("尚未积累分钟级统计数据，开始统计后会逐步显示最近时间范围和趋势。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("默认不自动清理。启用保留周期后，只会删除超过周期的分钟时间桶，日汇总和应用信息不受影响。")
+                    Text("默认不自动清理。启用保留周期后，只会删除超过周期的分钟级数据，每日汇总和应用信息不受影响。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -124,12 +128,11 @@ struct SettingsView: View {
                         "启用连接级采集（实验）",
                         isOn: $model.enableConnectionCollector
                     )
-                    .pointingHandCursor()
-                    Text("开启会额外启动一个连接级 nettop 进程，显著增加 CPU 与耗电；默认关闭。关闭状态下已收集的历史数据仍保留，可手动清空。")
+                    Text("开启会额外运行一个统计进程，明显增加 CPU 与耗电，默认关闭。关闭后已收集的历史数据仍保留，可手动清空。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    Text("该实验数据与正式应用统计分开保存。清理这里只会删除主机名、IP-only 和未知端点的连接级桶。")
+                    Text("该实验数据与正式应用统计分开保存，清理这里不会影响应用流量统计。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -138,7 +141,6 @@ struct SettingsView: View {
                     } label: {
                         Label("清空主机名实验数据", systemImage: "globe.badge.chevron.backward")
                     }
-                    .pointingHandCursor()
                 }
 
                 Section("关于 ByteTrace") {
@@ -225,9 +227,11 @@ struct SettingsView: View {
             guard response == .OK, let url = panel.url else { return }
             do {
                 try model.exportCurrentRange(to: url)
-                exportMessage = "已导出：\(url.path)"
+                exportMessage = "已导出：\(url.lastPathComponent)"
+                exportedFileURL = url
             } catch {
                 exportMessage = "导出失败：\(error.localizedDescription)"
+                exportedFileURL = nil
             }
         }
     }

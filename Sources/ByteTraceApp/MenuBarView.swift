@@ -17,7 +17,9 @@ struct MenuBarView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     summaryCard
-                    statusCard
+                    if model.status != .collecting || model.lastError != nil {
+                        statusCard
+                    }
                     usageContent
                 }
                 .padding(16)
@@ -34,7 +36,7 @@ struct MenuBarView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("ByteTrace")
                     .font(.headline)
-                Text("今日 · \(model.dayKey)")
+                Text("今天 · \(model.todayDisplayText)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -42,20 +44,7 @@ struct MenuBarView: View {
             Spacer(minLength: 8)
 
             Button {
-                model.refresh()
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .frame(width: 26, height: 26)
-            }
-            .buttonStyle(ByteTraceActionButtonStyle())
-            .pointingHandCursor()
-            .accessibilityLabel("刷新今日统计")
-            .help("刷新今日统计")
-
-            Button {
-                model.requestedMainWindowPage = .overview
-                ByteTraceAppDelegate.prepareMainWindow()
-                openWindow(id: "main")
+                openMainWindow(page: .overview)
             } label: {
                 Image(systemName: "macwindow")
                     .frame(width: 26, height: 26)
@@ -66,9 +55,7 @@ struct MenuBarView: View {
             .help("打开主窗口")
 
             Button {
-                model.requestedMainWindowPage = .settings
-                ByteTraceAppDelegate.prepareMainWindow()
-                openWindow(id: "main")
+                openMainWindow(page: .settings)
             } label: {
                 Image(systemName: "gearshape")
                     .frame(width: 26, height: 26)
@@ -93,6 +80,8 @@ struct MenuBarView: View {
                 Text(ByteTraceViewModel.formatBytes(model.todayTotals.totalBytes))
                     .font(.title2.weight(.semibold))
                     .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .animation(.smooth, value: model.todayTotals.totalBytes)
             }
 
             HStack(spacing: 0) {
@@ -150,7 +139,6 @@ struct MenuBarView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .pointingHandCursor()
         }
         .padding(12)
         .background(
@@ -159,16 +147,18 @@ struct MenuBarView: View {
         )
     }
 
+    private let topRowLimit = 8
+
     @ViewBuilder
     private var usageContent: some View {
         if model.records.isEmpty {
             EmptyTrafficView()
         } else {
-            UsageSection(title: "应用与未知进程", records: model.applicationRecords)
+            applicationSection
 
             if !model.proxyRecords.isEmpty {
                 DisclosureGroup(isExpanded: $isProxyExpanded) {
-                    UsageRows(records: model.proxyRecords)
+                    UsageRows(records: model.proxyRecords, onSelect: openDetail)
                 } label: {
                     GroupLabel(
                         title: "代理运输流量",
@@ -182,7 +172,7 @@ struct MenuBarView: View {
 
             if model.showsSystemProcesses, !model.systemRecords.isEmpty {
                 DisclosureGroup(isExpanded: $isSystemExpanded) {
-                    UsageRows(records: model.systemRecords)
+                    UsageRows(records: model.systemRecords, onSelect: openDetail)
                 } label: {
                     GroupLabel(
                         title: "系统与后台进程",
@@ -194,6 +184,63 @@ struct MenuBarView: View {
                 }
             }
         }
+    }
+
+    private var applicationSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("应用流量")
+                    .font(.subheadline.weight(.semibold))
+                Text("\(model.applicationRecords.count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+
+            if model.applicationRecords.isEmpty {
+                Text("暂无应用流量")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
+            } else {
+                UsageRows(
+                    records: Array(model.applicationRecords.prefix(topRowLimit)),
+                    onSelect: openDetail
+                )
+
+                if model.applicationRecords.count > topRowLimit {
+                    Button {
+                        openMainWindow(page: .overview)
+                    } label: {
+                        HStack {
+                            Text("查看全部 \(model.applicationRecords.count) 个")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(ByteTraceActionButtonStyle())
+                    .pointingHandCursor()
+                }
+            }
+        }
+    }
+
+    private func openDetail(_ record: DailyUsageRecord) {
+        model.openAppDetail(record.appKey)
+        openMainWindow(page: .overview)
+    }
+
+    private func openMainWindow(page: MainWindowPage) {
+        model.requestedMainWindowPage = page
+        ByteTraceAppDelegate.prepareMainWindow()
+        openWindow(id: "main")
     }
 
     private var footer: some View {
@@ -249,41 +296,30 @@ private struct MetricView: View {
     }
 }
 
-private struct UsageSection: View {
-    let title: String
-    let records: [DailyUsageRecord]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                Text("\(records.count)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-                Spacer()
-            }
-
-            if records.isEmpty {
-                Text("暂无应用流量")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 8)
-            } else {
-                UsageRows(records: records)
-            }
-        }
-    }
-}
-
 private struct UsageRows: View {
     let records: [DailyUsageRecord]
+    let onSelect: (DailyUsageRecord) -> Void
 
     var body: some View {
+        let maxTotal = max(records.map(totalBytes).max() ?? 1, 1)
+        let duplicateNames = ByteTraceViewModel.duplicateDisplayNames(in: records)
         VStack(spacing: 0) {
             ForEach(records, id: \.appKey) { record in
-                UsageRowView(record: record)
+                Button {
+                    onSelect(record)
+                } label: {
+                    UsageRowView(
+                        record: record,
+                        showsPathHint: duplicateNames.contains(record.displayName)
+                    )
+                    .usageBarBackground(
+                        fraction: Double(totalBytes(record)) / Double(maxTotal),
+                        tint: .accentColor
+                    )
+                    .rowHoverHighlight()
+                }
+                .buttonStyle(ByteTraceActionButtonStyle())
+                .pointingHandCursor()
                 if record.appKey != records.last?.appKey {
                     Divider()
                         .padding(.leading, 42)
@@ -292,11 +328,18 @@ private struct UsageRows: View {
         }
         .padding(.horizontal, 10)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .animation(.smooth, value: records)
+    }
+
+    private func totalBytes(_ record: DailyUsageRecord) -> Int64 {
+        let result = record.downloadBytes.addingReportingOverflow(record.uploadBytes)
+        return result.overflow ? Int64.max : result.partialValue
     }
 }
 
 private struct UsageRowView: View {
     let record: DailyUsageRecord
+    var showsPathHint: Bool = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -313,6 +356,13 @@ private struct UsageRowView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
+                if showsPathHint, let path = record.bundlePath ?? record.executablePath {
+                    Text(ByteTraceViewModel.abbreviatedPath(path))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
             }
 
             Spacer(minLength: 6)
@@ -320,6 +370,8 @@ private struct UsageRowView: View {
             Text(ByteTraceViewModel.formatBytes(totalBytes))
                 .font(.callout.weight(.medium))
                 .monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(.smooth, value: totalBytes)
         }
         .padding(.vertical, 8)
         .contentShape(Rectangle())
@@ -374,9 +426,9 @@ private struct EmptyTrafficView: View {
             Image(systemName: "chart.bar.xaxis")
                 .font(.title2)
                 .foregroundStyle(.secondary)
-            Text("正在建立统计基线")
+            Text("正在读取系统流量")
                 .font(.subheadline.weight(.medium))
-            Text("完成首个采样周期后，今日应用流量会显示在这里。")
+            Text("再等几秒，今天的应用流量就会显示在这里。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -390,23 +442,23 @@ private extension MonitorStatus {
     var title: String {
         switch self {
         case .stopped: return "统计已停止"
-        case .starting: return "正在启动采集"
-        case .baseline: return "正在建立统计基线"
+        case .starting: return "正在启动统计"
+        case .baseline: return "正在读取系统流量"
         case .collecting: return "正在统计"
-        case .reconnecting: return "正在重连"
-        case .incompatible: return "系统格式不兼容"
-        case .failed: return "采集不可用"
+        case .reconnecting: return "正在自动恢复"
+        case .incompatible: return "当前系统版本不受支持"
+        case .failed: return "统计不可用"
         }
     }
 
     var detail: String {
         switch self {
-        case .stopped: return "可从这里重新开始采集。"
+        case .stopped: return "可从这里重新开始统计。"
         case .starting: return "正在连接系统流量统计。"
-        case .baseline: return "首帧只用于建立基线，不会计入今日流量。"
-        case .collecting: return "应用流量每约 5 秒写入本机数据库。"
-        case .reconnecting: return "nettop 已退出，将按退避策略重新启动。"
-        case .incompatible: return "已暂停入账，请检查当前 macOS 的 nettop 格式。"
+        case .baseline: return "刚启动的前几秒不计入统计。"
+        case .collecting: return "流量数据每约 5 秒保存一次。"
+        case .reconnecting: return "统计中断，正在自动恢复。"
+        case .incompatible: return "已暂停统计，需要更新 ByteTrace 以支持当前 macOS 版本。"
         case .failed: return "请查看错误信息，修复后重新开始。"
         }
     }

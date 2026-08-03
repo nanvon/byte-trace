@@ -123,6 +123,8 @@ struct UsageTimelinePoint: Identifiable, Equatable {
     let start: Date
     let downloadBytes: Int64
     let uploadBytes: Int64
+    /// 相邻采样间隔明显大于正常粒度时递增，用于图表上断开连线而不是画出虚假的线性上升。
+    let segmentID: Int
 
     var id: Date { start }
 
@@ -140,6 +142,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var status: MonitorStatus = .stopped
     @Published private(set) var lastError: String?
     @Published var requestedMainWindowPage: MainWindowPage = .overview
+    /// 从菜单栏点击某个应用后，主窗口概览页据此把导航栈推到该应用详情。
+    @Published var pendingAppDetailKey: String?
     @Published var selectedRange: UsageTimeRange = .today {
         didSet {
             guard oldValue != selectedRange else { return }
@@ -303,6 +307,22 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     var dayKey: String {
         Self.dayKey(for: Date())
+    }
+
+    private static let todayDisplayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "M月d日 EEEE"
+        return formatter
+    }()
+
+    var todayDisplayText: String {
+        Self.todayDisplayFormatter.string(from: Date())
+    }
+
+    func openAppDetail(_ appKey: String) {
+        requestedMainWindowPage = .overview
+        pendingAppDetailKey = appKey
     }
 
     func start() {
@@ -584,16 +604,36 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         ])
     }
 
-    private static let byteCountFormatter: ByteCountFormatter = {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB, .useTB]
-        formatter.countStyle = .binary
-        formatter.includesUnit = true
-        return formatter
-    }()
-
+    /// 十进制（1000 进制）对齐访达与活动监视器的显示口径；固定小数位避免同列数字宽度参差。
     static func formatBytes(_ bytes: Int64) -> String {
-        byteCountFormatter.string(fromByteCount: max(0, bytes))
+        let value = Double(max(0, bytes))
+        let units: [(threshold: Double, suffix: String, fractionDigits: Int)] = [
+            (1_000_000_000, "GB", 2),
+            (1_000_000, "MB", 1),
+            (1_000, "KB", 0)
+        ]
+        for unit in units where value >= unit.threshold {
+            let scaled = value / unit.threshold
+            return "\(scaled.formatted(.number.precision(.fractionLength(unit.fractionDigits)))) \(unit.suffix)"
+        }
+        return "\(Int(value)) B"
+    }
+
+    /// 同名不同路径的进程（如多个 node 版本）在同一个列表里无法区分，返回需要附加路径提示的应用名集合。
+    static func duplicateDisplayNames(in records: [DailyUsageRecord]) -> Set<String> {
+        var counts: [String: Int] = [:]
+        for record in records {
+            counts[record.displayName, default: 0] += 1
+        }
+        return Set(counts.filter { $0.value > 1 }.keys)
+    }
+
+    static func abbreviatedPath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
     }
 
     private func configureCollector() {
@@ -667,10 +707,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         case let .exited(statusCode):
             isStarted = false
             if wantsCollection, !isSleeping, networkPathSatisfied {
-                let message = "nettop 已退出（状态码 \(statusCode)），准备重连"
-                lastError = message
+                let details = "nettop 已退出（状态码 \(statusCode)），准备重连"
+                lastError = "统计中断，正在自动恢复…"
                 status = .reconnecting
-                recordCollectorEvent(kind: "collector_exited", details: message)
+                recordCollectorEvent(kind: "collector_exited", details: details)
                 collector.stop()
                 stopConnectionCollector()
                 flushNow()
@@ -932,10 +972,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             }
         } catch {
             isStarted = false
-            let message = "nettop 启动失败：\(error.localizedDescription)"
-            lastError = message
+            let details = "nettop 启动失败：\(error.localizedDescription)"
+            lastError = "统计启动失败：\(error.localizedDescription)"
             status = .reconnecting
-            recordCollectorEvent(kind: "collector_error", details: message)
+            recordCollectorEvent(kind: "collector_error", details: details)
             scheduleRestart()
         }
     }
@@ -1193,14 +1233,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 uploadBytes: saturatingAdd(existing.uploadBytes, record.uploadBytes)
             )
         }
-        return totals.keys.sorted().compactMap { start in
-            guard let value = totals[start] else { return nil }
-            return UsageTimelinePoint(
-                start: start,
-                downloadBytes: value.downloadBytes,
-                uploadBytes: value.uploadBytes
-            )
-        }
+        // 分钟粒度桶，正常相邻间隔 60 秒。
+        return timelinePoints(from: totals, expectedInterval: 60)
     }
 
     private func makeTimeline(from records: [DailyUsageRecord]) -> [UsageTimelinePoint] {
@@ -1213,14 +1247,36 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 uploadBytes: saturatingAdd(existing.uploadBytes, record.uploadBytes)
             )
         }
-        return totals.keys.sorted().compactMap { start in
-            guard let value = totals[start] else { return nil }
-            return UsageTimelinePoint(
-                start: start,
-                downloadBytes: value.downloadBytes,
-                uploadBytes: value.uploadBytes
+        // 日粒度记录，正常相邻间隔 1 天。
+        return timelinePoints(from: totals, expectedInterval: 24 * 60 * 60)
+    }
+
+    /// 相邻采样点间隔超过正常粒度的 2.5 倍（例如应用休眠、未采集）时切换 segmentID，
+    /// 避免 Swift Charts 把跨越空档的两个点连成一条虚假的线性上升。
+    private func timelinePoints(
+        from totals: [Date: UsageTotals],
+        expectedInterval: TimeInterval
+    ) -> [UsageTimelinePoint] {
+        let gapThreshold = expectedInterval * 2.5
+        var segmentID = 0
+        var previousStart: Date?
+        var points: [UsageTimelinePoint] = []
+        for start in totals.keys.sorted() {
+            guard let value = totals[start] else { continue }
+            if let previousStart, start.timeIntervalSince(previousStart) > gapThreshold {
+                segmentID += 1
+            }
+            points.append(
+                UsageTimelinePoint(
+                    start: start,
+                    downloadBytes: value.downloadBytes,
+                    uploadBytes: value.uploadBytes,
+                    segmentID: segmentID
+                )
             )
+            previousStart = start
         }
+        return points
     }
 
     private func totals(from records: [DailyUsageRecord]) -> UsageTotals {

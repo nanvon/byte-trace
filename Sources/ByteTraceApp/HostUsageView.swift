@@ -30,7 +30,6 @@ struct HostUsageView: View {
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
-                    .pointingHandCursor()
                 }
             }
         }
@@ -44,7 +43,6 @@ struct HostUsageView: View {
         }
         .pickerStyle(.segmented)
         .frame(maxWidth: 620)
-        .pointingHandCursor()
     }
 
     private var titleBlock: some View {
@@ -59,7 +57,7 @@ struct HostUsageView: View {
                     .padding(.vertical, 4)
                     .background(.orange.opacity(0.12), in: Capsule())
             }
-            Text("只展示连接级 nettop 直接观察到的主机名；IP-only、缺失名称和无法归属的流量统一计入“无法识别/其他”。")
+            Text("只展示系统能直接观察到的主机名；只有 IP 地址、缺失名称和无法归属的流量统一计入“无法识别/其他”。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -96,7 +94,7 @@ struct HostUsageView: View {
                 HStack {
                     Text("可识别字节 / 正式应用总量")
                     Spacer()
-                    Text("连接观测内可见 \(percent(coverage.observedVisibilityRatio))")
+                    Text("已观测连接中可见 \(percent(coverage.observedVisibilityRatio))")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -145,7 +143,7 @@ struct HostUsageView: View {
                 .foregroundStyle(.secondary)
             Text("连接级采集未启用")
                 .font(.headline)
-            Text("该实验功能默认关闭。可在设置页开启，但会额外运行一个连接级 nettop 进程，显著增加 CPU 与耗电。")
+            Text("该实验功能默认关闭。可在设置页开启，但会额外运行一个统计进程，明显增加 CPU 与耗电。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
