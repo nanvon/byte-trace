@@ -131,4 +131,4 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 - `NetworkExtensionLab/` — **已冻结的研究工程**，独立 Xcode 项目（XcodeGen 生成），不在 `Package.swift` 里，不属于产品链路。除非明确要求，不要改动或尝试把它接入主应用。
 - `docs/DOMAIN_TRAFFIC_EXPERIMENT.md` / `docs/DOMAIN_TRAFFIC_DECISION.md` — 域名流量数据源的调研、hostname 实验和最终决策，涉及主机名能力边界的改动前应先读结论部分。
 
-图标资源的真实生产路径是 `Packaging/Resources/Brand/` 下的设计稿 PNG（`ByteTraceAppIconCentered.png` 1024x1024、`ByteTraceMenuBarIconSource.png` 121x199），经人工处理后手动导出为 `ByteTrace.iconset/` / `ByteTrace.icns` / `MenuBar/*.png|pdf`，不经任何脚本自动生成。曾存在的 `Sources/ByteTraceIconLab/` 图标生成工具与这条路径已脱钩（导出结果与实际图标资源存在几何差异），于 2026-08-03 移除，不要再新增或恢复。
+图标资源的真实生产路径是 `Packaging/Resources/Brand/` 下的设计稿 PNG（`ByteTraceAppIconCentered.png` 1024x1024、`ByteTraceMenuBarIconSource.png` 199x199），经人工处理后手动导出为 `ByteTrace.iconset/` / `ByteTrace.icns` / `MenuBar/*.png|pdf`，不经任何脚本自动生成。曾存在的 `Sources/ByteTraceIconLab/` 图标生成工具与这条路径已脱钩（导出结果与实际图标资源存在几何差异），于 2026-08-03 移除，不要再新增或恢复。
