@@ -22,7 +22,7 @@
 
 真实使用场景：**用户全天开启 ClashBar 代理，系统代理与 TUN 混用**。
 
-- **必须保住**：各应用的流量排行；代理进程（mihomo/ClashBar/CCBar）与普通应用分开计账。
+- **必须保住**：各应用的流量排行；代理进程（mihomo/ClashBar）与普通应用分开计账。
 - **可以牺牲**：数据实时性（不需要秒级刷新）、连接级主机名明细、分钟级精度。
 
 换言之：**正式应用级管线是产品的全部价值，连接级主机名管线是可选实验功能。** 涉及取舍时，永远优先保应用级管线。
@@ -128,7 +128,7 @@ mihomo                   →  lo0 收代理连接  +  en0 真实出网
 
 ### 🚫 禁止移除代理进程的独立计账
 
-`ProxyClassifier.defaultClassifier` 已覆盖 `mihomo` / `ClashBar` / `CCBar`（`Sources/ByteTraceCore/Attribution/ProxyClassifier.swift:56-58`），与本用户环境匹配。代理流量单独展示、不反向抵扣、不计入应用总量；UI 各处统一用 `category != .proxyTransport` 过滤。
+`ProxyClassifier.defaultClassifier` 已覆盖 `mihomo` / `ClashBar`（`Sources/ByteTraceCore/Attribution/ProxyClassifier.swift`），与本用户环境匹配。代理流量单独展示、不反向抵扣、不计入应用总量；UI 各处统一用 `category != .proxyTransport` 过滤。
 
 ---
 

@@ -89,6 +89,22 @@ final class ProcessAttributorTests: XCTestCase {
         XCTAssertNotEqual(attributor.attribute(similar).category, .proxyTransport)
     }
 
+    func testCCBarIsClassifiedAsAnApplicationByDefault() {
+        let identity = ProcessIdentity(
+            pid: 32,
+            nettopProcessName: "CCBar",
+            bundleID: "com.nanvon.ccbar",
+            bundlePath: "/Applications/CCBar.app",
+            displayName: "CCBar"
+        )
+
+        let attributed = ProcessAttributor().attribute(identity)
+
+        XCTAssertEqual(attributed.appKey, "bundle:com.nanvon.ccbar")
+        XCTAssertEqual(attributed.category, .userApp)
+        XCTAssertNotEqual(attributed.category, .proxyTransport)
+    }
+
     func testUnknownKeyIsDeterministic() {
         let identity = ProcessIdentity(pid: nil, nettopProcessName: "")
         let attributor = ProcessAttributor()

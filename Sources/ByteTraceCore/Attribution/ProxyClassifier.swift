@@ -54,8 +54,7 @@ public struct ProxyClassifier: Sendable {
     public static let defaultClassifier = ProxyClassifier(
         rules: [
             ProxyRule(key: "mihomo", displayName: "Mihomo", processNames: ["mihomo"]),
-            ProxyRule(key: "clashbar", displayName: "ClashBar", processNames: ["ClashBar"]),
-            ProxyRule(key: "ccbar", displayName: "CCBar", processNames: ["CCBar"])
+            ProxyRule(key: "clashbar", displayName: "ClashBar", processNames: ["ClashBar"])
         ]
     )
 }

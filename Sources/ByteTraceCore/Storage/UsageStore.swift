@@ -2,9 +2,19 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 3
+    public static let schemaVersion: Int64 = 4
 
     private let database: SQLiteDatabase
+    private static let legacyCCBarAppKey = "proxy:ccbar"
+
+    private struct StoredApp {
+        let bundleID: String?
+        let bundlePath: String?
+        let executablePath: String?
+        let displayName: String
+        let firstSeenAt: String
+        let lastSeenAt: String
+    }
 
     public init(databaseURL: URL) throws {
         database = try SQLiteDatabase(url: databaseURL)
@@ -423,6 +433,227 @@ public final class UsageStore: @unchecked Sendable {
                 """
             )
         }
+
+        if currentVersion <= 3 {
+            try migrateLegacyCCBar()
+            try database.execute("PRAGMA user_version = 4;")
+        }
+    }
+
+    /// CCBar 曾被错误归类为代理进程；迁移已有数据，保留历史流量并恢复普通应用归属。
+    private func migrateLegacyCCBar() throws {
+        guard let legacyApp = try storedApp(for: Self.legacyCCBarAppKey),
+              let target = targetApp(for: legacyApp),
+              target.appKey != Self.legacyCCBarAppKey else {
+            return
+        }
+
+        try database.execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try upsertMigratedApp(
+                legacyApp,
+                appKey: target.appKey,
+                category: target.category
+            )
+            try mergeLegacyDailyUsage(
+                from: Self.legacyCCBarAppKey,
+                to: target.appKey
+            )
+            try mergeLegacyBucketUsage(
+                from: Self.legacyCCBarAppKey,
+                to: target.appKey
+            )
+            try mergeLegacyHostUsage(
+                from: Self.legacyCCBarAppKey,
+                to: target.appKey
+            )
+            try deleteAppRows(for: Self.legacyCCBarAppKey)
+            try database.execute("COMMIT;")
+        } catch {
+            try? database.execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    private func storedApp(for appKey: String) throws -> StoredApp? {
+        let statement = try database.prepare(
+            """
+            SELECT bundle_id, bundle_path, executable_path, display_name,
+                   first_seen_at, last_seen_at
+            FROM apps
+            WHERE app_key = ?;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(appKey, at: 1, in: statement)
+        let result = sqlite3_step(statement)
+        if result == SQLITE_DONE { return nil }
+        guard result == SQLITE_ROW else {
+            throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+        }
+
+        return StoredApp(
+            bundleID: database.columnString(statement, at: 0),
+            bundlePath: database.columnString(statement, at: 1),
+            executablePath: database.columnString(statement, at: 2),
+            displayName: database.columnString(statement, at: 3) ?? "未知进程",
+            firstSeenAt: database.columnString(statement, at: 4) ?? "0.000000",
+            lastSeenAt: database.columnString(statement, at: 5) ?? "0.000000"
+        )
+    }
+
+    private func targetApp(for storedApp: StoredApp) -> (appKey: String, category: AppCategory)? {
+        if let bundleID = nonEmpty(storedApp.bundleID) {
+            return ("bundle:\(bundleID)", .userApp)
+        }
+        if let bundlePath = nonEmpty(storedApp.bundlePath) {
+            return ("app:\(bundlePath)", .userApp)
+        }
+        if let executablePath = nonEmpty(storedApp.executablePath) {
+            return ("exec:\(executablePath)", .unclassified)
+        }
+        guard let displayName = nonEmpty(storedApp.displayName) else { return nil }
+        return ("process:\(displayName)", .unclassified)
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private func upsertMigratedApp(
+        _ storedApp: StoredApp,
+        appKey: String,
+        category: AppCategory
+    ) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO apps (
+                app_key, bundle_id, bundle_path, executable_path,
+                display_name, category, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(app_key) DO UPDATE SET
+                bundle_id = COALESCE(excluded.bundle_id, apps.bundle_id),
+                bundle_path = COALESCE(excluded.bundle_path, apps.bundle_path),
+                executable_path = COALESCE(excluded.executable_path, apps.executable_path),
+                display_name = excluded.display_name,
+                category = excluded.category,
+                first_seen_at = MIN(apps.first_seen_at, excluded.first_seen_at),
+                last_seen_at = MAX(apps.last_seen_at, excluded.last_seen_at);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(appKey, at: 1, in: statement)
+        try database.bind(storedApp.bundleID, at: 2, in: statement)
+        try database.bind(storedApp.bundlePath, at: 3, in: statement)
+        try database.bind(storedApp.executablePath, at: 4, in: statement)
+        try database.bind(storedApp.displayName, at: 5, in: statement)
+        try database.bind(category.rawValue, at: 6, in: statement)
+        try database.bind(storedApp.firstSeenAt, at: 7, in: statement)
+        try database.bind(storedApp.lastSeenAt, at: 8, in: statement)
+        try database.stepDone(statement)
+    }
+
+    private func mergeLegacyDailyUsage(from oldAppKey: String, to newAppKey: String) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO daily_usage (
+                day, app_key, download_bytes, upload_bytes, sample_count, updated_at
+            )
+            SELECT day, ?, download_bytes, upload_bytes, sample_count, updated_at
+            FROM daily_usage
+            WHERE app_key = ?
+            ON CONFLICT(day, app_key) DO UPDATE SET
+                download_bytes = daily_usage.download_bytes + excluded.download_bytes,
+                upload_bytes = daily_usage.upload_bytes + excluded.upload_bytes,
+                sample_count = daily_usage.sample_count + excluded.sample_count,
+                updated_at = MAX(daily_usage.updated_at, excluded.updated_at);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(newAppKey, at: 1, in: statement)
+        try database.bind(oldAppKey, at: 2, in: statement)
+        try database.stepDone(statement)
+        try deleteRows(in: "daily_usage", for: oldAppKey)
+    }
+
+    private func mergeLegacyBucketUsage(from oldAppKey: String, to newAppKey: String) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO usage_buckets (
+                bucket_start, app_key, download_bytes, upload_bytes,
+                sample_count, updated_at
+            )
+            SELECT bucket_start, ?, download_bytes, upload_bytes, sample_count, updated_at
+            FROM usage_buckets
+            WHERE app_key = ?
+            ON CONFLICT(bucket_start, app_key) DO UPDATE SET
+                download_bytes = usage_buckets.download_bytes + excluded.download_bytes,
+                upload_bytes = usage_buckets.upload_bytes + excluded.upload_bytes,
+                sample_count = usage_buckets.sample_count + excluded.sample_count,
+                updated_at = MAX(usage_buckets.updated_at, excluded.updated_at);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(newAppKey, at: 1, in: statement)
+        try database.bind(oldAppKey, at: 2, in: statement)
+        try database.stepDone(statement)
+        try deleteRows(in: "usage_buckets", for: oldAppKey)
+    }
+
+    private func mergeLegacyHostUsage(from oldAppKey: String, to newAppKey: String) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO host_usage_buckets (
+                bucket_start, app_key, display_name, endpoint_kind, hostname,
+                first_seen_at, last_seen_at, connection_count,
+                download_bytes, upload_bytes
+            )
+            SELECT bucket_start, ?, display_name, endpoint_kind, hostname,
+                   first_seen_at, last_seen_at, connection_count,
+                   download_bytes, upload_bytes
+            FROM host_usage_buckets
+            WHERE app_key = ?
+            ON CONFLICT(bucket_start, app_key, endpoint_kind, hostname) DO UPDATE SET
+                display_name = COALESCE(host_usage_buckets.display_name, excluded.display_name),
+                first_seen_at = MIN(host_usage_buckets.first_seen_at, excluded.first_seen_at),
+                last_seen_at = MAX(host_usage_buckets.last_seen_at, excluded.last_seen_at),
+                connection_count = host_usage_buckets.connection_count + excluded.connection_count,
+                download_bytes = host_usage_buckets.download_bytes + excluded.download_bytes,
+                upload_bytes = host_usage_buckets.upload_bytes + excluded.upload_bytes;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(newAppKey, at: 1, in: statement)
+        try database.bind(oldAppKey, at: 2, in: statement)
+        try database.stepDone(statement)
+        try deleteRows(in: "host_usage_buckets", for: oldAppKey)
+    }
+
+    private func deleteRows(in table: String, for appKey: String) throws {
+        let statement = try database.prepare("DELETE FROM \(table) WHERE app_key = ?;")
+        defer { sqlite3_finalize(statement) }
+        try database.bind(appKey, at: 1, in: statement)
+        try database.stepDone(statement)
+    }
+
+    private func deleteAppRows(for appKey: String) throws {
+        try deleteRows(in: "daily_usage", for: appKey)
+        try deleteRows(in: "usage_buckets", for: appKey)
+        try deleteRows(in: "host_usage_buckets", for: appKey)
+
+        let statement = try database.prepare("DELETE FROM apps WHERE app_key = ?;")
+        defer { sqlite3_finalize(statement) }
+        try database.bind(appKey, at: 1, in: statement)
+        try database.stepDone(statement)
     }
 
     private func upsertApp(for aggregate: DailyUsageAggregate) throws {

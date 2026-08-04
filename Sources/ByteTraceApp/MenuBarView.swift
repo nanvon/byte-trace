@@ -6,8 +6,9 @@ struct MenuBarView: View {
     @ObservedObject var model: ByteTraceViewModel
 
     @Environment(\.openWindow) private var openWindow
-    @State private var isProxyExpanded = false
-    @State private var isSystemExpanded = false
+    @AppStorage("ByteTrace.menuBar.applicationExpanded") private var isApplicationExpanded = true
+    @AppStorage("ByteTrace.menuBar.proxyExpanded") private var isProxyExpanded = true
+    @AppStorage("ByteTrace.menuBar.systemExpanded") private var isSystemExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,7 +26,7 @@ struct MenuBarView: View {
                 .padding(16)
             }
         }
-        .frame(width: 390, height: 560)
+        .frame(width: 390, height: 672)
     }
 
     private var header: some View {
@@ -85,14 +86,14 @@ struct MenuBarView: View {
     }
 
     private var summaryCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text("今日总量")
-                    .font(.subheadline.weight(.medium))
+                    .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text(ByteTraceViewModel.formatBytes(model.todayTotals.totalBytes))
-                    .font(.title2.weight(.semibold))
+                    .font(.headline.weight(.bold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     .animation(.smooth, value: model.todayTotals.totalBytes)
@@ -106,8 +107,8 @@ struct MenuBarView: View {
                     tint: .blue
                 )
                 Divider()
-                    .frame(height: 30)
-                    .padding(.horizontal, 14)
+                    .frame(height: 20)
+                    .padding(.horizontal, 12)
                 MetricView(
                     title: "上传",
                     value: model.todayTotals.uploadBytes,
@@ -116,7 +117,7 @@ struct MenuBarView: View {
                 )
             }
         }
-        .padding(14)
+        .padding(12)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
@@ -153,6 +154,7 @@ struct MenuBarView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .pointingHandCursor()
         }
         .padding(12)
         .background(
@@ -161,7 +163,7 @@ struct MenuBarView: View {
         )
     }
 
-    private let topRowLimit = 8
+    private let topRowLimit = 10
 
     @ViewBuilder
     private var usageContent: some View {
@@ -172,7 +174,7 @@ struct MenuBarView: View {
 
             if !model.proxyRecords.isEmpty {
                 DisclosureGroup(isExpanded: $isProxyExpanded) {
-                    UsageRows(records: model.proxyRecords, onSelect: openDetail)
+                    UsageRows(records: Array(model.proxyRecords.prefix(topRowLimit)))
                 } label: {
                     GroupLabel(
                         title: "代理运输流量",
@@ -180,13 +182,15 @@ struct MenuBarView: View {
                         symbolName: "arrow.triangle.2.circlepath",
                         tint: .purple
                     )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .interactiveHoverHighlight()
                     .pointingHandCursor()
                 }
             }
 
             if model.showsSystemProcesses, !model.systemRecords.isEmpty {
                 DisclosureGroup(isExpanded: $isSystemExpanded) {
-                    UsageRows(records: model.systemRecords, onSelect: openDetail)
+                    UsageRows(records: Array(model.systemRecords.prefix(topRowLimit)))
                 } label: {
                     GroupLabel(
                         title: "系统与后台进程",
@@ -194,6 +198,8 @@ struct MenuBarView: View {
                         symbolName: "gearshape.2",
                         tint: .secondary
                     )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .interactiveHoverHighlight()
                     .pointingHandCursor()
                 }
             }
@@ -201,16 +207,7 @@ struct MenuBarView: View {
     }
 
     private var applicationSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("应用流量")
-                    .font(.subheadline.weight(.semibold))
-                Text("\(model.applicationRecords.count)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-                Spacer()
-            }
-
+        DisclosureGroup(isExpanded: $isApplicationExpanded) {
             if model.applicationRecords.isEmpty {
                 Text("暂无应用流量")
                     .font(.caption)
@@ -218,37 +215,19 @@ struct MenuBarView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
             } else {
-                UsageRows(
-                    records: Array(model.applicationRecords.prefix(topRowLimit)),
-                    onSelect: openDetail
-                )
-
-                if model.applicationRecords.count > topRowLimit {
-                    Button {
-                        openMainWindow(page: .overview)
-                    } label: {
-                        HStack {
-                            Text("查看全部 \(model.applicationRecords.count) 个")
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption2.weight(.semibold))
-                        }
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(ByteTraceActionButtonStyle())
-                    .pointingHandCursor()
-                }
+                UsageRows(records: Array(model.applicationRecords.prefix(topRowLimit)))
             }
+        } label: {
+            GroupLabel(
+                title: "应用流量",
+                count: model.applicationRecords.count,
+                symbolName: "chart.bar.xaxis",
+                tint: .accentColor
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .interactiveHoverHighlight()
+            .pointingHandCursor()
         }
-    }
-
-    private func openDetail(_ record: DailyUsageRecord) {
-        model.openAppDetail(record.appKey)
-        openMainWindow(page: .overview)
     }
 
     private func openMainWindow(page: MainWindowPage) {
@@ -270,14 +249,12 @@ private struct MetricView: View {
             Image(systemName: symbolName)
                 .font(.caption.weight(.bold))
                 .foregroundStyle(tint)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text(ByteTraceViewModel.formatBytes(value))
-                    .font(.callout.weight(.medium))
-                    .monospacedDigit()
-            }
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(ByteTraceViewModel.formatBytes(value))
+                .font(.caption.weight(.semibold))
+                .monospacedDigit()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -285,23 +262,15 @@ private struct MetricView: View {
 
 private struct UsageRows: View {
     let records: [DailyUsageRecord]
-    let onSelect: (DailyUsageRecord) -> Void
 
     var body: some View {
         let duplicateNames = ByteTraceViewModel.duplicateDisplayNames(in: records)
         VStack(spacing: 0) {
             ForEach(records, id: \.appKey) { record in
-                Button {
-                    onSelect(record)
-                } label: {
-                    UsageRowView(
-                        record: record,
-                        showsPathHint: duplicateNames.contains(record.displayName)
-                    )
-                    .rowHoverHighlight()
-                }
-                .buttonStyle(ByteTraceActionButtonStyle())
-                .pointingHandCursor()
+                UsageRowView(
+                    record: record,
+                    showsPathHint: duplicateNames.contains(record.displayName)
+                )
                 if record.appKey != records.last?.appKey {
                     Divider()
                         .padding(.leading, 42)

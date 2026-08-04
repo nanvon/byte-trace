@@ -256,6 +256,8 @@ private struct MainOverviewView: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .interactiveHoverHighlight()
             .pointingHandCursor()
         }
     }
@@ -269,7 +271,6 @@ private struct MainOverviewView: View {
                         record: record,
                         showsPathHint: duplicateNames.contains(record.displayName)
                     )
-                    .rowHoverHighlight()
                 }
                 .buttonStyle(ByteTraceActionButtonStyle())
                 .pointingHandCursor()

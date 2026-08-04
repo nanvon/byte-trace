@@ -36,33 +36,53 @@ extension View {
     }
 }
 
-/// 鼠标悬停时给列表行加一层淡背景，弥补菜单栏/列表缺失的原生 hover 反馈。
-struct RowHoverHighlight: ViewModifier {
+/// 给自定义交互区域提供轻量的鼠标悬停背景。
+struct InteractiveHoverHighlight: ViewModifier {
+    let cornerRadius: CGFloat
+    let opacity: Double
     @State private var isHovering = false
 
     func body(content: Content) -> some View {
         content
+            .contentShape(Rectangle())
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(isHovering ? 0.05 : 0))
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.primary.opacity(isHovering ? opacity : 0))
             )
             .onHover { isHovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: isHovering)
     }
 }
 
 extension View {
-    func rowHoverHighlight() -> some View {
-        modifier(RowHoverHighlight())
+    func interactiveHoverHighlight(
+        cornerRadius: CGFloat = 8,
+        opacity: Double = 0.05
+    ) -> some View {
+        modifier(
+            InteractiveHoverHighlight(
+                cornerRadius: cornerRadius,
+                opacity: opacity
+            )
+        )
     }
 }
 
-/// 保留 plain button 的轻量外观，同时在按下瞬间给出直接反馈。
+/// 保留 plain button 的轻量外观，同时提供悬停和按下反馈。
 struct ByteTraceActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .contentShape(Rectangle())
-            .opacity(configuration.isPressed ? 0.58 : 1)
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
-            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+        ButtonLabel(configuration: configuration)
+    }
+
+    private struct ButtonLabel: View {
+        let configuration: ButtonStyle.Configuration
+
+        var body: some View {
+            configuration.label
+                .interactiveHoverHighlight(opacity: 0.06)
+                .opacity(configuration.isPressed ? 0.58 : 1)
+                .scaleEffect(configuration.isPressed ? 0.96 : 1)
+                .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+        }
     }
 }
