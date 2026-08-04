@@ -42,9 +42,14 @@ struct MainWindowView: View {
 private struct MainOverviewView: View {
     @ObservedObject var model: ByteTraceViewModel
     @State private var searchText = ""
-    @State private var isProxyExpanded = false
-    @State private var isSystemExpanded = false
+    @State private var isProxyExpanded = true
+    @State private var isSystemExpanded = true
+    @State private var showsAllApplications = false
+    @State private var showsAllProxy = false
+    @State private var showsAllSystem = false
     @State private var path = NavigationPath()
+
+    private let collapsedRowLimit = 10
 
     private var applicationRecords: [DailyUsageRecord] {
         filtered(model.rangeRecords.filter { $0.category == .userApp || $0.category == .unclassified })
@@ -72,22 +77,26 @@ private struct MainOverviewView: View {
                     timeline
                     applicationSection
                     if !proxyRecords.isEmpty {
-                        collapsibleSection(
+                        CollapsibleUsageSection(
                             title: "代理运输流量",
+                            count: proxyRecords.count,
                             symbolName: "arrow.triangle.2.circlepath",
                             tint: .purple,
-                            records: proxyRecords,
                             isExpanded: $isProxyExpanded
-                        )
+                        ) {
+                            usageRows(proxyRecords, showsAll: $showsAllProxy)
+                        }
                     }
                     if model.showsSystemProcesses, !systemRecords.isEmpty {
-                        collapsibleSection(
+                        CollapsibleUsageSection(
                             title: "系统与后台进程",
+                            count: systemRecords.count,
                             symbolName: "gearshape.2",
                             tint: .secondary,
-                            records: systemRecords,
                             isExpanded: $isSystemExpanded
-                        )
+                        ) {
+                            usageRows(systemRecords, showsAll: $showsAllSystem)
+                        }
                     }
                 }
                 .padding(24)
@@ -225,60 +234,58 @@ private struct MainOverviewView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 18)
             } else {
-                usageRows(applicationRecords)
+                usageRows(applicationRecords, showsAll: $showsAllApplications)
             }
         }
     }
 
-    private func collapsibleSection(
-        title: String,
-        symbolName: String,
-        tint: Color,
-        records: [DailyUsageRecord],
-        isExpanded: Binding<Bool>
-    ) -> some View {
-        DisclosureGroup(isExpanded: isExpanded) {
-            usageRows(records)
-                .padding(.top, 8)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: symbolName)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 18)
-                Text(title)
-                    .font(.subheadline.weight(.medium))
-                Text("\(records.count)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .interactiveHoverHighlight()
-            .pointingHandCursor()
-        }
-    }
-
-    private func usageRows(_ records: [DailyUsageRecord]) -> some View {
+    private func usageRows(_ records: [DailyUsageRecord], showsAll: Binding<Bool>) -> some View {
+        let isTruncatable = searchText.isEmpty && records.count > collapsedRowLimit
+        let visible = (isTruncatable && !showsAll.wrappedValue) ? Array(records.prefix(collapsedRowLimit)) : records
         let duplicateNames = ByteTraceViewModel.duplicateDisplayNames(in: records)
         return VStack(spacing: 0) {
-            ForEach(records, id: \.appKey) { record in
-                NavigationLink(value: record.appKey) {
-                    MainUsageRow(
-                        record: record,
-                        showsPathHint: duplicateNames.contains(record.displayName)
-                    )
+            LazyVStack(spacing: 0) {
+                ForEach(visible, id: \.appKey) { record in
+                    NavigationLink(value: record.appKey) {
+                        MainUsageRow(
+                            record: record,
+                            showsPathHint: duplicateNames.contains(record.displayName)
+                        )
+                    }
+                    .buttonStyle(ByteTraceActionButtonStyle())
+                    .pointingHandCursor()
+                    if record.appKey != visible.last?.appKey {
+                        Divider()
+                            .padding(.leading, 44)
+                    }
                 }
-                .buttonStyle(ByteTraceActionButtonStyle())
+            }
+            if isTruncatable {
+                Divider()
+                Button {
+                    withAnimation(.smooth(duration: 0.22)) {
+                        showsAll.wrappedValue.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: showsAll.wrappedValue ? "chevron.up" : "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                        Text(showsAll.wrappedValue ? "收起" : "显示全部 \(records.count) 个")
+                    }
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .interactiveHoverHighlight()
                 .pointingHandCursor()
-                if record.appKey != records.last?.appKey {
-                    Divider()
-                        .padding(.leading, 44)
-                }
             }
         }
         .padding(.horizontal, 12)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .animation(.smooth, value: records)
+        .animation(.smooth, value: visible)
     }
 
     private func totalBytes(for record: DailyUsageRecord) -> Int64 {

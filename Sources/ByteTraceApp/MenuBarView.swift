@@ -86,7 +86,7 @@ struct MenuBarView: View {
     }
 
     private var summaryCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
                 Text("今日总量")
                     .font(.caption.weight(.medium))
@@ -101,23 +101,19 @@ struct MenuBarView: View {
 
             HStack(spacing: 0) {
                 MetricView(
-                    title: "下载",
                     value: model.todayTotals.downloadBytes,
                     symbolName: "arrow.down",
                     tint: .blue
                 )
-                Divider()
-                    .frame(height: 20)
-                    .padding(.horizontal, 12)
                 MetricView(
-                    title: "上传",
                     value: model.todayTotals.uploadBytes,
                     symbolName: "arrow.up",
                     tint: .orange
                 )
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
@@ -173,41 +169,39 @@ struct MenuBarView: View {
             applicationSection
 
             if !model.proxyRecords.isEmpty {
-                DisclosureGroup(isExpanded: $isProxyExpanded) {
+                CollapsibleUsageSection(
+                    title: "代理运输流量",
+                    count: model.proxyRecords.count,
+                    symbolName: "arrow.triangle.2.circlepath",
+                    tint: .purple,
+                    isExpanded: $isProxyExpanded
+                ) {
                     UsageRows(records: Array(model.proxyRecords.prefix(topRowLimit)))
-                } label: {
-                    GroupLabel(
-                        title: "代理运输流量",
-                        count: model.proxyRecords.count,
-                        symbolName: "arrow.triangle.2.circlepath",
-                        tint: .purple
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .interactiveHoverHighlight()
-                    .pointingHandCursor()
                 }
             }
 
             if model.showsSystemProcesses, !model.systemRecords.isEmpty {
-                DisclosureGroup(isExpanded: $isSystemExpanded) {
+                CollapsibleUsageSection(
+                    title: "系统与后台进程",
+                    count: model.systemRecords.count,
+                    symbolName: "gearshape.2",
+                    tint: .secondary,
+                    isExpanded: $isSystemExpanded
+                ) {
                     UsageRows(records: Array(model.systemRecords.prefix(topRowLimit)))
-                } label: {
-                    GroupLabel(
-                        title: "系统与后台进程",
-                        count: model.systemRecords.count,
-                        symbolName: "gearshape.2",
-                        tint: .secondary
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .interactiveHoverHighlight()
-                    .pointingHandCursor()
                 }
             }
         }
     }
 
     private var applicationSection: some View {
-        DisclosureGroup(isExpanded: $isApplicationExpanded) {
+        CollapsibleUsageSection(
+            title: "应用流量",
+            count: model.applicationRecords.count,
+            symbolName: "chart.bar.xaxis",
+            tint: .accentColor,
+            isExpanded: $isApplicationExpanded
+        ) {
             if model.applicationRecords.isEmpty {
                 Text("暂无应用流量")
                     .font(.caption)
@@ -217,16 +211,6 @@ struct MenuBarView: View {
             } else {
                 UsageRows(records: Array(model.applicationRecords.prefix(topRowLimit)))
             }
-        } label: {
-            GroupLabel(
-                title: "应用流量",
-                count: model.applicationRecords.count,
-                symbolName: "chart.bar.xaxis",
-                tint: .accentColor
-            )
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .interactiveHoverHighlight()
-            .pointingHandCursor()
         }
     }
 
@@ -239,22 +223,20 @@ struct MenuBarView: View {
 }
 
 private struct MetricView: View {
-    let title: String
     let value: Int64
     let symbolName: String
     let tint: Color
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 6) {
             Image(systemName: symbolName)
                 .font(.caption.weight(.bold))
                 .foregroundStyle(tint)
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
             Text(ByteTraceViewModel.formatBytes(value))
                 .font(.caption.weight(.semibold))
                 .monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(.smooth, value: value)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -341,28 +323,6 @@ private struct UsageRowView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 28, height: 28)
         }
-    }
-}
-
-private struct GroupLabel: View {
-    let title: String
-    let count: Int
-    let symbolName: String
-    let tint: Color
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbolName)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(tint)
-                .frame(width: 18)
-            Text(title)
-                .font(.subheadline.weight(.medium))
-            Text("\(count)")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.vertical, 5)
     }
 }
 
