@@ -32,7 +32,7 @@ struct MainWindowView: View {
         .frame(minWidth: 900, idealWidth: 1080, minHeight: 620, idealHeight: 720)
         .onAppear {
             selection = model.requestedMainWindowPage
-            ByteTraceAppDelegate.openMainWindowAction = { openWindow(id: "main") }
+            ByteTraceAppDelegate.installOpenMainWindowAction { openWindow(id: "main") }
             ByteTraceAppDelegate.prepareMainWindow()
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
