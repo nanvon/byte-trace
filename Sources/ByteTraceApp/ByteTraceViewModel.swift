@@ -27,7 +27,6 @@ struct UsageTotals: Equatable {
 
 enum MainWindowPage: String, Hashable, Identifiable {
     case overview
-    case hostUsage
     case settings
 
     var id: Self { self }
@@ -35,7 +34,6 @@ enum MainWindowPage: String, Hashable, Identifiable {
     var title: String {
         switch self {
         case .overview: return "概览"
-        case .hostUsage: return "可见主机名"
         case .settings: return "设置"
         }
     }
@@ -153,10 +151,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var rangeRecords: [DailyUsageRecord] = []
     @Published private(set) var rangeTimeline: [UsageTimelinePoint] = []
     @Published private(set) var bucketStats: UsageBucketStats?
-    @Published private(set) var hostUsageResult: NettopHostUsageQueryResult?
     private(set) var rangeBuckets: [UsageBucketRecord] = []
     private var dailyRangeRecords: [DailyUsageRecord] = []
-    private var rangeHostUsageRecords: [NettopHostUsageRecord] = []
     @Published private(set) var launchAtLoginEnabled: Bool
     @Published var showsSystemProcesses: Bool {
         didSet {
@@ -177,39 +173,18 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             applyRetentionPolicyIfNeeded(force: true)
         }
     }
-    @Published var enableConnectionCollector: Bool {
-        didSet {
-            guard oldValue != enableConnectionCollector else { return }
-            UserDefaults.standard.set(
-                enableConnectionCollector,
-                forKey: Self.enableConnectionCollectorKey
-            )
-            if enableConnectionCollector {
-                startConnectionCollector()
-            } else {
-                stopConnectionCollector()
-            }
-        }
-    }
-
     let databaseURL: URL
 
     private static let showSystemProcessesKey = "ByteTrace.showSystemProcesses"
     private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
-    private static let enableConnectionCollectorKey = "ByteTrace.enableConnectionCollector"
     private let collector: NettopCollector
-    private let connectionCollector: NettopConnectionCollector
     private let resolver: SystemProcessIdentityResolver
     private let attributionCache: ProcessAttributionCache
     private let store: UsageStore?
     private let aggregator: UsageAggregator?
-    private var hostAggregator: NettopHostUsageAggregator?
     private var flushTimer: Timer?
     private var restartTimer: Timer?
     private var restartAttempt = 0
-    private var hostRestartTimer: Timer?
-    private var hostRestartAttempt = 0
-    private var hostCollectorIncompatible = false
     private var isStarted = false
     private var wantsCollection = false
     private var isSleeping = false
@@ -232,7 +207,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     override init() {
         databaseURL = UsageStore.defaultDatabaseURL(bundleIdentifier: Self.bundleIdentifier)
         collector = NettopCollector()
-        connectionCollector = NettopConnectionCollector()
         resolver = SystemProcessIdentityResolver()
         attributionCache = ProcessAttributionCache()
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
@@ -249,21 +223,14 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             initialValue: UsageRetentionPolicy(rawValue: storedRetentionPolicy ?? "") ?? .ninetyDays
         )
 
-        let storedConnectionCollector = UserDefaults.standard.object(
-            forKey: Self.enableConnectionCollectorKey
-        ) as? Bool
-        _enableConnectionCollector = Published(initialValue: storedConnectionCollector ?? false)
-
         var storageError: String?
         do {
             let store = try UsageStore(databaseURL: databaseURL)
             self.store = store
             aggregator = UsageAggregator(store: store)
-            hostAggregator = NettopHostUsageAggregator()
         } catch {
             store = nil
             aggregator = nil
-            hostAggregator = nil
             storageError = "无法打开本地数据库：\(error.localizedDescription)"
         }
 
@@ -349,17 +316,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         restartTimer?.invalidate()
         restartTimer = nil
         restartAttempt = 0
-        hostRestartTimer?.invalidate()
-        hostRestartTimer = nil
-        hostRestartAttempt = 0
-        hostCollectorIncompatible = false
         isStarted = false
         flushTimer?.invalidate()
         flushTimer = nil
         if collector.state != .stopped {
             collector.stop()
         }
-        stopConnectionCollector()
         flushAfterStop()
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
@@ -370,15 +332,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         isSleeping = false
         restartTimer?.invalidate()
         restartTimer = nil
-        hostRestartTimer?.invalidate()
-        hostRestartTimer = nil
         isStarted = false
         flushTimer?.invalidate()
         flushTimer = nil
         if collector.state != .stopped {
             collector.stop()
         }
-        stopConnectionCollector()
         // 退出路径必须同步排空主队列：采集器最后一帧事件是 main.async 投递的，
         // 应用终止后排队 block 不保证执行，这里转一圈 runloop 让最后一帧先入聚合器，
         // 随后 flushNow 才能把它落库（仅退出瞬间发生一次，代价可忽略）。
@@ -396,8 +355,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeTimeline = []
             bucketStats = nil
             rangeBuckets = []
-            hostUsageResult = nil
-            rangeHostUsageRecords = []
             return
         }
 
@@ -430,8 +387,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeRecords = []
             rangeTimeline = []
             rangeBuckets = []
-            hostUsageResult = nil
-            rangeHostUsageRecords = []
             return
         }
 
@@ -459,29 +414,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
     }
 
-    func hostUsage(for appKey: String) -> NettopHostUsageQueryResult? {
-        guard hostUsageResult != nil else { return nil }
-
-        let records = rangeHostUsageRecords.filter { $0.appKey == appKey }
-        let formalTotalBytes = totals(
-            from: rangeRecords.filter {
-                $0.appKey == appKey && $0.category != .proxyTransport
-            }
-        ).totalBytes
-        return NettopHostUsageQuery.summarize(
-            records,
-            appKey: appKey,
-            formalTotalBytes: formalTotalBytes
-        )
-    }
-
     func clearAllData() {
         guard let store, let aggregator else { return }
 
         do {
             try store.clearAll()
             aggregator.discardPending()
-            hostAggregator?.removeAll()
             records = []
             rangeRecords = []
             rangeTimeline = []
@@ -492,26 +430,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             )
             rangeBuckets = []
             dailyRangeRecords = []
-            rangeHostUsageRecords = []
-            hostUsageResult = nil
             lastRetentionCleanupDay = nil
             lastError = nil
         } catch {
             lastError = "清空统计失败：\(error.localizedDescription)"
-            recordCollectorEvent(kind: "database_error", details: lastError)
-        }
-    }
-
-    func clearHostUsageData() {
-        guard let store else { return }
-
-        do {
-            try store.clearHostUsage()
-            hostAggregator?.removeAll()
-            try loadRange(from: store)
-            lastError = nil
-        } catch {
-            lastError = "清空主机名实验数据失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
         }
     }
@@ -522,16 +444,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             relativeTo: end,
             calendar: Calendar.autoupdatingCurrent
         )
-        let hostResult = hostUsageResult ?? NettopHostUsageQuery.summarize(
-            [],
-            formalTotalBytes: selectedRangeTotals.totalBytes
-        )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
         let document = ByteTraceExportDocument(
-            formatVersion: 1,
+            formatVersion: 2,
             product: "ByteTrace",
             exportedAt: end,
             range: ByteTraceExportDocument.Range(
@@ -554,32 +472,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                     totalBytes: totalBytes(for: $0),
                     sampleCount: $0.sampleCount
                 )
-            },
-            hostnameExperiment: ByteTraceExportDocument.HostExperiment(
-                note: "连接级 nettop 实验数据，仅展示直接观察到的 hostname；IP-only、缺失名称和无法归属的流量归入无法识别/其他。",
-                coverage: ByteTraceExportDocument.HostCoverage(
-                    visibleHostnameBytes: hostResult.coverage.visibleHostnameBytes,
-                    unrecognizedBytes: hostResult.coverage.unrecognizedBytes,
-                    observedBytes: hostResult.coverage.observedBytes,
-                    formalTotalBytes: hostResult.coverage.formalTotalBytes,
-                    observedVisibilityRatio: hostResult.coverage.observedVisibilityRatio,
-                    formalVisibilityRatio: hostResult.coverage.formalVisibilityRatio
-                ),
-                rows: hostResult.rows.map {
-                    ByteTraceExportDocument.HostUsage(
-                        appKey: $0.appKey,
-                        displayName: $0.displayName,
-                        endpointKind: $0.endpointKind.rawValue,
-                        hostname: $0.hostname,
-                        firstSampleAt: $0.firstSampleAt,
-                        lastSampleAt: $0.lastSampleAt,
-                        connectionCount: $0.connectionCount,
-                        downloadBytes: $0.downloadBytes,
-                        uploadBytes: $0.uploadBytes,
-                        totalBytes: $0.totalBytes
-                    )
-                }
-            )
+            }
         )
         try encoder.encode(document).write(to: url, options: .atomic)
     }
@@ -640,9 +533,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         collector.onEvent = { [weak self] event in
             self?.receive(event)
         }
-        connectionCollector.onEvent = { [weak self] event in
-            self?.receive(event)
-        }
     }
 
     private func registerWorkspaceNotifications() {
@@ -685,12 +575,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
-    private nonisolated func receive(_ event: NettopConnectionCollectorEvent) {
-        Task { @MainActor [weak self] in
-            self?.handle(event)
-        }
-    }
-
     private func handle(_ event: NettopCollectorEvent) {
         switch event {
         case .started:
@@ -712,7 +596,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 status = .reconnecting
                 recordCollectorEvent(kind: "collector_exited", details: details)
                 collector.stop()
-                stopConnectionCollector()
                 flushNow()
                 scheduleRestart()
             } else {
@@ -721,30 +604,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 }
                 recordCollectorEvent(kind: "collector_exited")
             }
-        }
-    }
-
-    private func handle(_ event: NettopConnectionCollectorEvent) {
-        switch event {
-        case .started:
-            recordCollectorEvent(kind: "host_collector_started")
-
-        case let .parser(parserEvent):
-            handleConnection(parserEvent)
-
-        case let .stderr(message):
-            guard !message.isEmpty else { return }
-            recordCollectorEvent(kind: "host_collector_stderr", details: message)
-
-        case let .exited(statusCode):
-            recordCollectorEvent(
-                kind: "host_collector_exited",
-                details: "status=\(statusCode)"
-            )
-            if connectionCollector.state != .stopped {
-                stopConnectionCollector()
-            }
-            scheduleHostRestart()
         }
     }
 
@@ -763,14 +622,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         restartTimer?.invalidate()
         restartTimer = nil
         restartAttempt = 0
-        hostRestartTimer?.invalidate()
-        hostRestartTimer = nil
-        hostRestartAttempt = 0
         isStarted = false
         if collector.state != .stopped {
             collector.stop()
         }
-        stopConnectionCollector()
         flushAfterStop()
 
         if isSatisfied {
@@ -818,7 +673,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             if collector.state != .stopped {
                 collector.stop()
             }
-            stopConnectionCollector()
             status = .incompatible
             lastError = message
             recordCollectorEvent(kind: "parse_schema_changed", details: message)
@@ -851,57 +705,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func handleConnection(_ event: NettopConnectionParserEvent) {
-        switch event {
-        case let .frameCompleted(_, _, deltas, isBaseline):
-            guard !isBaseline else { return }
-            hostRestartAttempt = 0
-            hostRestartTimer?.invalidate()
-            hostRestartTimer = nil
-            for delta in deltas {
-                ingestHostUsage(delta)
-            }
-
-        case .malformedRow, .schemaChanged:
-            break
-
-        case let .incompatibleSchema(missingColumns):
-            hostCollectorIncompatible = true
-            hostRestartTimer?.invalidate()
-            hostRestartTimer = nil
-            hostRestartAttempt = 0
-            recordCollectorEvent(
-                kind: "host_parse_schema_changed",
-                details: "missing=\(missingColumns.joined(separator: ","))"
-            )
-            stopConnectionCollector()
-        }
-    }
-
-    private func ingestHostUsage(_ delta: NettopConnectionDelta) {
-        guard let hostAggregator else { return }
-
-        let token = NettopProcessToken(rawValue: delta.processName)
-        let identity = resolver.resolve(token)
-        let attributed = attributionCache.attribute(identity)
-
-        do {
-            try hostAggregator.ingest(
-                NettopHostUsageSample(
-                    sampledAt: Self.sampleDate(for: delta.sampledAt),
-                    appKey: attributed.appKey,
-                    displayName: attributed.displayName,
-                    endpoint: delta.endpointInfo,
-                    downloadBytes: delta.downloadBytes,
-                    uploadBytes: delta.uploadBytes
-                )
-            )
-        } catch {
-            lastError = "主机名样本未入队：\(error.localizedDescription)"
-            recordCollectorEvent(kind: "host_usage_error", details: lastError)
-        }
-    }
-
     private func startFlushTimer() {
         flushTimer?.invalidate()
         let timer = Timer(
@@ -925,25 +728,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         startCollectorProcess()
     }
 
-    @objc private func hostRestartTimerFired(_ timer: Timer) {
-        hostRestartTimer?.invalidate()
-        hostRestartTimer = nil
-        startConnectionCollector()
-    }
-
     @objc private func handleWillSleep(_ notification: Notification) {
         guard wantsCollection else { return }
 
         isSleeping = true
         restartTimer?.invalidate()
         restartTimer = nil
-        hostRestartTimer?.invalidate()
-        hostRestartTimer = nil
         isStarted = false
         if collector.state != .stopped {
             collector.stop()
         }
-        stopConnectionCollector()
         flushAfterStop()
         status = .stopped
         recordCollectorEvent(kind: "sample_gap", details: "system_sleep")
@@ -967,9 +761,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             try collector.start()
             isStarted = true
             recordCollectorEvent(kind: "collector_started")
-            if enableConnectionCollector {
-                startConnectionCollector()
-            }
         } catch {
             isStarted = false
             let details = "nettop 启动失败：\(error.localizedDescription)"
@@ -978,63 +769,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             recordCollectorEvent(kind: "collector_error", details: details)
             scheduleRestart()
         }
-    }
-
-    private func startConnectionCollector() {
-        guard wantsCollection,
-              !isSleeping,
-              networkPathSatisfied,
-              enableConnectionCollector,
-              !hostCollectorIncompatible else {
-            return
-        }
-        guard connectionCollector.state == .stopped else { return }
-
-        do {
-            try connectionCollector.start()
-            hostRestartTimer?.invalidate()
-            hostRestartTimer = nil
-        } catch {
-            connectionCollector.stop()
-            recordCollectorEvent(
-                kind: "host_collector_error",
-                details: error.localizedDescription
-            )
-            scheduleHostRestart()
-        }
-    }
-
-    private func stopConnectionCollector() {
-        guard connectionCollector.state != .stopped else { return }
-        connectionCollector.stop()
-    }
-
-    private func scheduleHostRestart() {
-        guard wantsCollection,
-              !isSleeping,
-              networkPathSatisfied,
-              enableConnectionCollector,
-              !hostCollectorIncompatible,
-              hostRestartTimer == nil else {
-            return
-        }
-
-        let index = min(hostRestartAttempt, Self.restartDelays.count - 1)
-        let delay = Self.restartDelays[index]
-        hostRestartAttempt = min(hostRestartAttempt + 1, Self.restartDelays.count - 1)
-        let timer = Timer(
-            timeInterval: delay,
-            target: self,
-            selector: #selector(hostRestartTimerFired),
-            userInfo: nil,
-            repeats: false
-        )
-        RunLoop.main.add(timer, forMode: .common)
-        hostRestartTimer = timer
-        recordCollectorEvent(
-            kind: "host_collector_backoff",
-            details: "retry_in_seconds=\(Int(delay))"
-        )
     }
 
     private func scheduleRestart() {
@@ -1062,9 +796,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         guard let aggregator else { return }
         do {
             _ = try aggregator.flush()
-            if let store, let hostAggregator {
-                _ = try hostAggregator.flush(to: store)
-            }
             refreshIfNeeded(force: forceRefresh)
         } catch {
             lastError = "数据库写入失败：\(error.localizedDescription)"
@@ -1161,7 +892,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeTimeline = makeTimeline(
                 from: buckets.filter { $0.category != .proxyTransport }
             )
-            try loadHostUsage(from: start, to: end, store: store)
             return
         }
 
@@ -1180,16 +910,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeBuckets = []
             rangeTimeline = makeTimeline(from: daily.filter { $0.category != .proxyTransport })
         }
-        try loadHostUsage(from: start, to: end, store: store)
-    }
-
-    private func loadHostUsage(from start: Date, to end: Date, store: UsageStore) throws {
-        let records = try store.hostUsage(from: start, to: end)
-        rangeHostUsageRecords = records
-        hostUsageResult = NettopHostUsageQuery.summarize(
-            records,
-            formalTotalBytes: selectedRangeTotals.totalBytes
-        )
     }
 
     private func aggregateRecords(_ records: [DailyUsageRecord]) -> [DailyUsageRecord] {

@@ -32,9 +32,8 @@
 
 - **Menu bar panel** — today's total / download / upload summary and a traffic-sorted app list with real app icons; proxy-transport traffic and system background processes sit in their own collapsible groups, kept out of the app total; live collection status, with start/stop at any time
 - **Main window overview** — five time ranges (last 10 minutes / last hour / today / this week / this month): summary cards, a traffic trend chart, and an app ranking; click any app to open its detail page
-- **App detail** — one app's total, upload/download, its own trend chart, and the hostnames observable for that app with an identification coverage indicator
-- **Visible hostnames (experimental)** — a global hostname traffic ranking with coverage indication; `nettop` only exposes hostnames for some connections, so coverage is inherently partial; IP-only traffic is grouped under "unidentified" and raw IPs are never shown
-- **Settings** — minute-level data retention policy (never / 7 / 30 / 90 days), JSON export of the current range, separate wipes for official stats and experimental data, show system processes, launch at login
+- **App detail** — one app's total, upload/download, and its own trend chart
+- **Settings** — minute-level data retention policy (never / 7 / 30 / 90 days), JSON export of the current range, clear statistics, show system processes, and launch at login
 
 ### 📸 Screenshots
 
@@ -79,7 +78,7 @@ shasum -a 256 -c ByteTrace_<version>_macOS-Apple-Silicon.dmg.sha256
 - The only data source is the read-only system command `/usr/bin/nettop`; no Network Extension is used
 - Everything is stored locally in SQLite: `~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3` — inspectable with any SQLite client
 - Nothing is uploaded; no stats ever leave your machine
-- No packet inspection, no HTTPS decryption, no request bodies; the hostname ranking only counts what `nettop` exposes directly and is partial, experimental data
+- No packet inspection, no HTTPS decryption, and no request bodies
 
 > [!TIP]
 > Released `ByteTrace.app` binaries are ad-hoc signed and not notarized by Apple; if that concerns you, review the code and [build from source](#-building-from-source) instead.

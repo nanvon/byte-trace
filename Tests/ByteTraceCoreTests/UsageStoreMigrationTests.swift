@@ -39,6 +39,38 @@ final class UsageStoreMigrationTests: XCTestCase {
         XCTAssertEqual(bucketRecords[0].category, .userApp)
     }
 
+    func testPreviousSchemaDropsRetiredHostUsageTable() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("byte-trace-host-retirement-\(UUID().uuidString).sqlite3")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + "-wal")
+            try? FileManager.default.removeItem(atPath: url.path + "-shm")
+        }
+
+        let database = try SQLiteDatabase(url: url)
+        try database.execute(
+            """
+            CREATE TABLE host_usage_buckets (bucket_start INTEGER PRIMARY KEY);
+            PRAGMA user_version = 4;
+            """
+        )
+
+        _ = try UsageStore(databaseURL: url)
+
+        let migratedDatabase = try SQLiteDatabase(url: url)
+        XCTAssertEqual(
+            try migratedDatabase.scalarInt64(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'host_usage_buckets';"
+            ),
+            0
+        )
+        XCTAssertEqual(
+            try migratedDatabase.scalarInt64("PRAGMA user_version;"),
+            UsageStore.schemaVersion
+        )
+    }
+
     private func seedLegacyCCBarUsage(at url: URL, sampleDate: Date) throws {
         let store = try UsageStore(databaseURL: url)
         try store.apply(

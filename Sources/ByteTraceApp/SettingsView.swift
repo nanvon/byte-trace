@@ -5,7 +5,6 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var model: ByteTraceViewModel
     @State private var isShowingClearConfirmation = false
-    @State private var isShowingHostClearConfirmation = false
     @State private var pendingRetentionPolicy: UsageRetentionPolicy?
     @State private var exportMessage: String?
     @State private var exportedFileURL: URL?
@@ -123,26 +122,6 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Section("可见主机名实验") {
-                    Toggle(
-                        "启用连接级采集（实验）",
-                        isOn: $model.enableConnectionCollector
-                    )
-                    Text("开启会额外运行一个统计进程，明显增加 CPU 与耗电，默认关闭。关闭后已收集的历史数据仍保留，可手动清空。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Text("该实验数据与正式应用统计分开保存，清理这里不会影响应用流量统计。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Button(role: .destructive) {
-                        isShowingHostClearConfirmation = true
-                    } label: {
-                        Label("清空主机名实验数据", systemImage: "globe.badge.chevron.backward")
-                    }
-                }
-
                 Section("关于 ByteTrace") {
                     LabeledContent("数据源", value: "系统 nettop")
                     LabeledContent("统计口径", value: "应用逻辑流量")
@@ -167,18 +146,6 @@ struct SettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("此操作会删除本机保存的每日应用流量和采集诊断记录，不能撤销。")
-        }
-        .confirmationDialog(
-            "确定清空主机名实验数据？",
-            isPresented: $isShowingHostClearConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("清空主机名数据", role: .destructive) {
-                model.clearHostUsageData()
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("此操作只删除连接级主机名实验数据，不影响正式应用统计和日汇总。")
         }
         .confirmationDialog(
             "启用分钟级数据保留？",

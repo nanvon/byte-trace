@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 4
+    public static let schemaVersion: Int64 = 5
 
     private let database: SQLiteDatabase
     private static let legacyCCBarAppKey = "proxy:ccbar"
@@ -43,21 +43,6 @@ public final class UsageStore: @unchecked Sendable {
             for aggregate in bucketAggregates {
                 try upsertApp(for: aggregate)
                 try upsertBucketUsage(for: aggregate)
-            }
-            try database.execute("COMMIT;")
-        } catch {
-            try? database.execute("ROLLBACK;")
-            throw error
-        }
-    }
-
-    public func applyHostUsage(_ records: [NettopHostUsageRecord]) throws {
-        guard !records.isEmpty else { return }
-
-        try database.execute("BEGIN IMMEDIATE TRANSACTION;")
-        do {
-            for record in records {
-                try upsertHostUsage(record)
             }
             try database.execute("COMMIT;")
         } catch {
@@ -185,91 +170,6 @@ public final class UsageStore: @unchecked Sendable {
         return records
     }
 
-    public func hostUsage(
-        from start: Date,
-        to end: Date,
-        appKey: String? = nil
-    ) throws -> [NettopHostUsageRecord] {
-        let statement: OpaquePointer
-        if appKey != nil {
-            statement = try database.prepare(
-                """
-                SELECT bucket_start, app_key, display_name, endpoint_kind, hostname,
-                       first_seen_at, last_seen_at, connection_count,
-                       download_bytes, upload_bytes
-                FROM host_usage_buckets
-                WHERE bucket_start >= ? AND bucket_start < ? AND app_key = ?
-                ORDER BY bucket_start ASC,
-                         (download_bytes + upload_bytes) DESC,
-                         app_key ASC, endpoint_kind ASC, hostname ASC;
-                """
-            )
-        } else {
-            statement = try database.prepare(
-                """
-                SELECT bucket_start, app_key, display_name, endpoint_kind, hostname,
-                       first_seen_at, last_seen_at, connection_count,
-                       download_bytes, upload_bytes
-                FROM host_usage_buckets
-                WHERE bucket_start >= ? AND bucket_start < ?
-                ORDER BY bucket_start ASC,
-                         (download_bytes + upload_bytes) DESC,
-                         app_key ASC, endpoint_kind ASC, hostname ASC;
-                """
-            )
-        }
-        defer { sqlite3_finalize(statement) }
-
-        try database.bind(Self.epochSeconds(start), at: 1, in: statement)
-        try database.bind(Self.epochSeconds(end), at: 2, in: statement)
-        if let appKey {
-            try database.bind(appKey, at: 3, in: statement)
-        }
-
-        var records: [NettopHostUsageRecord] = []
-        while true {
-            let result = sqlite3_step(statement)
-            if result == SQLITE_DONE { break }
-            guard result == SQLITE_ROW else {
-                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
-            }
-
-            records.append(
-                NettopHostUsageRecord(
-                    bucketStart: Date(
-                        timeIntervalSince1970: TimeInterval(
-                            sqlite3_column_int64(statement, 0)
-                        )
-                    ),
-                    appKey: Self.optionalValue(
-                        database.columnString(statement, at: 1)
-                    ),
-                    displayName: database.columnString(statement, at: 2),
-                    endpointKind: NettopEndpointKind(
-                        rawValue: database.columnString(statement, at: 3) ?? ""
-                    ) ?? .unknown,
-                    hostname: Self.optionalValue(
-                        database.columnString(statement, at: 4)
-                    ),
-                    firstSampleAt: Self.dateValue(
-                        database.columnString(statement, at: 5)
-                    ),
-                    lastSampleAt: Self.dateValue(
-                        database.columnString(statement, at: 6)
-                    ),
-                    connectionCount: sqlite3_column_int64(statement, 7),
-                    downloadBytes: sqlite3_column_int64(statement, 8),
-                    uploadBytes: sqlite3_column_int64(statement, 9)
-                )
-            )
-        }
-        return records
-    }
-
-    public func clearHostUsage() throws {
-        try database.execute("DELETE FROM host_usage_buckets;")
-    }
-
     public func bucketStats() throws -> UsageBucketStats {
         let statement = try database.prepare(
             "SELECT COUNT(*), MIN(bucket_start), MAX(bucket_start) FROM usage_buckets;"
@@ -301,13 +201,8 @@ public final class UsageStore: @unchecked Sendable {
                 from: "usage_buckets",
                 before: date
             )
-            let hostDeleted = try deleteBuckets(
-                from: "host_usage_buckets",
-                before: date
-            )
             try database.execute("COMMIT;")
-            let result = usageDeleted.addingReportingOverflow(hostDeleted)
-            return result.overflow ? Int64.max : result.partialValue
+            return usageDeleted
         } catch {
             try? database.execute("ROLLBACK;")
             throw error
@@ -332,7 +227,6 @@ public final class UsageStore: @unchecked Sendable {
     }
 
     public func clearAll() throws {
-        try clearHostUsage()
         try database.execute("DELETE FROM usage_buckets;")
         try database.execute("DELETE FROM daily_usage;")
         try database.execute("DELETE FROM apps;")
@@ -409,26 +303,6 @@ public final class UsageStore: @unchecked Sendable {
         if currentVersion <= 2 {
             try database.execute(
                 """
-                CREATE TABLE IF NOT EXISTS host_usage_buckets (
-                    bucket_start INTEGER NOT NULL,
-                    app_key TEXT NOT NULL DEFAULT '',
-                    display_name TEXT,
-                    endpoint_kind TEXT NOT NULL,
-                    hostname TEXT NOT NULL DEFAULT '',
-                    first_seen_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    connection_count INTEGER NOT NULL DEFAULT 0 CHECK (connection_count >= 0),
-                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
-                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
-                    PRIMARY KEY (bucket_start, app_key, endpoint_kind, hostname)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_host_usage_buckets_start
-                    ON host_usage_buckets(bucket_start);
-
-                CREATE INDEX IF NOT EXISTS idx_host_usage_buckets_app_start
-                    ON host_usage_buckets(app_key, bucket_start);
-
                 PRAGMA user_version = 3;
                 """
             )
@@ -437,6 +311,15 @@ public final class UsageStore: @unchecked Sendable {
         if currentVersion <= 3 {
             try migrateLegacyCCBar()
             try database.execute("PRAGMA user_version = 4;")
+        }
+
+        if currentVersion <= 4 {
+            try database.execute(
+                """
+                DROP TABLE IF EXISTS host_usage_buckets;
+                PRAGMA user_version = 5;
+                """
+            )
         }
     }
 
@@ -460,10 +343,6 @@ public final class UsageStore: @unchecked Sendable {
                 to: target.appKey
             )
             try mergeLegacyBucketUsage(
-                from: Self.legacyCCBarAppKey,
-                to: target.appKey
-            )
-            try mergeLegacyHostUsage(
                 from: Self.legacyCCBarAppKey,
                 to: target.appKey
             )
@@ -608,36 +487,6 @@ public final class UsageStore: @unchecked Sendable {
         try deleteRows(in: "usage_buckets", for: oldAppKey)
     }
 
-    private func mergeLegacyHostUsage(from oldAppKey: String, to newAppKey: String) throws {
-        let statement = try database.prepare(
-            """
-            INSERT INTO host_usage_buckets (
-                bucket_start, app_key, display_name, endpoint_kind, hostname,
-                first_seen_at, last_seen_at, connection_count,
-                download_bytes, upload_bytes
-            )
-            SELECT bucket_start, ?, display_name, endpoint_kind, hostname,
-                   first_seen_at, last_seen_at, connection_count,
-                   download_bytes, upload_bytes
-            FROM host_usage_buckets
-            WHERE app_key = ?
-            ON CONFLICT(bucket_start, app_key, endpoint_kind, hostname) DO UPDATE SET
-                display_name = COALESCE(host_usage_buckets.display_name, excluded.display_name),
-                first_seen_at = MIN(host_usage_buckets.first_seen_at, excluded.first_seen_at),
-                last_seen_at = MAX(host_usage_buckets.last_seen_at, excluded.last_seen_at),
-                connection_count = host_usage_buckets.connection_count + excluded.connection_count,
-                download_bytes = host_usage_buckets.download_bytes + excluded.download_bytes,
-                upload_bytes = host_usage_buckets.upload_bytes + excluded.upload_bytes;
-            """
-        )
-        defer { sqlite3_finalize(statement) }
-
-        try database.bind(newAppKey, at: 1, in: statement)
-        try database.bind(oldAppKey, at: 2, in: statement)
-        try database.stepDone(statement)
-        try deleteRows(in: "host_usage_buckets", for: oldAppKey)
-    }
-
     private func deleteRows(in table: String, for appKey: String) throws {
         let statement = try database.prepare("DELETE FROM \(table) WHERE app_key = ?;")
         defer { sqlite3_finalize(statement) }
@@ -648,7 +497,6 @@ public final class UsageStore: @unchecked Sendable {
     private func deleteAppRows(for appKey: String) throws {
         try deleteRows(in: "daily_usage", for: appKey)
         try deleteRows(in: "usage_buckets", for: appKey)
-        try deleteRows(in: "host_usage_buckets", for: appKey)
 
         let statement = try database.prepare("DELETE FROM apps WHERE app_key = ?;")
         defer { sqlite3_finalize(statement) }
@@ -769,38 +617,6 @@ public final class UsageStore: @unchecked Sendable {
         try database.stepDone(statement)
     }
 
-    private func upsertHostUsage(_ record: NettopHostUsageRecord) throws {
-        let statement = try database.prepare(
-            """
-            INSERT INTO host_usage_buckets (
-                bucket_start, app_key, display_name, endpoint_kind, hostname,
-                first_seen_at, last_seen_at, connection_count,
-                download_bytes, upload_bytes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(bucket_start, app_key, endpoint_kind, hostname) DO UPDATE SET
-                display_name = excluded.display_name,
-                first_seen_at = MIN(host_usage_buckets.first_seen_at, excluded.first_seen_at),
-                last_seen_at = MAX(host_usage_buckets.last_seen_at, excluded.last_seen_at),
-                connection_count = host_usage_buckets.connection_count + excluded.connection_count,
-                download_bytes = host_usage_buckets.download_bytes + excluded.download_bytes,
-                upload_bytes = host_usage_buckets.upload_bytes + excluded.upload_bytes;
-            """
-        )
-        defer { sqlite3_finalize(statement) }
-
-        try database.bind(Self.epochSeconds(record.bucketStart), at: 1, in: statement)
-        try database.bind(Self.storageValue(record.appKey), at: 2, in: statement)
-        try database.bind(record.displayName, at: 3, in: statement)
-        try database.bind(record.endpointKind.rawValue, at: 4, in: statement)
-        try database.bind(Self.storageValue(record.hostname), at: 5, in: statement)
-        try database.bind(Self.timestamp(record.firstSampleAt), at: 6, in: statement)
-        try database.bind(Self.timestamp(record.lastSampleAt), at: 7, in: statement)
-        try database.bind(record.connectionCount, at: 8, in: statement)
-        try database.bind(record.downloadBytes, at: 9, in: statement)
-        try database.bind(record.uploadBytes, at: 10, in: statement)
-        try database.stepDone(statement)
-    }
-
     private func deleteBuckets(from table: String, before date: Date) throws -> Int64 {
         let statement = try database.prepare(
             "DELETE FROM \(table) WHERE bucket_start < ?;"
@@ -820,14 +636,6 @@ public final class UsageStore: @unchecked Sendable {
         Int64(date.timeIntervalSince1970.rounded(.down))
     }
 
-    private static func storageValue(_ value: String?) -> String {
-        value ?? ""
-    }
-
-    private static func optionalValue(_ value: String?) -> String? {
-        guard let value, !value.isEmpty else { return nil }
-        return value
-    }
 
     private static func dateValue(_ value: String?) -> Date {
         guard let value, let seconds = Double(value) else { return .distantPast }

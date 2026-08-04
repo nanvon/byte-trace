@@ -20,29 +20,14 @@ swift run ByteTraceApp                       # 开发模式运行菜单栏应用
 调试探针（用 `:memory:` 数据库，**不写入正式 SQLite**）：
 
 ```bash
-swift run ByteTraceProbe --duration 15                                    # 应用级采集
-swift run ByteTraceConnectionProbe --duration 5                           # 连接级主机名采集
-swift run ByteTraceConnectionProbe --duration 5 --runs 3 --process mihomo # 多轮，每轮独立建立基线
+swift run ByteTraceProbe --duration 15 # 应用级采集
 ```
 
 `package_app.sh` 环境变量：`BYTE_TRACE_SIGNING_IDENTITY`（默认 `-`，ad-hoc）、`BYTE_TRACE_SWIFT_TRIPLE`（交叉构建目标）。
 
-## 架构：两条互不干扰的采集管线
+## 架构：单条应用级采集管线
 
-这是理解本仓库最关键的一点。两条管线各自启动一个 `nettop` 子进程、各自解析、各自入库，**永远不能互相修正或合并**：
-
-| | 正式应用级 | 实验连接级 |
-| --- | --- | --- |
-| 采集器 | `NettopCollector` | `NettopConnectionCollector` |
-| nettop 参数 | `-n -P -d -x -L 0 -s 5` | `-d -x -L 0 -s 1` |
-| 默认启停 | 始终开启 | **默认关闭**（设置项 `ByteTrace.enableConnectionCollector`，默认 `false`） |
-| 解析器 | `NettopCSVParser` | `NettopConnectionCSVParser` |
-| 落库 | `UsageAggregator` → `daily_usage` + `usage_buckets` | `NettopHostUsageAggregator` → `host_usage_buckets` |
-| 用途 | 应用流量总量（产品的正式口径） | 「可见主机名」实验排行 |
-
-参数差异是刻意的：`-P` 让 nettop 按进程汇总；`-n` 关闭名称解析，所以正式管线拿不到也不需要主机名，而连接级管线**省略 `-n` 正是为了让 nettop 暴露部分主机名**。应用级采样间隔为 5 秒（`-s 5`，产品口径是分钟粒度，无需秒级实时性；连接级保持 `-s 1` 不另降频——实测降频对 CPU 无影响）。
-
-连接级数据是「部分可见」的，覆盖率远低于 100%。任何改动都不得用它去修正、抵扣或补全应用级总量——这条边界在 `docs/DOMAIN_TRAFFIC_DECISION.md` 中已作为最终决策记录。
+ByteTrace 仅启动一个 `/usr/bin/nettop -n -P -d -x -L 0 -s 5` 子进程。`-P` 让 nettop 按进程汇总，`-n` 关闭名称解析；产品只统计应用/进程级上传、下载和总量，不采集或展示连接、主机名、IP、端口及 URL。
 
 ### 数据流（正式管线）
 
@@ -63,10 +48,6 @@ nettop stdout
 - 表头缺少 `time` / `bytes_in` / `bytes_out` / 进程列 → `incompatibleSchema`，采集**停止且不再自动重连**，避免写入脏数据。
 - **stdin 必须是父进程持有的空 `Pipe`**（`T0` 修复，勿改回 `/dev/null`）：nettop 是 curses 交互程序，会 poll stdin 等按键；`/dev/null` 永远立即可读并 EOF，导致 poll 死循环、子进程空转占满一个多核心（实测 124%–139% CPU）。空 pipe 写端被父进程持有且永不写入，stdin 永远不就绪（实测降至约 1%）。
 
-### 连接级解析的行内状态
-
-`NettopConnectionCSVParser` 的输入是两级结构：进程汇总行会写入 `currentProcessName`，随后含 `<->` 的连接行**继承这个进程名**。解析强依赖行顺序，改动 `parseLine` / `consumeLine` 时必须保持这个状态机。
-
 ## 进程归属（Attribution）
 
 `ProcessAttributor.attribute()` 按固定优先级派生 `appKey`：
@@ -86,29 +67,28 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 自己封装的 `SQLiteDatabase`（直接调 SQLite3 C API，无第三方依赖），WAL + `busy_timeout=5000` + `foreign_keys=ON`。路径：`~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3`。
 
-五张表：`apps`、`daily_usage`（键 `day`+`app_key`）、`usage_buckets`（键 `bucket_start`+`app_key`，分钟粒度）、`host_usage_buckets`（键 `bucket_start`+`app_key`+`endpoint_kind`+`hostname`）、`collector_events`。
+四张表：`apps`、`daily_usage`（键 `day`+`app_key`）、`usage_buckets`（键 `bucket_start`+`app_key`，分钟粒度）、`collector_events`。
 
-**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 3`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。
+**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 5`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表。
 
 **写入是累加而非幂等**：所有 upsert 都是 `ON CONFLICT ... DO UPDATE SET x = x + excluded.x`。同一批聚合重复 flush 会双计。`flush()` 成功后必须清空 pending（现有代码已如此）。
 
-**时间口径混用，改动前先确认字段类型**：`daily_usage.day` 是本地日历的 `yyyy-MM-dd` 字符串；`*_buckets.bucket_start` 是 epoch 秒 `INTEGER`；`first_seen_at` / `last_seen_at` 是 `String(format: "%.6f")` 的**文本**（`host_usage_buckets` 的 upsert 直接对其做 SQL `MIN`/`MAX`，依赖定宽零填充下字典序等于数值序）。
+**时间口径混用，改动前先确认字段类型**：`daily_usage.day` 是本地日历的 `yyyy-MM-dd` 字符串；`usage_buckets.bucket_start` 是 epoch 秒 `INTEGER`；`apps.first_seen_at` / `last_seen_at` 是 `String(format: "%.6f")` 的文本。
 
-**保留策略**只删两张分钟桶表（`purgeBuckets`）并按 30 天上限清理 `collector_events`（`purgeCollectorEvents`），`daily_usage` 与 `apps` 不受影响；`clearAll()` 才清空全部五张表。大量删除后按需 `VACUUM`（阻塞操作，在后台队列执行，绝不在主线程）。
+**保留策略**只删分钟桶表（`purgeBuckets`）并按 30 天上限清理 `collector_events`（`purgeCollectorEvents`），`daily_usage` 与 `apps` 不受影响；`clearAll()` 才清空全部四张表。大量删除后按需 `VACUUM`（阻塞操作，在后台队列执行，绝不在主线程）。
 
 ## 应用层
 
 `ByteTraceApp` 用 `MenuBarExtra` + `.menuBarExtraStyle(.window)`，纯菜单栏形态由 `Info.plist` 的 `LSUIElement` 与 AppDelegate 里的 `setActivationPolicy(.accessory)` 共同保证。主窗口是独立的 `Window(id: "main")`。退出时 `applicationWillTerminate` → `ByteTraceViewModel.shutdown()` 落盘并只回收自己创建的子进程。
 
-`ByteTraceViewModel`（`@MainActor`、`ObservableObject`、1200+ 行）是唯一的编排者，持有两个采集器、`UsageStore`、两个聚合器、所有定时器与生命周期监听。需要留意：
+`ByteTraceViewModel`（`@MainActor`、`ObservableObject`）是唯一的编排者，持有应用级采集器、`UsageStore`、聚合器、定时器与生命周期监听。需要留意：
 
 - **并发约定**：`NettopCollector` / `UsageStore` / `UsageAggregator` / `ProcessAttributionCache` 都是 `@unchecked Sendable` + `NSLock`；采集器回调经 `Task { @MainActor }` 跳回主线程。`SystemProcessIdentityResolver` 读 `NSRunningApplication` 时若不在主线程会 `DispatchQueue.main.sync`——不要从任何会阻塞主线程的路径调用它。
-- **`hostAggregator` 是 `final class`**（`NettopHostUsageAggregator`，自 2026-08 性能修复起由 struct 改为 class，消除 CoW 深拷贝；内部有锁），ViewModel 持有可选引用，直接调用方法即可，无取出—改—写回问题。
-- **重连退避** `[1, 2, 5, 10, 30]` 秒，两条管线各有独立的 timer 与 attempt 计数；睡眠/唤醒（`NSWorkspace` 通知）与网络路径切换（`NWPathMonitor`）都会先停采集 + `flushNow()` 再走重连。
+- **重连退避** `[1, 2, 5, 10, 30]` 秒；睡眠/唤醒（`NSWorkspace` 通知）与网络路径切换（`NWPathMonitor`）都会先停采集 + `flushNow()` 再走重连。
 - **UI 刷新由 5 秒 flush 定时器驱动**（`flushNow()` 内部调 `refresh()`），没有独立的轮询。
 - **「今天」是双数据源**：汇总数字来自 `daily_usage`，趋势图来自 `usage_buckets`（`usesBucketSummary` 与 `usesFineGrainedTimeline` 两个开关分别控制）。「最近 10 分钟 / 1 小时」两者都用分钟桶，「本周 / 本月」两者都用日汇总。
 - **nettop 的时间字段只有时钟没有日期**，`sampleDate(for:)` 把「今天」的年月日嫁接上去，跨零点存在已知误差。
-- 设置持久化：`UserDefaults` 键 `ByteTrace.showSystemProcesses`、`ByteTrace.usageRetentionPolicy`（默认 90 天）、`ByteTrace.enableConnectionCollector`（默认关闭）；登录时启动用 `SMAppService.mainApp`。
+- 设置持久化：`UserDefaults` 键 `ByteTrace.showSystemProcesses`、`ByteTrace.usageRetentionPolicy`（默认 90 天）；登录时启动用 `SMAppService.mainApp`。
 - 导出 `formatVersion` 硬编码在 `exportCurrentRange(to:)`，结构变更时需同步 bump。
 
 ## 代码风格约定
@@ -129,6 +109,5 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 ## 边缘目录
 
 - `NetworkExtensionLab/` — **已冻结的研究工程**，独立 Xcode 项目（XcodeGen 生成），不在 `Package.swift` 里，不属于产品链路。除非明确要求，不要改动或尝试把它接入主应用。
-- `docs/DOMAIN_TRAFFIC_EXPERIMENT.md` / `docs/DOMAIN_TRAFFIC_DECISION.md` — 域名流量数据源的调研、hostname 实验和最终决策，涉及主机名能力边界的改动前应先读结论部分。
 
 图标资源的真实生产路径是 `Packaging/Resources/Brand/` 下的设计稿 PNG（`ByteTraceAppIconCentered.png` 1024x1024、`ByteTraceMenuBarIconSource.png` 199x199），经人工处理后手动导出为 `ByteTrace.iconset/` / `ByteTrace.icns` / `MenuBar/*.png|pdf`，不经任何脚本自动生成。曾存在的 `Sources/ByteTraceIconLab/` 图标生成工具与这条路径已脱钩（导出结果与实际图标资源存在几何差异），于 2026-08-03 移除，不要再新增或恢复。
