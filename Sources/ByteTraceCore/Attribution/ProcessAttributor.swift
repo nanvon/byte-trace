@@ -118,7 +118,7 @@ public struct ProcessAttributor: Sendable {
         let current = HostCandidate(
             executablePath: Self.canonicalPath(identity.executablePath),
             bundleID: identity.bundleID,
-            bundlePath: Self.canonicalPath(identity.bundlePath),
+            bundlePath: Self.validatedBundlePath(identity.bundlePath),
             displayName: identity.displayName
         )
 
@@ -128,7 +128,7 @@ public struct ProcessAttributor: Sendable {
             HostCandidate(
                 executablePath: Self.canonicalPath($0.executablePath),
                 bundleID: $0.bundleID,
-                bundlePath: Self.canonicalPath($0.bundlePath),
+                bundlePath: Self.validatedBundlePath($0.bundlePath),
                 displayName: $0.displayName
             )
         }
@@ -158,8 +158,16 @@ public struct ProcessAttributor: Sendable {
     }
 
     private static func isInsideAppContents(_ executablePath: String, bundlePath: String) -> Bool {
-        executablePath == bundlePath
-            || executablePath.hasPrefix(bundlePath + "/Contents/")
+        return executablePath.hasPrefix(bundlePath + "/Contents/")
+    }
+
+    /// NSRunningApplication 偶发把非 app 进程的可执行文件路径自身当成 bundleURL
+    /// （如 node 出现 bundlePath=/…/bin/node）。bundlePath 必须是真实 `.app` 包目录，
+    /// 否则置 nil，避免派生 `app:` 前缀的 appKey、以及把进程误分类为 userApp。
+    private static func validatedBundlePath(_ path: String?) -> String? {
+        guard let canonical = canonicalPath(path) else { return nil }
+        guard URL(fileURLWithPath: canonical).pathExtension.lowercased() == "app" else { return nil }
+        return canonical
     }
 
     private static func isSystemExecutable(_ executablePath: String?) -> Bool {

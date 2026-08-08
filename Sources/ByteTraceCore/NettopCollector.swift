@@ -33,7 +33,7 @@ public enum NettopCollectorError: LocalizedError {
 
 public final class NettopCollector: @unchecked Sendable {
     public static let executablePath = "/usr/bin/nettop"
-    public static let arguments = ["-n", "-P", "-d", "-x", "-L", "0", "-s", "5"]
+    public static let arguments = ["-n", "-P", "-d", "-x", "-L", "0", "-s", "5", "-t", "external"]
 
     public var onEvent: ((NettopCollectorEvent) -> Void)?
 

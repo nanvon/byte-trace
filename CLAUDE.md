@@ -27,7 +27,7 @@ swift run ByteTraceProbe --duration 15 # 应用级采集
 
 ## 架构：单条应用级采集管线
 
-ByteTrace 仅启动一个 `/usr/bin/nettop -n -P -d -x -L 0 -s 5` 子进程。`-P` 让 nettop 按进程汇总，`-n` 关闭名称解析；产品只统计应用/进程级上传、下载和总量，不采集或展示连接、主机名、IP、端口及 URL。
+ByteTrace 仅启动一个 `/usr/bin/nettop -n -P -d -x -L 0 -s 5 -t external` 子进程。`-P` 让 nettop 按进程汇总，`-n` 关闭名称解析；**`-t external` 只统计非回环接口**（lo0 回环流量不计入，否则 Electron 类应用的 WebView↔本地 server 通信与代理中转会产生数 GB 级虚高、且上传/下载对称失真；代理进程 mihomo 还会因回环+utun 双计数虚高近一倍）。产品只统计应用/进程级上传、下载和总量，不采集或展示连接、主机名、IP、端口及 URL。走代理的应用（socket 全部位于 `127.0.0.1`）在此口径下显示为 ≈0，真实流量体现在 `proxy:` 行。
 
 ### 数据流（正式管线）
 

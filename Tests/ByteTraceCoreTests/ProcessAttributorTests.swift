@@ -117,6 +117,27 @@ final class ProcessAttributorTests: XCTestCase {
         XCTAssertEqual(first.category, .unclassified)
     }
 
+    func testNonAppBundlePathPollutionDoesNotProduceAppKey() {
+        // NSRunningApplication 偶发把非 app 进程的可执行文件路径自身当成 bundleURL，
+        // 此时 bundlePath == executablePath 且无 .app 后缀，必须回退到 exec: 派生，
+        // 不能产生 app: 前缀的 appKey（曾导致 node 出现 app:/…/bin/node 分裂记录）。
+        let identity = ProcessIdentity(
+            pid: 40,
+            processStartTime: Date(timeIntervalSince1970: 100),
+            nettopProcessName: "node.40",
+            executablePath: "/Users/nanvon/.local/share/fnm/node-versions/v24.17.0/installation/bin/node",
+            bundlePath: "/Users/nanvon/.local/share/fnm/node-versions/v24.17.0/installation/bin/node"
+        )
+
+        let attributed = ProcessAttributor().attribute(identity)
+
+        XCTAssertEqual(
+            attributed.appKey,
+            "exec:/Users/nanvon/.local/share/fnm/node-versions/v24.17.0/installation/bin/node"
+        )
+        XCTAssertNotEqual(attributed.category, .userApp)
+    }
+
     func testAttributionCacheDoesNotReuseAnEntryAfterPIDReuse() {
         let cache = ProcessAttributionCache()
         let first = ProcessIdentity(
