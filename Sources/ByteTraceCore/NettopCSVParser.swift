@@ -5,17 +5,25 @@ public struct NettopDelta: Equatable, Sendable {
     public let processName: String
     public let downloadBytes: Int64
     public let uploadBytes: Int64
+    /// 连接行所在接口（lo0/en0/utun4…）；进程行无接口信息，为 nil。
+    public let interface: String?
+    /// 连接行 `<->` 右侧的目标描述（仅用于内存中的过滤判断，不落库不展示）。
+    public let connectionTarget: String?
 
     public init(
         sampledAt: String,
         processName: String,
         downloadBytes: Int64,
-        uploadBytes: Int64
+        uploadBytes: Int64,
+        interface: String? = nil,
+        connectionTarget: String? = nil
     ) {
         self.sampledAt = sampledAt
         self.processName = processName
         self.downloadBytes = downloadBytes
         self.uploadBytes = uploadBytes
+        self.interface = interface
+        self.connectionTarget = connectionTarget
     }
 }
 
@@ -39,6 +47,7 @@ public struct NettopCSVParser: Sendable {
         let processIndex: Int
         let bytesInIndex: Int
         let bytesOutIndex: Int
+        let interfaceIndex: Int?
     }
 
     private struct ParsedRow: Sendable {
@@ -46,11 +55,15 @@ public struct NettopCSVParser: Sendable {
         let processName: String
         let downloadBytes: Int64
         let uploadBytes: Int64
+        let interface: String?
+        let connectionTarget: String?
     }
 
     private var lineBuffer = Data()
     private var schema: Schema?
     private var currentRows: [ParsedRow] = []
+    private var currentProcessRows: [ParsedRow] = []
+    private var currentProcessName: String?
     private var hasBaseline = false
     private var didFinish = false
 
@@ -109,7 +122,28 @@ public struct NettopCSVParser: Sendable {
             malformedRowCount += 1
             return [.malformedRow]
         }
-        currentRows.append(row)
+
+        // 不带 -P 时输出是「进程行 → 连接行」的树形结构：
+        // 进程行（interface 列为空、第 2 列为 name.pid）只用于确定归属，自身不产出流量；
+        // 连接行（第 2 列以 tcp/udp/ipv/icmp 等开头）携带字节并归属到最近出现的进程行。
+        // 部分连接行 interface 列为空（如 `udp4 *:*<->*:*`），同样按连接行处理但不产出流量。
+        // 兜底：若整帧都没有连接行（旧 -P 风格输出），帧完成时回退用进程行产出 delta。
+        if row.interface == nil {
+            guard !Self.isConnectionDescription(row.processName) else { return [] }
+            currentProcessName = row.processName
+            currentProcessRows.append(row)
+            return []
+        }
+        guard let currentProcessName else { return [] }
+        let attributedRow = ParsedRow(
+            sampledAt: row.sampledAt,
+            processName: currentProcessName,
+            downloadBytes: row.downloadBytes,
+            uploadBytes: row.uploadBytes,
+            interface: row.interface,
+            connectionTarget: row.connectionTarget
+        )
+        currentRows.append(attributedRow)
         return []
     }
 
@@ -136,11 +170,17 @@ public struct NettopCSVParser: Sendable {
     private mutating func completeCurrentFrame() -> [NettopParserEvent] {
         guard schema != nil else {
             currentRows.removeAll(keepingCapacity: true)
+            currentProcessRows.removeAll(keepingCapacity: true)
+            currentProcessName = nil
             return []
         }
 
-        let rows = currentRows
+        // 有连接行 → 用连接行（已归属到进程）；整帧无连接行（旧 -P 风格）→ 回退用进程行。
+        let sourceRows = currentRows.isEmpty ? currentProcessRows : currentRows
+        let rows = sourceRows
         currentRows.removeAll(keepingCapacity: true)
+        currentProcessRows.removeAll(keepingCapacity: true)
+        currentProcessName = nil
         completeFrameCount += 1
 
         let isBaseline = !hasBaseline
@@ -157,7 +197,9 @@ public struct NettopCSVParser: Sendable {
                     sampledAt: row.sampledAt,
                     processName: row.processName,
                     downloadBytes: row.downloadBytes,
-                    uploadBytes: row.uploadBytes
+                    uploadBytes: row.uploadBytes,
+                    interface: row.interface,
+                    connectionTarget: row.connectionTarget
                 )
             }
         }
@@ -169,19 +211,46 @@ public struct NettopCSVParser: Sendable {
         let requiredIndex = max(schema.processIndex, max(schema.bytesInIndex, schema.bytesOutIndex))
         guard fields.count > requiredIndex else { return nil }
 
-        guard let downloadBytes = Int64(fields[schema.bytesInIndex].trimmingCharacters(in: .whitespaces)),
-              let uploadBytes = Int64(fields[schema.bytesOutIndex].trimmingCharacters(in: .whitespaces)),
-              downloadBytes >= 0,
-              uploadBytes >= 0 else {
+        // 监听/未连接的行 bytes 列为空，按 0 处理；非数字或负数视为非法。
+        guard let downloadBytes = Self.byteValue(fields[schema.bytesInIndex]),
+              let uploadBytes = Self.byteValue(fields[schema.bytesOutIndex]) else {
             return nil
+        }
+
+        var interface: String?
+        if let interfaceIndex = schema.interfaceIndex, fields.indices.contains(interfaceIndex) {
+            let value = fields[interfaceIndex].trimmingCharacters(in: .whitespaces)
+            interface = value.isEmpty ? nil : value
         }
 
         return ParsedRow(
             sampledAt: fields[0],
             processName: fields[schema.processIndex],
             downloadBytes: downloadBytes,
-            uploadBytes: uploadBytes
+            uploadBytes: uploadBytes,
+            interface: interface,
+            connectionTarget: interface == nil ? nil : Self.connectionTarget(in: fields[schema.processIndex])
         )
+    }
+
+    private static func byteValue(_ field: String) -> Int64? {
+        let trimmed = field.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return 0 }
+        guard let value = Int64(trimmed), value >= 0 else { return nil }
+        return value
+    }
+
+    /// 从连接行第 2 列（如 `tcp4 127.0.0.1:57123<->127.0.0.1:59169`）提取 `<->` 右侧目标。
+    private static func connectionTarget(in field: String) -> String? {
+        guard let range = field.range(of: "<->") else { return nil }
+        let target = field[range.upperBound...].trimmingCharacters(in: .whitespaces)
+        return target.isEmpty ? nil : target
+    }
+
+    /// 第 2 列是否是连接描述（tcp4/udp4/tcp6/ipv6… 开头），用于区分进程行与连接行。
+    private static func isConnectionDescription(_ field: String) -> Bool {
+        let prefixes = ["tcp4", "tcp6", "udp4", "udp6", "ipv4", "ipv6", "icmp"]
+        return prefixes.contains { field.hasPrefix($0) }
     }
 
     private static func makeSchema(from header: [String]) -> Schema? {
@@ -192,11 +261,14 @@ public struct NettopCSVParser: Sendable {
             return nil
         }
 
+        let interfaceIndex = header.firstIndex(of: "interface")
+
         return Schema(
             columns: header,
             processIndex: processIndex,
             bytesInIndex: bytesInIndex,
-            bytesOutIndex: bytesOutIndex
+            bytesOutIndex: bytesOutIndex,
+            interfaceIndex: interfaceIndex
         )
     }
 

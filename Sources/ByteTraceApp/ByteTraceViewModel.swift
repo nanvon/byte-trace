@@ -182,6 +182,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private let attributionCache: ProcessAttributionCache
     private let store: UsageStore?
     private let aggregator: UsageAggregator?
+    private let trafficModeDetector = TrafficModeDetector()
+    private let trafficFilter = TrafficFilter()
+    private var trafficMode: TrafficMode = .compatible
+    private var modeTimer: Timer?
     private var flushTimer: Timer?
     private var restartTimer: Timer?
     private var restartAttempt = 0
@@ -198,6 +202,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var lastUIRefreshDate: Date?
 
     private static let restartDelays: [TimeInterval] = [1, 2, 5, 10, 30]
+    /// 隧道接口检测周期：utun 出现/消失（代理软件启停）时切换采集过滤模式。
+    nonisolated private static let trafficModePollInterval: TimeInterval = 30
 
     /// 诊断事件保留时长（分钟桶保留策略之外的独立上限）。
     nonisolated private static let collectorEventRetentionInterval: TimeInterval = 30 * 24 * 60 * 60
@@ -306,6 +312,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
         wantsCollection = true
         lastError = nil
+        trafficMode = trafficModeDetector.currentMode()
+        startModeTimer()
         startFlushTimer()
         startCollectorProcess()
     }
@@ -319,6 +327,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         isStarted = false
         flushTimer?.invalidate()
         flushTimer = nil
+        modeTimer?.invalidate()
+        modeTimer = nil
         if collector.state != .stopped {
             collector.stop()
         }
@@ -335,6 +345,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         isStarted = false
         flushTimer?.invalidate()
         flushTimer = nil
+        modeTimer?.invalidate()
+        modeTimer = nil
         if collector.state != .stopped {
             collector.stop()
         }
@@ -680,6 +692,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private func ingest(_ delta: NettopDelta) {
+        // 干净模式（本机存在 TUN 隧道接口）丢弃回环目标流量（Electron 假流量、
+        // 代理入站双计）；兼容模式（无 TUN）不过滤，保持全量采集口径。
+        if trafficMode == .clean, trafficFilter.shouldDiscard(delta) {
+            return
+        }
+
         let token = NettopProcessToken(rawValue: delta.processName)
         let identity = resolver.resolve(token)
         let attributed = attributionCache.attribute(identity)
@@ -716,6 +734,30 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
         RunLoop.main.add(timer, forMode: .common)
         flushTimer = timer
+    }
+
+    private func startModeTimer() {
+        modeTimer?.invalidate()
+        let timer = Timer(
+            timeInterval: Self.trafficModePollInterval,
+            target: self,
+            selector: #selector(modeTimerFired),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        modeTimer = timer
+    }
+
+    @objc private func modeTimerFired(_ timer: Timer) {
+        let mode = trafficModeDetector.currentMode()
+        guard mode != trafficMode else { return }
+        let oldMode = trafficMode
+        trafficMode = mode
+        recordCollectorEvent(
+            kind: "traffic_mode_changed",
+            details: "\(oldMode) -> \(mode)"
+        )
     }
 
     @objc private func flushTimerFired(_ timer: Timer) {

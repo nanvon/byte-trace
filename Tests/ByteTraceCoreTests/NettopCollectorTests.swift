@@ -13,4 +13,14 @@ final class NettopCollectorTests: XCTestCase {
             "采集命令不应带 -t 接口类型过滤，否则代理流量（lo0）统计不到"
         )
     }
+
+    func testArgumentsUseConnectionLevelOutput() {
+        // 不带 -P：输出「进程行 → 连接行」树形结构，连接行带接口列，
+        // 供 TrafficFilter 按连接目标做工具无关的回环过滤。
+        XCTAssertFalse(
+            NettopCollector.arguments.contains("-P"),
+            "采集命令不应带 -P 进程汇总，否则拿不到连接行接口/目标信息"
+        )
+        XCTAssertEqual(NettopCollector.arguments, ["-n", "-d", "-x", "-L", "0", "-s", "5"])
+    }
 }

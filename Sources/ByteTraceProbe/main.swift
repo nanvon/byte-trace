@@ -4,9 +4,11 @@ import Foundation
 
 private struct Options {
     let duration: TimeInterval
+    let applyFilter: Bool
 
     init(arguments: [String]) {
         var duration: TimeInterval = 15
+        var applyFilter = false
         var index = 1
 
         while index < arguments.count {
@@ -14,12 +16,16 @@ private struct Options {
                let value = TimeInterval(arguments[index + 1]), value > 0 {
                 duration = value
                 index += 2
+            } else if arguments[index] == "--filter" {
+                applyFilter = true
+                index += 1
             } else {
                 index += 1
             }
         }
 
         self.duration = duration
+        self.applyFilter = applyFilter
     }
 }
 
@@ -189,7 +195,10 @@ private func runProbe(options: Options) -> Int32 {
         case let .parser(parserEvent):
             switch parserEvent {
             case let .frameCompleted(rowCount, deltas, isBaseline):
-                let samples = deltas.map { delta in
+                let filtered = options.applyFilter
+                    ? deltas.filter { !TrafficFilter().shouldDiscard($0) }
+                    : deltas
+                let samples = filtered.map { delta in
                     let token = NettopProcessToken(rawValue: delta.processName)
                     let identity = runtime.resolver.resolve(token)
                     let attributed = runtime.attributionCache.attribute(identity)
@@ -249,6 +258,7 @@ private func runProbe(options: Options) -> Int32 {
     print("[collector] executable=\(NettopCollector.executablePath)")
     print("[collector] arguments=\(NettopCollector.arguments.joined(separator: " "))")
     print("[collector] duration_seconds=\(options.duration)")
+    print("[collector] filter_clean_mode=\(options.applyFilter)")
 
     do {
         try runtime.collector.start()
