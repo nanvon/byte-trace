@@ -3,20 +3,14 @@ import XCTest
 @testable import ByteTraceCore
 
 final class NettopCollectorTests: XCTestCase {
-    func testArgumentsExcludeLoopbackInterface() {
-        // `-t external` 只统计非回环接口：lo0 回环流量（Electron 本地通信、
-        // 代理中转）会虚高且双向对称，曾导致 OpenChamber 单日 12GB+ 虚高。
+    func testArgumentsDoNotFilterLoopback() {
+        // 不带 -t 接口过滤：应用走 127.0.0.1 代理的流量在 lo0 上，
+        // 过滤回环会让代理环境下的应用统计不到（曾以 -t external 修复虚高、
+        // 但误伤真实代理流量，且 macOS 27 下 -t 实测失效）。
         XCTAssertEqual(NettopCollector.arguments.first, "-n")
-        XCTAssertTrue(
+        XCTAssertFalse(
             NettopCollector.arguments.contains("-t"),
-            "采集命令必须带 -t 接口类型过滤"
-        )
-        let externalIndex = NettopCollector.arguments.firstIndex(of: "-t")
-        XCTAssertNotNil(externalIndex)
-        XCTAssertEqual(
-            NettopCollector.arguments[externalIndex! + 1],
-            "external",
-            "接口类型必须是 external（非回环）"
+            "采集命令不应带 -t 接口类型过滤，否则代理流量（lo0）统计不到"
         )
     }
 }
