@@ -15,26 +15,6 @@ enum MonitorStatus: Equatable {
     case failed(String)
 }
 
-enum MihomoMonitorStatus: Equatable {
-    case disabled
-    case stopped
-    case connecting
-    case connected
-    case reconnecting
-    case failed(String)
-
-    var displayText: String {
-        switch self {
-        case .disabled: return "未启用"
-        case .stopped: return "已停止"
-        case .connecting: return "正在连接…"
-        case .connected: return "已连接"
-        case .reconnecting: return "连接中断，正在重试…"
-        case let .failed(message): return message
-        }
-    }
-}
-
 struct UsageTotals: Equatable {
     let downloadBytes: Int64
     let uploadBytes: Int64
@@ -171,11 +151,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var rangeRecords: [DailyUsageRecord] = []
     @Published private(set) var rangeTimeline: [UsageTimelinePoint] = []
     @Published private(set) var bucketStats: UsageBucketStats?
-    @Published private(set) var siteUsageRecords: [SiteUsageRecord] = []
-    @Published private(set) var mihomoEnabled: Bool
-    @Published private(set) var mihomoControllerURL: String
-    @Published private(set) var mihomoStatus: MihomoMonitorStatus
-    @Published private(set) var mihomoConfigurationMessage: String?
     private(set) var rangeBuckets: [UsageBucketRecord] = []
     private var dailyRangeRecords: [DailyUsageRecord] = []
     @Published private(set) var launchAtLoginEnabled: Bool
@@ -202,9 +177,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     private static let showSystemProcessesKey = "ByteTrace.showSystemProcesses"
     private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
-    private static let mihomoEnabledKey = "ByteTrace.mihomo.enabled"
-    private static let mihomoControllerURLKey = "ByteTrace.mihomo.controllerURL"
-    private static let defaultMihomoControllerURL = "http://127.0.0.1:9090"
     private enum CollectorLane: Sendable {
         case external
         case loopback
@@ -216,10 +188,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private let attributionCache: ProcessAttributionCache
     private let store: UsageStore?
     private let aggregator: UsageAggregator?
-    private let siteAggregator: SiteUsageAggregator?
-    private let mihomoMonitor: MihomoConnectionMonitor
-    private let publicSuffixList: PublicSuffixList?
-    private let mihomoProcessAttributor = MihomoProcessPathAttributor()
     private let proxyEndpointMonitor = SystemProxyEndpointMonitor()
     private let supplementalReducer = SupplementalTrafficReducer()
     private var flushTimer: Timer?
@@ -241,11 +209,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var networkPathSatisfied = true
     private var lastRetentionCleanupDay: String?
     private var lastUIRefreshDate: Date?
-    private var mihomoRestartTimer: Timer?
-    private var mihomoRestartAttempt = 0
-    private var mihomoIsStarted = false
-    private var mihomoSecret: String
-    private var processPathAttributionCache: [String: AttributedProcess] = [:]
 
     private static let restartDelays: [TimeInterval] = [1, 2, 5, 10, 30]
     /// 诊断事件保留时长（分钟桶保留策略之外的独立上限）。
@@ -257,21 +220,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         databaseURL = UsageStore.defaultDatabaseURL(bundleIdentifier: Self.bundleIdentifier)
         collector = NettopCollector(scope: .externalProcessSummary)
         loopbackCollector = NettopCollector(scope: .supplementalConnections)
-        mihomoMonitor = MihomoConnectionMonitor()
-        publicSuffixList = try? PublicSuffixList.bundled()
         resolver = SystemProcessIdentityResolver()
         attributionCache = ProcessAttributionCache()
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
-        mihomoSecret = MihomoSecretStore.load()
-
-        let storedMihomoEnabled = UserDefaults.standard.bool(forKey: Self.mihomoEnabledKey)
-        let storedMihomoURL = UserDefaults.standard.string(
-            forKey: Self.mihomoControllerURLKey
-        ) ?? Self.defaultMihomoControllerURL
-        _mihomoEnabled = Published(initialValue: storedMihomoEnabled)
-        _mihomoControllerURL = Published(initialValue: storedMihomoURL)
-        _mihomoStatus = Published(initialValue: storedMihomoEnabled ? .stopped : .disabled)
-        _mihomoConfigurationMessage = Published(initialValue: nil)
 
         let storedPreference = UserDefaults.standard.object(
             forKey: Self.showSystemProcessesKey
@@ -290,11 +241,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             let store = try UsageStore(databaseURL: databaseURL)
             self.store = store
             aggregator = UsageAggregator(store: store)
-            siteAggregator = SiteUsageAggregator(store: store)
         } catch {
             store = nil
             aggregator = nil
-            siteAggregator = nil
             storageError = "无法打开本地数据库：\(error.localizedDescription)"
         }
 
@@ -304,14 +253,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             status = .failed(storageError)
         }
         configureCollector()
-        configureMihomoMonitor()
         configureProxyEndpointMonitor()
         registerWorkspaceNotifications()
         registerNetworkPathMonitor()
         refresh()
-        if publicSuffixList == nil {
-            mihomoConfigurationMessage = "内置主域名规则加载失败，网站统计不可用。"
-        }
         if store != nil {
             start()
         }
@@ -339,24 +284,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     var selectedRangeTotals: UsageTotals {
         totals(from: rangeRecords.filter { $0.category != .proxyTransport })
-    }
-
-    var unattributedSiteTotals: UsageTotals {
-        let records = siteUsageRecords.filter {
-            $0.appKey == MihomoProcessPathAttributor.unknownAppKey
-        }
-        return UsageTotals(
-            downloadBytes: records.reduce(0) { saturatingAdd($0, $1.downloadBytes) },
-            uploadBytes: records.reduce(0) { saturatingAdd($0, $1.uploadBytes) }
-        )
-    }
-
-    func siteUsage(for appKey: String) -> [SiteUsageRecord] {
-        siteUsageRecords.filter { $0.appKey == appKey }
-    }
-
-    func currentMihomoSecret() -> String {
-        mihomoSecret
     }
 
     var dayKey: String {
@@ -399,7 +326,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         startFlushTimer()
         startCollectorProcess()
         startLoopbackCollectorProcess()
-        startMihomoMonitorIfNeeded()
     }
 
     func stop() {
@@ -411,10 +337,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         loopbackRestartTimer?.invalidate()
         loopbackRestartTimer = nil
         loopbackRestartAttempt = 0
-        mihomoRestartTimer?.invalidate()
-        mihomoRestartTimer = nil
-        mihomoRestartAttempt = 0
-        mihomoIsStarted = false
         isStarted = false
         isLoopbackStarted = false
         flushTimer?.invalidate()
@@ -426,10 +348,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             loopbackCollector.stop()
         }
         proxyEndpointMonitor.stop()
-        mihomoMonitor.stop()
-        if mihomoEnabled {
-            mihomoStatus = .stopped
-        }
         flushAfterStop()
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
@@ -442,9 +360,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         restartTimer = nil
         loopbackRestartTimer?.invalidate()
         loopbackRestartTimer = nil
-        mihomoRestartTimer?.invalidate()
-        mihomoRestartTimer = nil
-        mihomoIsStarted = false
         isStarted = false
         isLoopbackStarted = false
         flushTimer?.invalidate()
@@ -456,7 +371,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             loopbackCollector.stop()
         }
         proxyEndpointMonitor.stop()
-        mihomoMonitor.stop()
         // 退出路径必须同步排空主队列：采集器最后一帧事件是 main.async 投递的，
         // 应用终止后排队 block 不保证执行，这里转一圈 runloop 让最后一帧先入聚合器，
         // 随后 flushNow 才能把它落库（仅退出瞬间发生一次，代价可忽略）。
@@ -472,7 +386,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             records = []
             rangeRecords = []
             rangeTimeline = []
-            siteUsageRecords = []
             bucketStats = nil
             rangeBuckets = []
             return
@@ -507,7 +420,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeRecords = []
             rangeTimeline = []
             rangeBuckets = []
-            siteUsageRecords = []
             return
         }
 
@@ -551,84 +463,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             )
             rangeBuckets = []
             dailyRangeRecords = []
-            siteUsageRecords = []
-            siteAggregator?.discardPending()
             lastRetentionCleanupDay = nil
             lastError = nil
         } catch {
             lastError = "清空统计失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
-        }
-    }
-
-    func setMihomoEnabled(_ enabled: Bool) {
-        guard enabled != mihomoEnabled else { return }
-        mihomoEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: Self.mihomoEnabledKey)
-        mihomoConfigurationMessage = nil
-
-        if enabled {
-            guard publicSuffixList != nil else {
-                mihomoStatus = .failed("主域名规则不可用")
-                return
-            }
-            mihomoStatus = .stopped
-            startMihomoMonitorIfNeeded()
-        } else {
-            mihomoRestartTimer?.invalidate()
-            mihomoRestartTimer = nil
-            mihomoRestartAttempt = 0
-            mihomoIsStarted = false
-            mihomoMonitor.stop()
-            mihomoStatus = .disabled
-        }
-    }
-
-    @discardableResult
-    func saveMihomoConfiguration(controllerURL: String, secret: String) -> Bool {
-        do {
-            let configuration = try MihomoControllerConfiguration(
-                controllerURL: controllerURL,
-                secret: secret
-            )
-            try MihomoSecretStore.save(configuration.secret)
-            mihomoControllerURL = configuration.displayURL
-            mihomoSecret = configuration.secret
-            UserDefaults.standard.set(
-                configuration.displayURL,
-                forKey: Self.mihomoControllerURLKey
-            )
-            mihomoConfigurationMessage = "配置已保存"
-            if mihomoEnabled {
-                restartMihomoMonitor()
-            }
-            return true
-        } catch {
-            mihomoConfigurationMessage = "保存失败：\(error.localizedDescription)"
-            return false
-        }
-    }
-
-    func testMihomoConfiguration(controllerURL: String, secret: String) {
-        let configuration: MihomoControllerConfiguration
-        do {
-            configuration = try MihomoControllerConfiguration(
-                controllerURL: controllerURL,
-                secret: secret
-            )
-        } catch {
-            mihomoConfigurationMessage = "测试失败：\(error.localizedDescription)"
-            return
-        }
-
-        mihomoConfigurationMessage = "正在测试连接…"
-        Task { [weak self] in
-            do {
-                try await MihomoConnectionMonitor.test(configuration: configuration)
-                self?.mihomoConfigurationMessage = "连接成功"
-            } catch {
-                self?.mihomoConfigurationMessage = "连接失败：\(error.localizedDescription)"
-            }
         }
     }
 
@@ -643,7 +482,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
         let document = ByteTraceExportDocument(
-            formatVersion: 4,
+            formatVersion: 3,
             accountingVersion: UsageStore.accountingVersion,
             product: "ByteTrace",
             exportedAt: end,
@@ -667,22 +506,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                     totalBytes: totalBytes(for: $0),
                     sampleCount: $0.sampleCount
                 )
-            },
-            websiteUsage: siteUsageRecords.map {
-                ByteTraceExportDocument.WebsiteUsage(
-                    appKey: $0.appKey,
-                    site: Self.displaySiteKey($0.siteKey),
-                    downloadBytes: $0.downloadBytes,
-                    uploadBytes: $0.uploadBytes,
-                    totalBytes: $0.totalBytes,
-                    sampleCount: $0.sampleCount
-                )
-            },
-            unattributedWebsiteUsage: ByteTraceExportDocument.UnattributedWebsiteUsage(
-                downloadBytes: unattributedSiteTotals.downloadBytes,
-                uploadBytes: unattributedSiteTotals.uploadBytes,
-                totalBytes: unattributedSiteTotals.totalBytes
-            )
+            }
         )
         try encoder.encode(document).write(to: url, options: .atomic)
     }
@@ -722,10 +546,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         return "\(Int(value)) B"
     }
 
-    static func displaySiteKey(_ siteKey: String) -> String {
-        siteKey == PublicSuffixList.unidentifiedSiteKey ? "无法识别/其他" : siteKey
-    }
-
     /// 同名不同路径的进程（如多个 node 版本）在同一个列表里无法区分，返回需要附加路径提示的应用名集合。
     static func duplicateDisplayNames(in records: [DailyUsageRecord]) -> Set<String> {
         var counts: [String: Int] = [:]
@@ -750,78 +570,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         loopbackCollector.onEvent = { [weak self] event in
             self?.receive(event, lane: .loopback)
         }
-    }
-
-    private func configureMihomoMonitor() {
-        mihomoMonitor.onEvent = { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handleMihomoMonitorEvent(event)
-            }
-        }
-    }
-
-    private func handleMihomoMonitorEvent(_ event: MihomoConnectionMonitorEvent) {
-        switch event {
-        case .connecting:
-            mihomoStatus = .connecting
-
-        case .connected:
-            mihomoRestartAttempt = 0
-            mihomoStatus = .connected
-            recordCollectorEvent(kind: "mihomo_connected")
-
-        case let .deltas(deltas):
-            for delta in deltas {
-                ingestMihomo(delta)
-            }
-
-        case let .failed(message):
-            mihomoIsStarted = false
-            guard mihomoEnabled, wantsCollection, !isSleeping, networkPathSatisfied else {
-                mihomoStatus = mihomoEnabled ? .stopped : .disabled
-                return
-            }
-            mihomoStatus = .reconnecting
-            recordCollectorEvent(kind: "mihomo_disconnected", details: message)
-            scheduleMihomoRestart()
-        }
-    }
-
-    private func ingestMihomo(_ delta: MihomoConnectionDelta) {
-        guard let siteAggregator, let publicSuffixList else { return }
-        let attributed = attributedMihomoProcess(for: delta.processPath)
-        do {
-            try siteAggregator.ingest(
-                SiteUsageDelta(
-                    sampledAt: delta.sampledAt,
-                    appKey: attributed.appKey,
-                    displayName: attributed.displayName,
-                    category: attributed.category,
-                    bundleID: attributed.bundleID,
-                    bundlePath: attributed.bundlePath,
-                    executablePath: attributed.executablePath,
-                    siteKey: publicSuffixList.siteKey(for: delta.host),
-                    downloadBytes: delta.downloadBytes,
-                    uploadBytes: delta.uploadBytes
-                )
-            )
-        } catch {
-            mihomoConfigurationMessage = "网站流量样本未入队：\(error.localizedDescription)"
-            recordCollectorEvent(kind: "mihomo_database_error", details: error.localizedDescription)
-        }
-    }
-
-    private func attributedMihomoProcess(for processPath: String?) -> AttributedProcess {
-        let cacheKey = processPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if let cached = processPathAttributionCache[cacheKey] {
-            return cached
-        }
-        let attributed = mihomoProcessAttributor.attribute(processPath: processPath)
-        if processPathAttributionCache.count >= 1_000 {
-            processPathAttributionCache.removeAll(keepingCapacity: true)
-        }
-        processPathAttributionCache[cacheKey] = attributed
-        return attributed
     }
 
     private func configureProxyEndpointMonitor() {
@@ -962,19 +710,14 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         loopbackRestartTimer?.invalidate()
         loopbackRestartTimer = nil
         loopbackRestartAttempt = 0
-        mihomoRestartTimer?.invalidate()
-        mihomoRestartTimer = nil
-        mihomoRestartAttempt = 0
         isStarted = false
         isLoopbackStarted = false
-        mihomoIsStarted = false
         if collector.state != .stopped {
             collector.stop()
         }
         if loopbackCollector.state != .stopped {
             loopbackCollector.stop()
         }
-        mihomoMonitor.stop()
         flushAfterStop()
 
         if isSatisfied {
@@ -986,14 +729,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             )
             scheduleRestart()
             scheduleLoopbackRestart()
-            scheduleMihomoRestart()
         } else {
             status = .stopped
             lastError = "网络不可用，已暂停采集，恢复网络后会自动继续。"
             recordCollectorEvent(kind: "network_path_lost")
-            if mihomoEnabled {
-                mihomoStatus = .stopped
-            }
         }
     }
 
@@ -1047,13 +786,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                     loopbackCollector.stop()
                 }
                 proxyEndpointMonitor.stop()
-                mihomoRestartTimer?.invalidate()
-                mihomoRestartTimer = nil
-                mihomoIsStarted = false
-                mihomoMonitor.stop()
-                if mihomoEnabled {
-                    mihomoStatus = .stopped
-                }
                 status = .incompatible
                 lastError = message
                 recordCollectorEvent(kind: "parse_schema_changed", details: message)
@@ -1132,12 +864,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         startLoopbackCollectorProcess()
     }
 
-    @objc private func mihomoRestartTimerFired(_ timer: Timer) {
-        mihomoRestartTimer?.invalidate()
-        mihomoRestartTimer = nil
-        startMihomoMonitorIfNeeded()
-    }
-
     @objc private func handleWillSleep(_ notification: Notification) {
         guard wantsCollection else { return }
 
@@ -1146,24 +872,17 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         restartTimer = nil
         loopbackRestartTimer?.invalidate()
         loopbackRestartTimer = nil
-        mihomoRestartTimer?.invalidate()
-        mihomoRestartTimer = nil
         isStarted = false
         isLoopbackStarted = false
-        mihomoIsStarted = false
         if collector.state != .stopped {
             collector.stop()
         }
         if loopbackCollector.state != .stopped {
             loopbackCollector.stop()
         }
-        mihomoMonitor.stop()
         flushAfterStop()
         status = .stopped
         recordCollectorEvent(kind: "sample_gap", details: "system_sleep")
-        if mihomoEnabled {
-            mihomoStatus = .stopped
-        }
     }
 
     @objc private func handleDidWake(_ notification: Notification) {
@@ -1172,12 +891,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         isSleeping = false
         restartAttempt = 0
         loopbackRestartAttempt = 0
-        mihomoRestartAttempt = 0
         lastError = nil
         status = .reconnecting
         startCollectorProcess()
         startLoopbackCollectorProcess()
-        startMihomoMonitorIfNeeded()
     }
 
     private func startCollectorProcess() {
@@ -1219,40 +936,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             )
             scheduleLoopbackRestart()
         }
-    }
-
-    private func startMihomoMonitorIfNeeded() {
-        guard mihomoEnabled,
-              wantsCollection,
-              !isSleeping,
-              networkPathSatisfied,
-              !mihomoIsStarted,
-              publicSuffixList != nil else {
-            return
-        }
-
-        do {
-            let configuration = try MihomoControllerConfiguration(
-                controllerURL: mihomoControllerURL,
-                secret: mihomoSecret
-            )
-            mihomoIsStarted = true
-            mihomoStatus = .connecting
-            mihomoMonitor.start(configuration: configuration)
-        } catch {
-            mihomoIsStarted = false
-            mihomoStatus = .failed(error.localizedDescription)
-            mihomoConfigurationMessage = error.localizedDescription
-        }
-    }
-
-    private func restartMihomoMonitor() {
-        mihomoRestartTimer?.invalidate()
-        mihomoRestartTimer = nil
-        mihomoRestartAttempt = 0
-        mihomoIsStarted = false
-        mihomoMonitor.stop()
-        startMihomoMonitorIfNeeded()
     }
 
     private func scheduleRestart() {
@@ -1303,53 +986,15 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
     }
 
-    private func scheduleMihomoRestart() {
-        guard mihomoEnabled,
-              wantsCollection,
-              !isSleeping,
-              networkPathSatisfied,
-              mihomoRestartTimer == nil else {
-            return
-        }
-
-        let index = min(mihomoRestartAttempt, Self.restartDelays.count - 1)
-        let delay = Self.restartDelays[index]
-        mihomoRestartAttempt = min(mihomoRestartAttempt + 1, Self.restartDelays.count - 1)
-        let timer = Timer(
-            timeInterval: delay,
-            target: self,
-            selector: #selector(mihomoRestartTimerFired),
-            userInfo: nil,
-            repeats: false
-        )
-        RunLoop.main.add(timer, forMode: .common)
-        mihomoRestartTimer = timer
-        recordCollectorEvent(
-            kind: "mihomo_backoff",
-            details: "retry_in_seconds=\(Int(delay))"
-        )
-    }
-
     private func flushNow(forceRefresh: Bool = false) {
-        if let aggregator {
-            do {
-                _ = try aggregator.flush()
-            } catch {
-                lastError = "数据库写入失败：\(error.localizedDescription)"
-                recordCollectorEvent(kind: "database_error", details: lastError)
-            }
+        guard let aggregator else { return }
+        do {
+            _ = try aggregator.flush()
+            refreshIfNeeded(force: forceRefresh)
+        } catch {
+            lastError = "数据库写入失败：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "database_error", details: lastError)
         }
-
-        // 网站账本独立 flush；失败时保留自身 pending，不影响上面的 nettop 事务。
-        if let siteAggregator {
-            do {
-                _ = try siteAggregator.flush()
-            } catch {
-                mihomoConfigurationMessage = "网站流量写入失败：\(error.localizedDescription)"
-                recordCollectorEvent(kind: "mihomo_database_error", details: error.localizedDescription)
-            }
-        }
-        refreshIfNeeded(force: forceRefresh)
     }
 
     /// 停止采集后调用：采集器最后一帧事件经 `DispatchQueue.main.async` 投递，
@@ -1441,15 +1086,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeTimeline = makeTimeline(
                 from: buckets.filter { $0.category != .proxyTransport }
             )
-            siteUsageRecords = try store.siteUsage(from: start, to: end)
             return
         }
 
         let daily = try store.dailyUsage(
-            from: Self.dayKey(for: start),
-            through: Self.dayKey(for: end)
-        )
-        siteUsageRecords = try store.siteUsage(
             from: Self.dayKey(for: start),
             through: Self.dayKey(for: end)
         )

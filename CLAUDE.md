@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目定位
 
-ByteTrace 是常驻 macOS 菜单栏的应用级流量统计工具（Swift 6 / SPM / macOS 14+）。应用总量唯一来自系统只读命令 `/usr/bin/nettop`；可选的网站排行读取本机 Mihomo 活动连接快照，但不参与应用总量。数据写入本机 SQLite，不使用 Network Extension、不需要 root、不解析报文内容。
+ByteTrace 是常驻 macOS 菜单栏的应用级流量统计工具（Swift 6 / SPM / macOS 14+）。唯一数据源是系统只读命令 `/usr/bin/nettop`，数据写入本机 SQLite。不使用 Network Extension、不需要 root、不解析报文内容。
 
 ## 常用命令
 
@@ -33,14 +33,6 @@ ByteTrace 按 nettop 接口类型拆分成两个常驻通道，避免高功耗�
 - 补充通道：`nettop -n -d -x -L 0 -s 1 -t loopback -t undefined -J time,interface,state,bytes_in,bytes_out`。连接级解析只保留两类应用侧流量：目标精确命中当前系统代理的 `lo0` 连接，以及具有明确本地／远端端点的 `utun*` 连接。1 秒采样用于减少短连接漏记，落库和 UI 刷新仍保持低频。
 
 系统代理端点通过 `SCDynamicStoreCopyProxies` 首次读取，并监听 `State:/Network/Global/Proxies` 变化；只接受启用的 HTTP／HTTPS／SOCKS 本机回环端点，因此不写死 `7890`、不轮询 Mihomo API。补充通道丢弃其他本地 IPC、无明确端点的广播／通配连接，并在进程归属后丢弃代理进程的 utun 镜像；代理外层流量仍由外部通道单独展示、不反向抵扣、不计入应用总量。端点仅参与内存过滤，不落库、不展示。
-
-## 可选 Mihomo 网站统计
-
-- 默认关闭，只允许 `http(s)://localhost`、`127.0.0.0/8` 或 `::1` 控制器；密钥存入 macOS 钥匙串。
-- `MihomoConnectionMonitor` 使用 `/connections?interval=1000` WebSocket。每次连接首帧只建基线，之后按连接 ID 对累计 `upload`／`download` 求差；连接消失立即清理，回退值重置该连接基线。
-- 只用 `metadata.processPath` 归属应用，只用 `metadata.host` 归并网站；绝不按目标 IP、`sniffHost` 或 DNS 反查猜域名。无效域名记为“无法识别/其他”。
-- `PublicSuffixList` 使用随 App 打包的完整 ICANN＋PRIVATE 离线规则计算可注册主域名。Mihomo 数据独立聚合、独立事务落库，失败不得阻塞 nettop 应用总量。
-- 产品文案必须称“已识别网站流量”，并说明只覆盖出现在活动连接快照中的 Mihomo 流量、可能漏掉极短连接、网站之和不等于应用总量。
 
 ### 数据流（正式管线）
 
@@ -83,15 +75,15 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 自己封装的 `SQLiteDatabase`（直接调 SQLite3 C API，无第三方依赖），WAL + `busy_timeout=5000` + `foreign_keys=ON`。路径：`~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3`。
 
-六张表：`apps`、`daily_usage`（键 `accounting_version`+`day`+`app_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`，分钟粒度）、`collector_events`、`mihomo_site_daily_usage`、`mihomo_site_buckets`。网站表使用独立的 `site_accounting_version`，主键还包含 `site_key`。
+四张表：`apps`、`daily_usage`（键 `accounting_version`+`day`+`app_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`，分钟粒度）、`collector_events`。
 
-**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 7`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 新增独立网站日汇总和分钟桶。旧应用口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；网站口径当前为 1。查询只返回各自当前口径，避免新旧数据直接相加。
+**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 6`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
 
 **写入是累加而非幂等**：所有 upsert 都是 `ON CONFLICT ... DO UPDATE SET x = x + excluded.x`。同一批聚合重复 flush 会双计。`flush()` 成功后必须清空 pending（现有代码已如此）。
 
 **时间口径混用，改动前先确认字段类型**：`daily_usage.day` 是本地日历的 `yyyy-MM-dd` 字符串；`usage_buckets.bucket_start` 是 epoch 秒 `INTEGER`；`apps.first_seen_at` / `last_seen_at` 是 `String(format: "%.6f")` 的文本。
 
-**保留策略**只删应用和网站分钟桶（`purgeBuckets`）并按 30 天上限清理 `collector_events`（`purgeCollectorEvents`），两类每日汇总与 `apps` 不受影响；`clearAll()` 才清空全部六张表。大量删除后按需 `VACUUM`（阻塞操作，在后台队列执行，绝不在主线程）。
+**保留策略**只删分钟桶表（`purgeBuckets`）并按 30 天上限清理 `collector_events`（`purgeCollectorEvents`），`daily_usage` 与 `apps` 不受影响；`clearAll()` 才清空全部四张表。大量删除后按需 `VACUUM`（阻塞操作，在后台队列执行，绝不在主线程）。
 
 ## 应用层
 

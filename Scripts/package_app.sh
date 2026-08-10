@@ -46,14 +46,9 @@ echo "[package] building ByteTraceApp in release mode"
 swift build "${SWIFT_BUILD_ARGS[@]}"
 BIN_DIR="$(swift build --show-bin-path "${SWIFT_BUILD_ARGS[@]}")"
 EXECUTABLE="$BIN_DIR/ByteTraceApp"
-CORE_RESOURCE_BUNDLE="$BIN_DIR/ByteTrace_ByteTraceCore.bundle"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
     echo "missing release executable: $EXECUTABLE" >&2
-    exit 1
-fi
-if [[ ! -d "$CORE_RESOURCE_BUNDLE" ]]; then
-    echo "missing ByteTraceCore resource bundle: $CORE_RESOURCE_BUNDLE" >&2
     exit 1
 fi
 
@@ -66,7 +61,6 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$EXECUTABLE" "$MACOS_DIR/ByteTraceApp"
 cp "$PLIST_SOURCE" "$CONTENTS_DIR/Info.plist"
 cp "$ICON_SOURCE" "$RESOURCES_DIR/ByteTrace.icns"
-ditto "$CORE_RESOURCE_BUNDLE" "$RESOURCES_DIR/ByteTrace_ByteTraceCore.bundle"
 # 菜单栏图标按 1x/2x/3x 三档打包：url(forResource:) 不做 @2x 变体匹配，
 # 由 ByteTraceMenuBarIcon 显式组装成多 representation 的 NSImage。
 for menubar_scale in "" "@2x" "@3x"; do

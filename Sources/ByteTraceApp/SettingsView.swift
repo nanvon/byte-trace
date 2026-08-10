@@ -8,8 +8,6 @@ struct SettingsView: View {
     @State private var pendingRetentionPolicy: UsageRetentionPolicy?
     @State private var exportMessage: String?
     @State private var exportedFileURL: URL?
-    @State private var mihomoControllerDraft = ""
-    @State private var mihomoSecretDraft = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,56 +34,6 @@ struct SettingsView: View {
                             set: { model.setLaunchAtLogin($0) }
                         )
                     )
-                }
-
-                Section("应用内网站统计") {
-                    Toggle(
-                        "启用 Mihomo 网站统计",
-                        isOn: Binding(
-                            get: { model.mihomoEnabled },
-                            set: { model.setMihomoEnabled($0) }
-                        )
-                    )
-
-                    TextField("控制器地址", text: $mihomoControllerDraft)
-                        .textFieldStyle(.roundedBorder)
-                    SecureField("访问密钥（可选）", text: $mihomoSecretDraft)
-                        .textFieldStyle(.roundedBorder)
-
-                    HStack {
-                        Button("保存并连接") {
-                            if model.saveMihomoConfiguration(
-                                controllerURL: mihomoControllerDraft,
-                                secret: mihomoSecretDraft
-                            ) {
-                                mihomoControllerDraft = model.mihomoControllerURL
-                            }
-                        }
-                        Button("测试连接") {
-                            model.testMihomoConfiguration(
-                                controllerURL: mihomoControllerDraft,
-                                secret: mihomoSecretDraft
-                            )
-                        }
-                        Spacer()
-                        Text(model.mihomoStatus.displayText)
-                            .font(.caption)
-                            .foregroundStyle(model.mihomoStatus == .connected ? .green : .secondary)
-                    }
-
-                    if let message = model.mihomoConfigurationMessage {
-                        Text(message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-
-                    Text("仅允许连接本机回环地址，默认 http://127.0.0.1:9090；密钥保存在 macOS 钥匙串。网站统计随 ByteTrace 采集一起开始和停止。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("这里只统计经过 Mihomo 且出现在活动连接快照中的流量，可能漏掉极短连接；网站流量之和不等于应用全部流量。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
                 Section("本地存储") {
@@ -169,14 +117,13 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("默认不自动清理。启用保留周期后，只会删除超过周期的应用与网站分钟级数据，每日汇总和应用信息不受影响。")
+                    Text("默认不自动清理。启用保留周期后，只会删除超过周期的分钟级数据，每日汇总和应用信息不受影响。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
                 Section("关于 ByteTrace") {
-                    LabeledContent("应用总量数据源", value: "系统 nettop")
-                    LabeledContent("网站排行数据源", value: "可选 Mihomo API")
+                    LabeledContent("数据源", value: "系统 nettop")
                     LabeledContent("统计口径", value: "应用逻辑流量")
                     Text("代理运输流量会单独显示，不计入今日应用总量。所有数据仅保存在本机。")
                         .font(.caption)
@@ -186,8 +133,6 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .onAppear {
                 model.refreshBucketStats()
-                mihomoControllerDraft = model.mihomoControllerURL
-                mihomoSecretDraft = model.currentMihomoSecret()
             }
         }
         .confirmationDialog(
@@ -200,7 +145,7 @@ struct SettingsView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("此操作会删除本机保存的应用流量、已识别网站流量和采集诊断记录，不能撤销。")
+            Text("此操作会删除本机保存的每日应用流量和采集诊断记录，不能撤销。")
         }
         .confirmationDialog(
             "启用分钟级数据保留？",

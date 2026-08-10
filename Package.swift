@@ -15,15 +15,11 @@ let package = Package(
     targets: [
         .target(
             name: "ByteTraceCore",
-            resources: [
-                .copy("Resources/public_suffix_list.dat")
-            ],
             linkerSettings: [.linkedFramework("SystemConfiguration")]
         ),
         .executableTarget(
             name: "ByteTraceApp",
-            dependencies: ["ByteTraceCore"],
-            linkerSettings: [.linkedFramework("Security")]
+            dependencies: ["ByteTraceCore"]
         ),
         .executableTarget(
             name: "ByteTraceProbe",

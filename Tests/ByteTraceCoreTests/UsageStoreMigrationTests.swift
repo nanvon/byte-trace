@@ -85,16 +85,6 @@ final class UsageStoreMigrationTests: XCTestCase {
         try seedVersionFiveUsage(at: url)
         let store = try UsageStore(databaseURL: url)
         let migratedDatabase = try SQLiteDatabase(url: url)
-        XCTAssertEqual(
-            try migratedDatabase.scalarInt64("PRAGMA user_version;"),
-            UsageStore.schemaVersion
-        )
-        XCTAssertEqual(
-            try migratedDatabase.scalarInt64(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('mihomo_site_daily_usage', 'mihomo_site_buckets');"
-            ),
-            2
-        )
         try migratedDatabase.execute(
             """
             INSERT INTO daily_usage (
