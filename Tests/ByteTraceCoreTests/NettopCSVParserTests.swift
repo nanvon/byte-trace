@@ -13,7 +13,7 @@ final class NettopCSVParserTests: XCTestCase {
         20:00:01.000,Dia.1,,,3,4,
         """
 
-        var parser = NettopCSVParser()
+        var parser = NettopCSVParser(mode: .processSummary)
         var events: [NettopParserEvent] = []
         let data = Data(input.utf8)
 
@@ -58,7 +58,7 @@ final class NettopCSVParserTests: XCTestCase {
         \(header)20:00:01.000,"Browser, Helper ""X"".1",,,5,6,
         """
 
-        var parser = NettopCSVParser()
+        var parser = NettopCSVParser(mode: .processSummary)
         let events = parser.consume(Data(input.utf8)) + parser.finish()
 
         guard case let .frameCompleted(_, deltas, false) = events.last else {
@@ -134,7 +134,7 @@ final class NettopCSVParserTests: XCTestCase {
         20:00:01.000,tcp4 198.18.0.1:59051<->91.108.56.139:443,utun4,Established,3,4,
         """
 
-        var parser = NettopCSVParser()
+        var parser = NettopCSVParser(mode: .connections)
         let events = parser.consume(Data(input.utf8)) + parser.finish()
 
         XCTAssertEqual(parser.completeFrameCount, 2)
@@ -147,6 +147,8 @@ final class NettopCSVParserTests: XCTestCase {
         XCTAssertEqual(deltas.first?.uploadBytes, 4)
         XCTAssertEqual(deltas.first?.interface, "utun4")
         XCTAssertEqual(deltas.first?.connectionTarget, "91.108.56.139:443")
+        XCTAssertEqual(deltas.first?.localEndpoint, NettopEndpoint(host: "198.18.0.1", port: 59051))
+        XCTAssertEqual(deltas.first?.remoteEndpoint, NettopEndpoint(host: "91.108.56.139", port: 443))
     }
 
     func testLoopbackConnectionCarriesInterfaceAndTarget() {
@@ -159,7 +161,7 @@ final class NettopCSVParserTests: XCTestCase {
         20:00:01.000,tcp4 127.0.0.1:57123<->127.0.0.1:59169,lo0,Established,5,6,
         """
 
-        var parser = NettopCSVParser()
+        var parser = NettopCSVParser(mode: .connections)
         let events = parser.consume(Data(input.utf8)) + parser.finish()
 
         guard case let .frameCompleted(_, deltas, false) = events.last else {
@@ -167,6 +169,9 @@ final class NettopCSVParserTests: XCTestCase {
         }
         XCTAssertEqual(deltas.first?.interface, "lo0")
         XCTAssertEqual(deltas.first?.connectionTarget, "127.0.0.1:59169")
+        XCTAssertEqual(deltas.first?.localEndpoint, NettopEndpoint(host: "127.0.0.1", port: 57123))
+        XCTAssertEqual(deltas.first?.remoteEndpoint, NettopEndpoint(host: "127.0.0.1", port: 59169))
+        XCTAssertEqual(deltas.first?.connectionState, "Established")
         XCTAssertEqual(deltas.first?.downloadBytes, 5)
     }
 
@@ -180,7 +185,7 @@ final class NettopCSVParserTests: XCTestCase {
         20:00:01.000,tcp4 127.0.0.1:8021<->*:*,lo0,Listen,,,
         """
 
-        var parser = NettopCSVParser()
+        var parser = NettopCSVParser(mode: .connections)
         let events = parser.consume(Data(input.utf8)) + parser.finish()
 
         XCTAssertEqual(parser.malformedRowCount, 0)
@@ -200,7 +205,7 @@ final class NettopCSVParserTests: XCTestCase {
         20:00:01.000,Dia.1,,,3,4,
         """
 
-        var parser = NettopCSVParser()
+        var parser = NettopCSVParser(mode: .processSummary)
         let events = parser.consume(Data(input.utf8)) + parser.finish()
 
         guard case let .frameCompleted(_, deltas, false) = events.last else {
@@ -227,7 +232,7 @@ final class NettopCSVParserTests: XCTestCase {
         20:00:01.000,tcp4 198.18.0.1:59051<->91.108.56.139:443,utun4,Established,5,6,
         """
 
-        var parser = NettopCSVParser()
+        var parser = NettopCSVParser(mode: .connections)
         let events = parser.consume(Data(input.utf8)) + parser.finish()
 
         XCTAssertEqual(parser.malformedRowCount, 0)
@@ -239,6 +244,24 @@ final class NettopCSVParserTests: XCTestCase {
         XCTAssertEqual(deltas.first?.downloadBytes, 5)
         XCTAssertEqual(deltas.first?.interface, "utun4")
         XCTAssertEqual(deltas.first?.connectionTarget, "91.108.56.139:443")
+    }
+
+    func testConnectionModeDoesNotFallBackToProcessRows() {
+        let input = """
+        time,,interface,state,bytes_in,bytes_out,
+        20:00:00.000,Dia.1,,,100,200,
+        time,,interface,state,bytes_in,bytes_out,
+        20:00:01.000,Dia.1,,,3,4,
+        """
+
+        var parser = NettopCSVParser(mode: .connections)
+        let events = parser.consume(Data(input.utf8)) + parser.finish()
+
+        guard case let .frameCompleted(rowCount, deltas, false) = events.last else {
+            return XCTFail("expected a collecting frame")
+        }
+        XCTAssertEqual(rowCount, 0)
+        XCTAssertTrue(deltas.isEmpty)
     }
 
     func testIPv6LoopbackTargetParsing() {
@@ -253,7 +276,7 @@ final class NettopCSVParserTests: XCTestCase {
         20:00:01.000,tcp6 fe80::8af:5f9:677:e110%en0.60929<->fe80::8af:5f9:677:e110%en0.50231,en0,Established,9,10,
         """
 
-        var parser = NettopCSVParser()
+        var parser = NettopCSVParser(mode: .connections)
         let events = parser.consume(Data(input.utf8)) + parser.finish()
 
         guard case let .frameCompleted(_, deltas, false) = events.last else {

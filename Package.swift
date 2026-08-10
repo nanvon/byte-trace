@@ -13,7 +13,10 @@ let package = Package(
         .executable(name: "ByteTraceApp", targets: ["ByteTraceApp"])
     ],
     targets: [
-        .target(name: "ByteTraceCore"),
+        .target(
+            name: "ByteTraceCore",
+            linkerSettings: [.linkedFramework("SystemConfiguration")]
+        ),
         .executableTarget(
             name: "ByteTraceApp",
             dependencies: ["ByteTraceCore"]

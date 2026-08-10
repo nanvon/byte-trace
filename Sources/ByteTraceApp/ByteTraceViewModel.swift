@@ -177,19 +177,28 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     private static let showSystemProcessesKey = "ByteTrace.showSystemProcesses"
     private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
+    private enum CollectorLane: Sendable {
+        case external
+        case loopback
+    }
+
     private let collector: NettopCollector
+    private let loopbackCollector: NettopCollector
     private let resolver: SystemProcessIdentityResolver
     private let attributionCache: ProcessAttributionCache
     private let store: UsageStore?
     private let aggregator: UsageAggregator?
-    private let trafficModeDetector = TrafficModeDetector()
-    private let trafficFilter = TrafficFilter()
-    private var trafficMode: TrafficMode = .compatible
-    private var modeTimer: Timer?
+    private let proxyEndpointMonitor = SystemProxyEndpointMonitor()
+    private let loopbackReducer = LoopbackTrafficReducer()
     private var flushTimer: Timer?
     private var restartTimer: Timer?
     private var restartAttempt = 0
     private var isStarted = false
+    private var loopbackRestartTimer: Timer?
+    private var loopbackRestartAttempt = 0
+    private var isLoopbackStarted = false
+    private var loopbackCollectorCompatible = true
+    private var loopbackLastError: String?
     private var wantsCollection = false
     private var isSleeping = false
     private let networkPathMonitor = NWPathMonitor()
@@ -202,9 +211,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var lastUIRefreshDate: Date?
 
     private static let restartDelays: [TimeInterval] = [1, 2, 5, 10, 30]
-    /// 隧道接口检测周期：utun 出现/消失（代理软件启停）时切换采集过滤模式。
-    nonisolated private static let trafficModePollInterval: TimeInterval = 30
-
     /// 诊断事件保留时长（分钟桶保留策略之外的独立上限）。
     nonisolated private static let collectorEventRetentionInterval: TimeInterval = 30 * 24 * 60 * 60
     /// 单次删除超过该阈值才 VACUUM（阻塞操作，放后台）。
@@ -212,7 +218,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     override init() {
         databaseURL = UsageStore.defaultDatabaseURL(bundleIdentifier: Self.bundleIdentifier)
-        collector = NettopCollector()
+        collector = NettopCollector(scope: .externalProcessSummary)
+        loopbackCollector = NettopCollector(scope: .loopbackConnections)
         resolver = SystemProcessIdentityResolver()
         attributionCache = ProcessAttributionCache()
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
@@ -246,6 +253,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             status = .failed(storageError)
         }
         configureCollector()
+        configureProxyEndpointMonitor()
         registerWorkspaceNotifications()
         registerNetworkPathMonitor()
         refresh()
@@ -312,10 +320,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
         wantsCollection = true
         lastError = nil
-        trafficMode = trafficModeDetector.currentMode()
-        startModeTimer()
+        loopbackLastError = nil
+        loopbackCollectorCompatible = true
+        proxyEndpointMonitor.start()
         startFlushTimer()
         startCollectorProcess()
+        startLoopbackCollectorProcess()
     }
 
     func stop() {
@@ -324,14 +334,20 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         restartTimer?.invalidate()
         restartTimer = nil
         restartAttempt = 0
+        loopbackRestartTimer?.invalidate()
+        loopbackRestartTimer = nil
+        loopbackRestartAttempt = 0
         isStarted = false
+        isLoopbackStarted = false
         flushTimer?.invalidate()
         flushTimer = nil
-        modeTimer?.invalidate()
-        modeTimer = nil
         if collector.state != .stopped {
             collector.stop()
         }
+        if loopbackCollector.state != .stopped {
+            loopbackCollector.stop()
+        }
+        proxyEndpointMonitor.stop()
         flushAfterStop()
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
@@ -342,14 +358,19 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         isSleeping = false
         restartTimer?.invalidate()
         restartTimer = nil
+        loopbackRestartTimer?.invalidate()
+        loopbackRestartTimer = nil
         isStarted = false
+        isLoopbackStarted = false
         flushTimer?.invalidate()
         flushTimer = nil
-        modeTimer?.invalidate()
-        modeTimer = nil
         if collector.state != .stopped {
             collector.stop()
         }
+        if loopbackCollector.state != .stopped {
+            loopbackCollector.stop()
+        }
+        proxyEndpointMonitor.stop()
         // 退出路径必须同步排空主队列：采集器最后一帧事件是 main.async 投递的，
         // 应用终止后排队 block 不保证执行，这里转一圈 runloop 让最后一帧先入聚合器，
         // 随后 flushNow 才能把它落库（仅退出瞬间发生一次，代价可忽略）。
@@ -461,7 +482,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
         let document = ByteTraceExportDocument(
-            formatVersion: 2,
+            formatVersion: 3,
+            accountingVersion: UsageStore.accountingVersion,
             product: "ByteTrace",
             exportedAt: end,
             range: ByteTraceExportDocument.Range(
@@ -543,7 +565,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     private func configureCollector() {
         collector.onEvent = { [weak self] event in
-            self?.receive(event)
+            self?.receive(event, lane: .external)
+        }
+        loopbackCollector.onEvent = { [weak self] event in
+            self?.receive(event, lane: .loopback)
+        }
+    }
+
+    private func configureProxyEndpointMonitor() {
+        proxyEndpointMonitor.setChangeHandler { [weak self] endpoints in
+            self?.receiveProxyEndpoints(endpoints)
         }
     }
 
@@ -581,40 +612,93 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         networkPathMonitor.start(queue: networkPathMonitorQueue)
     }
 
-    private nonisolated func receive(_ event: NettopCollectorEvent) {
+    private nonisolated func receive(_ event: NettopCollectorEvent, lane: CollectorLane) {
         Task { @MainActor [weak self] in
-            self?.handle(event)
+            self?.handle(event, lane: lane)
         }
     }
 
-    private func handle(_ event: NettopCollectorEvent) {
+    private nonisolated func receiveProxyEndpoints(_ endpoints: Set<NettopEndpoint>) {
+        Task { @MainActor [weak self] in
+            self?.handleProxyEndpointsChanged(endpoints)
+        }
+    }
+
+    private func handleProxyEndpointsChanged(_ endpoints: Set<NettopEndpoint>) {
+        guard wantsCollection else { return }
+        if endpoints.isEmpty {
+            loopbackRestartTimer?.invalidate()
+            loopbackRestartTimer = nil
+            loopbackRestartAttempt = 0
+            isLoopbackStarted = false
+            if loopbackCollector.state != .stopped {
+                loopbackCollector.stop()
+            }
+            loopbackLastError = nil
+            if status == .collecting || status == .baseline {
+                lastError = nil
+            }
+            recordCollectorEvent(kind: "system_proxy_disabled")
+        } else {
+            recordCollectorEvent(
+                kind: "system_proxy_enabled",
+                details: "loopback_endpoint_count=\(endpoints.count)"
+            )
+            startLoopbackCollectorProcess()
+        }
+    }
+
+    private func handle(_ event: NettopCollectorEvent, lane: CollectorLane) {
         switch event {
         case .started:
-            status = .starting
+            if lane == .external {
+                status = .starting
+            }
 
         case let .parser(parserEvent):
-            handle(parserEvent)
+            handle(parserEvent, lane: lane)
 
         case let .stderr(message):
             guard !message.isEmpty else { return }
-            lastError = message
-            recordCollectorEvent(kind: "collector_stderr", details: message)
+            if lane == .external {
+                lastError = message
+            }
+            recordCollectorEvent(
+                kind: lane == .external ? "collector_stderr" : "loopback_collector_stderr",
+                details: message
+            )
 
         case let .exited(statusCode):
-            isStarted = false
-            if wantsCollection, !isSleeping, networkPathSatisfied {
-                let details = "nettop 已退出（状态码 \(statusCode)），准备重连"
-                lastError = "统计中断，正在自动恢复…"
-                status = .reconnecting
-                recordCollectorEvent(kind: "collector_exited", details: details)
-                collector.stop()
-                flushNow()
-                scheduleRestart()
-            } else {
-                if status != .incompatible {
-                    status = .stopped
+            if lane == .external {
+                isStarted = false
+                if wantsCollection, !isSleeping, networkPathSatisfied {
+                    let details = "外部流量 nettop 已退出（状态码 \(statusCode)），准备重连"
+                    lastError = "统计中断，正在自动恢复…"
+                    status = .reconnecting
+                    recordCollectorEvent(kind: "collector_exited", details: details)
+                    collector.stop()
+                    flushNow()
+                    scheduleRestart()
+                } else {
+                    if status != .incompatible {
+                        status = .stopped
+                    }
+                    recordCollectorEvent(kind: "collector_exited")
                 }
-                recordCollectorEvent(kind: "collector_exited")
+            } else {
+                isLoopbackStarted = false
+                if wantsCollection,
+                   !isSleeping,
+                   networkPathSatisfied,
+                   loopbackCollectorCompatible,
+                   !proxyEndpointMonitor.currentLoopbackEndpoints.isEmpty {
+                    recordCollectorEvent(
+                        kind: "loopback_collector_exited",
+                        details: "status=\(statusCode)"
+                    )
+                    loopbackCollector.stop()
+                    scheduleLoopbackRestart()
+                }
             }
         }
     }
@@ -634,9 +718,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         restartTimer?.invalidate()
         restartTimer = nil
         restartAttempt = 0
+        loopbackRestartTimer?.invalidate()
+        loopbackRestartTimer = nil
+        loopbackRestartAttempt = 0
         isStarted = false
+        isLoopbackStarted = false
         if collector.state != .stopped {
             collector.stop()
+        }
+        if loopbackCollector.state != .stopped {
+            loopbackCollector.stop()
         }
         flushAfterStop()
 
@@ -648,6 +739,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 details: signature.isEmpty ? "network_available" : signature
             )
             scheduleRestart()
+            scheduleLoopbackRestart()
         } else {
             status = .stopped
             lastError = "网络不可用，已暂停采集，恢复网络后会自动继续。"
@@ -655,18 +747,30 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func handle(_ event: NettopParserEvent) {
+    private func handle(_ event: NettopParserEvent, lane: CollectorLane) {
         switch event {
         case let .frameCompleted(_, deltas, isBaseline):
-            if isStarted {
+            if lane == .external, isStarted {
                 status = isBaseline ? .baseline : .collecting
             }
             guard !isBaseline else { return }
-            if isStarted {
+            if lane == .external, isStarted {
                 restartAttempt = 0
-                lastError = nil
+                lastError = loopbackLastError
+            } else if lane == .loopback, isLoopbackStarted {
+                loopbackRestartAttempt = 0
             }
-            for delta in deltas {
+
+            let acceptedDeltas: [NettopDelta]
+            if lane == .loopback {
+                acceptedDeltas = loopbackReducer.reduce(
+                    deltas,
+                    proxyEndpoints: proxyEndpointMonitor.currentLoopbackEndpoints
+                )
+            } else {
+                acceptedDeltas = deltas
+            }
+            for delta in acceptedDeltas {
                 ingest(delta)
             }
 
@@ -678,26 +782,40 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
         case let .incompatibleSchema(missingColumns):
             let message = "CSV 格式不兼容，缺少：\(missingColumns.joined(separator: "、"))"
-            wantsCollection = false
-            restartTimer?.invalidate()
-            restartTimer = nil
-            isStarted = false
-            if collector.state != .stopped {
-                collector.stop()
+            if lane == .external {
+                wantsCollection = false
+                restartTimer?.invalidate()
+                restartTimer = nil
+                loopbackRestartTimer?.invalidate()
+                loopbackRestartTimer = nil
+                isStarted = false
+                isLoopbackStarted = false
+                if collector.state != .stopped {
+                    collector.stop()
+                }
+                if loopbackCollector.state != .stopped {
+                    loopbackCollector.stop()
+                }
+                proxyEndpointMonitor.stop()
+                status = .incompatible
+                lastError = message
+                recordCollectorEvent(kind: "parse_schema_changed", details: message)
+            } else {
+                loopbackCollectorCompatible = false
+                isLoopbackStarted = false
+                loopbackRestartTimer?.invalidate()
+                loopbackRestartTimer = nil
+                if loopbackCollector.state != .stopped {
+                    loopbackCollector.stop()
+                }
+                loopbackLastError = "系统代理流量暂时无法统计：\(message)"
+                lastError = loopbackLastError
+                recordCollectorEvent(kind: "loopback_parse_schema_changed", details: message)
             }
-            status = .incompatible
-            lastError = message
-            recordCollectorEvent(kind: "parse_schema_changed", details: message)
         }
     }
 
     private func ingest(_ delta: NettopDelta) {
-        // 干净模式（本机存在 TUN 隧道接口）丢弃回环目标流量（Electron 假流量、
-        // 代理入站双计）；兼容模式（无 TUN）不过滤，保持全量采集口径。
-        if trafficMode == .clean, trafficFilter.shouldDiscard(delta) {
-            return
-        }
-
         let token = NettopProcessToken(rawValue: delta.processName)
         let identity = resolver.resolve(token)
         let attributed = attributionCache.attribute(identity)
@@ -736,30 +854,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         flushTimer = timer
     }
 
-    private func startModeTimer() {
-        modeTimer?.invalidate()
-        let timer = Timer(
-            timeInterval: Self.trafficModePollInterval,
-            target: self,
-            selector: #selector(modeTimerFired),
-            userInfo: nil,
-            repeats: true
-        )
-        RunLoop.main.add(timer, forMode: .common)
-        modeTimer = timer
-    }
-
-    @objc private func modeTimerFired(_ timer: Timer) {
-        let mode = trafficModeDetector.currentMode()
-        guard mode != trafficMode else { return }
-        let oldMode = trafficMode
-        trafficMode = mode
-        recordCollectorEvent(
-            kind: "traffic_mode_changed",
-            details: "\(oldMode) -> \(mode)"
-        )
-    }
-
     @objc private func flushTimerFired(_ timer: Timer) {
         flushNow()
     }
@@ -770,15 +864,27 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         startCollectorProcess()
     }
 
+    @objc private func loopbackRestartTimerFired(_ timer: Timer) {
+        loopbackRestartTimer?.invalidate()
+        loopbackRestartTimer = nil
+        startLoopbackCollectorProcess()
+    }
+
     @objc private func handleWillSleep(_ notification: Notification) {
         guard wantsCollection else { return }
 
         isSleeping = true
         restartTimer?.invalidate()
         restartTimer = nil
+        loopbackRestartTimer?.invalidate()
+        loopbackRestartTimer = nil
         isStarted = false
+        isLoopbackStarted = false
         if collector.state != .stopped {
             collector.stop()
+        }
+        if loopbackCollector.state != .stopped {
+            loopbackCollector.stop()
         }
         flushAfterStop()
         status = .stopped
@@ -790,9 +896,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
         isSleeping = false
         restartAttempt = 0
+        loopbackRestartAttempt = 0
         lastError = nil
         status = .reconnecting
         startCollectorProcess()
+        startLoopbackCollectorProcess()
     }
 
     private func startCollectorProcess() {
@@ -813,6 +921,30 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
+    private func startLoopbackCollectorProcess() {
+        guard wantsCollection,
+              !isSleeping,
+              networkPathSatisfied,
+              loopbackCollectorCompatible,
+              !proxyEndpointMonitor.currentLoopbackEndpoints.isEmpty,
+              !isLoopbackStarted else {
+            return
+        }
+
+        do {
+            try loopbackCollector.start()
+            isLoopbackStarted = true
+            recordCollectorEvent(kind: "loopback_collector_started")
+        } catch {
+            isLoopbackStarted = false
+            recordCollectorEvent(
+                kind: "loopback_collector_error",
+                details: error.localizedDescription
+            )
+            scheduleLoopbackRestart()
+        }
+    }
+
     private func scheduleRestart() {
         guard wantsCollection, !isSleeping, networkPathSatisfied, restartTimer == nil else { return }
 
@@ -830,6 +962,34 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         restartTimer = timer
         recordCollectorEvent(
             kind: "collector_backoff",
+            details: "retry_in_seconds=\(Int(delay))"
+        )
+    }
+
+    private func scheduleLoopbackRestart() {
+        guard wantsCollection,
+              !isSleeping,
+              networkPathSatisfied,
+              loopbackCollectorCompatible,
+              !proxyEndpointMonitor.currentLoopbackEndpoints.isEmpty,
+              loopbackRestartTimer == nil else {
+            return
+        }
+
+        let index = min(loopbackRestartAttempt, Self.restartDelays.count - 1)
+        let delay = Self.restartDelays[index]
+        loopbackRestartAttempt = min(loopbackRestartAttempt + 1, Self.restartDelays.count - 1)
+        let timer = Timer(
+            timeInterval: delay,
+            target: self,
+            selector: #selector(loopbackRestartTimerFired),
+            userInfo: nil,
+            repeats: false
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        loopbackRestartTimer = timer
+        recordCollectorEvent(
+            kind: "loopback_collector_backoff",
             details: "retry_in_seconds=\(Int(delay))"
         )
     }

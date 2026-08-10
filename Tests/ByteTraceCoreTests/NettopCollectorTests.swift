@@ -3,24 +3,30 @@ import XCTest
 @testable import ByteTraceCore
 
 final class NettopCollectorTests: XCTestCase {
-    func testArgumentsDoNotFilterLoopback() {
-        // 不带 -t 接口过滤：应用走 127.0.0.1 代理的流量在 lo0 上，
-        // 过滤回环会让代理环境下的应用统计不到（曾以 -t external 修复虚高、
-        // 但误伤真实代理流量，且 macOS 27 下 -t 实测失效）。
-        XCTAssertEqual(NettopCollector.arguments.first, "-n")
-        XCTAssertFalse(
-            NettopCollector.arguments.contains("-t"),
-            "采集命令不应带 -t 接口类型过滤，否则代理流量（lo0）统计不到"
-        )
+    func testExternalCollectorUsesLowPowerProcessSummary() {
+        let arguments = NettopCollectorScope.externalProcessSummary.arguments
+        XCTAssertTrue(arguments.contains("-P"))
+        XCTAssertEqual(value(after: "-t", in: arguments), "external")
+        XCTAssertEqual(value(after: "-s", in: arguments), "5")
+        XCTAssertEqual(value(after: "-J", in: arguments), "time,interface,state,bytes_in,bytes_out")
     }
 
-    func testArgumentsUseConnectionLevelOutput() {
-        // 不带 -P：输出「进程行 → 连接行」树形结构，连接行带接口列，
-        // 供 TrafficFilter 按连接目标做工具无关的回环过滤。
-        XCTAssertFalse(
-            NettopCollector.arguments.contains("-P"),
-            "采集命令不应带 -P 进程汇总，否则拿不到连接行接口/目标信息"
-        )
-        XCTAssertEqual(NettopCollector.arguments, ["-n", "-d", "-x", "-L", "0", "-s", "5"])
+    func testLoopbackCollectorKeepsConnectionDetailsOnlyForLoopback() {
+        let arguments = NettopCollectorScope.loopbackConnections.arguments
+        XCTAssertFalse(arguments.contains("-P"))
+        XCTAssertEqual(value(after: "-t", in: arguments), "loopback")
+        XCTAssertEqual(value(after: "-s", in: arguments), "1")
+        XCTAssertEqual(value(after: "-J", in: arguments), "time,interface,state,bytes_in,bytes_out")
+    }
+
+    func testDefaultCollectorUsesExternalProcessSummary() {
+        XCTAssertEqual(NettopCollector.arguments, NettopCollectorScope.externalProcessSummary.arguments)
+    }
+
+    private func value(after option: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: option), arguments.indices.contains(index + 1) else {
+            return nil
+        }
+        return arguments[index + 1]
     }
 }

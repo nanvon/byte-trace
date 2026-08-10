@@ -31,9 +31,34 @@ public enum NettopCollectorError: LocalizedError {
     }
 }
 
+public enum NettopCollectorScope: Equatable, Sendable {
+    case externalProcessSummary
+    case loopbackConnections
+
+    public var arguments: [String] {
+        let common = ["-n", "-d", "-x", "-L", "0"]
+        let columns = ["-J", "time,interface,state,bytes_in,bytes_out"]
+        switch self {
+        case .externalProcessSummary:
+            return ["-n", "-P", "-d", "-x", "-L", "0", "-s", "5", "-t", "external"] + columns
+        case .loopbackConnections:
+            return common + ["-s", "1", "-t", "loopback"] + columns
+        }
+    }
+
+    var parserMode: NettopCSVParserMode {
+        switch self {
+        case .externalProcessSummary: return .processSummary
+        case .loopbackConnections: return .connections
+        }
+    }
+}
+
 public final class NettopCollector: @unchecked Sendable {
     public static let executablePath = "/usr/bin/nettop"
-    public static let arguments = ["-n", "-d", "-x", "-L", "0", "-s", "5"]
+    public static let arguments = NettopCollectorScope.externalProcessSummary.arguments
+
+    public let scope: NettopCollectorScope
 
     public var onEvent: ((NettopCollectorEvent) -> Void)?
 
@@ -44,11 +69,14 @@ public final class NettopCollector: @unchecked Sendable {
     private var processIdentifier: Int32?
     private var readGroup: DispatchGroup?
     private var stdinPipe: Pipe?
-    private var parser = NettopCSVParser()
+    private var parser: NettopCSVParser
     private var didReportExit = false
     private var stderrData = Data()
 
-    public init() {}
+    public init(scope: NettopCollectorScope = .externalProcessSummary) {
+        self.scope = scope
+        self.parser = NettopCSVParser(mode: scope.parserMode)
+    }
 
     public var state: NettopCollectorState {
         stateLock.lock()
@@ -69,14 +97,20 @@ public final class NettopCollector: @unchecked Sendable {
             throw NettopCollectorError.alreadyRunning
         }
         currentState = .starting
-        parser = NettopCSVParser()
+        parser = NettopCSVParser(mode: scope.parserMode)
         stderrData.removeAll(keepingCapacity: false)
         didReportExit = false
         stateLock.unlock()
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.executablePath)
-        process.arguments = Self.arguments
+        process.arguments = scope.arguments
+        // `-L 0` 是无限 CSV 日志模式。输出到普通 Pipe 时 nettop 会做整块缓冲；
+        // 精简 `-J` 列后，低流量场景可能数分钟都凑不满缓冲区，应用便收不到帧。
+        // Apple 的 NSUnbufferedIO 只关闭子进程 stdio 缓冲，不改变 CSV 格式或采样频率。
+        var environment = ProcessInfo.processInfo.environment
+        environment["NSUnbufferedIO"] = "YES"
+        process.environment = environment
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -216,15 +250,18 @@ public final class NettopCollector: @unchecked Sendable {
     }
 
     private static func readUntilEOF(_ handle: FileHandle, onData: @escaping (Data) -> Void) {
+        let descriptor = handle.fileDescriptor
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
-            do {
-                guard let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty else {
-                    return
-                }
-                onData(chunk)
-            } catch {
-                return
+            let byteCount = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(descriptor, bytes.baseAddress, bytes.count)
             }
+            if byteCount > 0 {
+                onData(Data(buffer.prefix(byteCount)))
+                continue
+            }
+            if byteCount < 0, errno == EINTR { continue }
+            return
         }
     }
 

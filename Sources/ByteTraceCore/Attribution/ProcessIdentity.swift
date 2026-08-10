@@ -134,7 +134,8 @@ public struct SystemProcessIdentityResolver: Sendable {
         cache.lock.lock()
         if let entry = cache.entries[pid],
            now.timeIntervalSince(entry.cachedAt) < cacheTTL,
-           entry.identity.processStartTime == currentStartTime {
+           entry.identity.nettopProcessName == token.processName,
+           (currentStartTime == nil || entry.identity.processStartTime == currentStartTime) {
             cache.lock.unlock()
             return entry.identity
         }

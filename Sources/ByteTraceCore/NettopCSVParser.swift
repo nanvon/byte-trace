@@ -1,5 +1,93 @@
 import Foundation
 
+public struct NettopEndpoint: Equatable, Hashable, Sendable {
+    public let host: String
+    public let port: UInt16?
+
+    public init(host: String, port: UInt16?) {
+        self.host = Self.canonicalHost(host)
+        self.port = port
+    }
+
+    public var isLoopback: Bool {
+        if host == "::1" { return true }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        return octets.count == 4
+            && octets.first == "127"
+            && octets.allSatisfy { UInt8($0) != nil }
+    }
+
+    public static func parse(_ rawValue: String) -> NettopEndpoint? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value != "*", value != "*:*", value != "*.*" else {
+            return nil
+        }
+
+        if value.hasPrefix("["), let closingBracket = value.firstIndex(of: "]") {
+            let host = String(value[value.index(after: value.startIndex)..<closingBracket])
+            let suffix = value[value.index(after: closingBracket)...]
+            let port = Self.portValue(String(suffix).trimmingCharacters(in: CharacterSet(charactersIn: ":.")))
+            return NettopEndpoint(host: host, port: port)
+        }
+
+        if let ipv4 = parseIPv4WithPort(value) {
+            return ipv4
+        }
+
+        // nettop 的无方括号 IPv6 使用最后一个点分隔端口，例如 ::1.7890、
+        // fe80::1%en0.50231；不能把最后一个冒号后的十六进制段误当端口。
+        if value.contains(":"), let dot = value.lastIndex(of: ".") {
+            let host = String(value[..<dot])
+            let portText = String(value[value.index(after: dot)...])
+            if let port = portValue(portText) {
+                return NettopEndpoint(host: host, port: port)
+            }
+        }
+
+        if value.contains(":") {
+            return NettopEndpoint(host: value, port: nil)
+        }
+        return nil
+    }
+
+    private static func parseIPv4WithPort(_ value: String) -> NettopEndpoint? {
+        if let colon = value.lastIndex(of: ":") {
+            let host = String(value[..<colon])
+            let portText = String(value[value.index(after: colon)...])
+            if isIPv4(host), let port = portValue(portText) {
+                return NettopEndpoint(host: host, port: port)
+            }
+        }
+
+        if let dot = value.lastIndex(of: ".") {
+            let host = String(value[..<dot])
+            let portText = String(value[value.index(after: dot)...])
+            if isIPv4(host), let port = portValue(portText) {
+                return NettopEndpoint(host: host, port: port)
+            }
+        }
+        return nil
+    }
+
+    private static func isIPv4(_ value: String) -> Bool {
+        let octets = value.split(separator: ".", omittingEmptySubsequences: false)
+        return octets.count == 4 && octets.allSatisfy { UInt8($0) != nil }
+    }
+
+    private static func portValue(_ value: String) -> UInt16? {
+        guard let port = UInt16(value), port > 0 else { return nil }
+        return port
+    }
+
+    private static func canonicalHost(_ rawValue: String) -> String {
+        let value = rawValue
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+        if value == "0:0:0:0:0:0:0:1" { return "::1" }
+        return value
+    }
+}
+
 public struct NettopDelta: Equatable, Sendable {
     public let sampledAt: String
     public let processName: String
@@ -9,6 +97,9 @@ public struct NettopDelta: Equatable, Sendable {
     public let interface: String?
     /// 连接行 `<->` 右侧的目标描述（仅用于内存中的过滤判断，不落库不展示）。
     public let connectionTarget: String?
+    public let localEndpoint: NettopEndpoint?
+    public let remoteEndpoint: NettopEndpoint?
+    public let connectionState: String?
 
     public init(
         sampledAt: String,
@@ -16,7 +107,10 @@ public struct NettopDelta: Equatable, Sendable {
         downloadBytes: Int64,
         uploadBytes: Int64,
         interface: String? = nil,
-        connectionTarget: String? = nil
+        connectionTarget: String? = nil,
+        localEndpoint: NettopEndpoint? = nil,
+        remoteEndpoint: NettopEndpoint? = nil,
+        connectionState: String? = nil
     ) {
         self.sampledAt = sampledAt
         self.processName = processName
@@ -24,7 +118,17 @@ public struct NettopDelta: Equatable, Sendable {
         self.uploadBytes = uploadBytes
         self.interface = interface
         self.connectionTarget = connectionTarget
+        self.localEndpoint = localEndpoint
+        self.remoteEndpoint = remoteEndpoint
+        self.connectionState = connectionState
     }
+}
+
+public enum NettopCSVParserMode: Equatable, Sendable {
+    /// 兼容测试和旧输入；正式采集器必须显式选择下面两种模式之一。
+    case automatic
+    case processSummary
+    case connections
 }
 
 public enum NettopParserState: Equatable, Sendable {
@@ -48,6 +152,7 @@ public struct NettopCSVParser: Sendable {
         let bytesInIndex: Int
         let bytesOutIndex: Int
         let interfaceIndex: Int?
+        let stateIndex: Int?
     }
 
     private struct ParsedRow: Sendable {
@@ -57,6 +162,9 @@ public struct NettopCSVParser: Sendable {
         let uploadBytes: Int64
         let interface: String?
         let connectionTarget: String?
+        let localEndpoint: NettopEndpoint?
+        let remoteEndpoint: NettopEndpoint?
+        let connectionState: String?
     }
 
     private var lineBuffer = Data()
@@ -66,12 +174,15 @@ public struct NettopCSVParser: Sendable {
     private var currentProcessName: String?
     private var hasBaseline = false
     private var didFinish = false
+    private let mode: NettopCSVParserMode
 
     public private(set) var state: NettopParserState = .waitingForHeader
     public private(set) var completeFrameCount = 0
     public private(set) var malformedRowCount = 0
 
-    public init() {}
+    public init(mode: NettopCSVParserMode = .automatic) {
+        self.mode = mode
+    }
 
     public mutating func consume(_ data: Data) -> [NettopParserEvent] {
         guard !didFinish, !data.isEmpty else { return [] }
@@ -128,12 +239,14 @@ public struct NettopCSVParser: Sendable {
         // 连接行（第 2 列以 tcp/udp/ipv/icmp 等开头）携带字节并归属到最近出现的进程行。
         // 部分连接行 interface 列为空（如 `udp4 *:*<->*:*`），同样按连接行处理但不产出流量。
         // 兜底：若整帧都没有连接行（旧 -P 风格输出），帧完成时回退用进程行产出 delta。
-        if row.interface == nil {
-            guard !Self.isConnectionDescription(row.processName) else { return [] }
+        let isConnection = Self.isConnectionDescription(row.processName)
+        if !isConnection {
             currentProcessName = row.processName
             currentProcessRows.append(row)
             return []
         }
+        guard mode != .processSummary else { return [] }
+        guard mode != .connections || row.interface != nil else { return [] }
         guard let currentProcessName else { return [] }
         let attributedRow = ParsedRow(
             sampledAt: row.sampledAt,
@@ -141,7 +254,10 @@ public struct NettopCSVParser: Sendable {
             downloadBytes: row.downloadBytes,
             uploadBytes: row.uploadBytes,
             interface: row.interface,
-            connectionTarget: row.connectionTarget
+            connectionTarget: row.connectionTarget,
+            localEndpoint: row.localEndpoint,
+            remoteEndpoint: row.remoteEndpoint,
+            connectionState: row.connectionState
         )
         currentRows.append(attributedRow)
         return []
@@ -150,10 +266,10 @@ public struct NettopCSVParser: Sendable {
     private mutating func beginFrame(with header: [String]) -> [NettopParserEvent] {
         var events = completeCurrentFrame()
 
-        guard let newSchema = Self.makeSchema(from: header) else {
+        guard let newSchema = makeSchema(from: header) else {
             schema = nil
             state = .incompatible
-            let missingColumns = Self.missingColumns(in: header)
+            let missingColumns = missingColumns(in: header)
             events.append(.incompatibleSchema(missingColumns: missingColumns))
             return events
         }
@@ -175,8 +291,15 @@ public struct NettopCSVParser: Sendable {
             return []
         }
 
-        // 有连接行 → 用连接行（已归属到进程）；整帧无连接行（旧 -P 风格）→ 回退用进程行。
-        let sourceRows = currentRows.isEmpty ? currentProcessRows : currentRows
+        let sourceRows: [ParsedRow]
+        switch mode {
+        case .automatic:
+            sourceRows = currentRows.isEmpty ? currentProcessRows : currentRows
+        case .processSummary:
+            sourceRows = currentProcessRows
+        case .connections:
+            sourceRows = currentRows
+        }
         let rows = sourceRows
         currentRows.removeAll(keepingCapacity: true)
         currentProcessRows.removeAll(keepingCapacity: true)
@@ -199,7 +322,10 @@ public struct NettopCSVParser: Sendable {
                     downloadBytes: row.downloadBytes,
                     uploadBytes: row.uploadBytes,
                     interface: row.interface,
-                    connectionTarget: row.connectionTarget
+                    connectionTarget: row.connectionTarget,
+                    localEndpoint: row.localEndpoint,
+                    remoteEndpoint: row.remoteEndpoint,
+                    connectionState: row.connectionState
                 )
             }
         }
@@ -223,13 +349,24 @@ public struct NettopCSVParser: Sendable {
             interface = value.isEmpty ? nil : value
         }
 
+        var connectionState: String?
+        if let stateIndex = schema.stateIndex, fields.indices.contains(stateIndex) {
+            let value = fields[stateIndex].trimmingCharacters(in: .whitespaces)
+            connectionState = value.isEmpty ? nil : value
+        }
+
+        let endpoints = Self.connectionEndpoints(in: fields[schema.processIndex])
+
         return ParsedRow(
             sampledAt: fields[0],
             processName: fields[schema.processIndex],
             downloadBytes: downloadBytes,
             uploadBytes: uploadBytes,
             interface: interface,
-            connectionTarget: interface == nil ? nil : Self.connectionTarget(in: fields[schema.processIndex])
+            connectionTarget: endpoints?.target,
+            localEndpoint: endpoints.flatMap { NettopEndpoint.parse($0.source) },
+            remoteEndpoint: endpoints.flatMap { NettopEndpoint.parse($0.target) },
+            connectionState: connectionState
         )
     }
 
@@ -241,10 +378,14 @@ public struct NettopCSVParser: Sendable {
     }
 
     /// 从连接行第 2 列（如 `tcp4 127.0.0.1:57123<->127.0.0.1:59169`）提取 `<->` 右侧目标。
-    private static func connectionTarget(in field: String) -> String? {
+    private static func connectionEndpoints(in field: String) -> (source: String, target: String)? {
         guard let range = field.range(of: "<->") else { return nil }
+        guard let space = field.firstIndex(of: " ") else { return nil }
+        let source = field[field.index(after: space)..<range.lowerBound]
+            .trimmingCharacters(in: .whitespaces)
         let target = field[range.upperBound...].trimmingCharacters(in: .whitespaces)
-        return target.isEmpty ? nil : target
+        guard !source.isEmpty, !target.isEmpty else { return nil }
+        return (source, target)
     }
 
     /// 第 2 列是否是连接描述（tcp4/udp4/tcp6/ipv6… 开头），用于区分进程行与连接行。
@@ -253,31 +394,34 @@ public struct NettopCSVParser: Sendable {
         return prefixes.contains { field.hasPrefix($0) }
     }
 
-    private static func makeSchema(from header: [String]) -> Schema? {
+    private func makeSchema(from header: [String]) -> Schema? {
         guard header.first == "time",
               let bytesInIndex = header.firstIndex(of: "bytes_in"),
               let bytesOutIndex = header.firstIndex(of: "bytes_out"),
-              let processIndex = processColumn(in: header) else {
+              let processIndex = Self.processColumn(in: header) else {
             return nil
         }
 
         let interfaceIndex = header.firstIndex(of: "interface")
+        if mode == .connections, interfaceIndex == nil { return nil }
 
         return Schema(
             columns: header,
             processIndex: processIndex,
             bytesInIndex: bytesInIndex,
             bytesOutIndex: bytesOutIndex,
-            interfaceIndex: interfaceIndex
+            interfaceIndex: interfaceIndex,
+            stateIndex: header.firstIndex(of: "state")
         )
     }
 
-    private static func missingColumns(in header: [String]) -> [String] {
+    private func missingColumns(in header: [String]) -> [String] {
         var missing: [String] = []
         if header.first != "time" { missing.append("time") }
         if !header.contains("bytes_in") { missing.append("bytes_in") }
         if !header.contains("bytes_out") { missing.append("bytes_out") }
-        if processColumn(in: header) == nil { missing.append("process") }
+        if Self.processColumn(in: header) == nil { missing.append("process") }
+        if mode == .connections, !header.contains("interface") { missing.append("interface") }
         return missing
     }
 

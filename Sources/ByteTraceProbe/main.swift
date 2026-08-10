@@ -4,11 +4,9 @@ import Foundation
 
 private struct Options {
     let duration: TimeInterval
-    let applyFilter: Bool
 
     init(arguments: [String]) {
         var duration: TimeInterval = 15
-        var applyFilter = false
         var index = 1
 
         while index < arguments.count {
@@ -16,17 +14,18 @@ private struct Options {
                let value = TimeInterval(arguments[index + 1]), value > 0 {
                 duration = value
                 index += 2
-            } else if arguments[index] == "--filter" {
-                applyFilter = true
-                index += 1
             } else {
                 index += 1
             }
         }
 
         self.duration = duration
-        self.applyFilter = applyFilter
     }
+}
+
+private enum ProbeLane: String {
+    case external
+    case loopback
 }
 
 private struct ProbeSummary {
@@ -39,9 +38,14 @@ private struct ProbeSummary {
     let attributedApps: Int
     let proxySamples: Int
     let storageErrors: Int
+    let externalFrames: Int
+    let loopbackFrames: Int
+    let externalSamples: Int
+    let loopbackSamples: Int
 }
 
 private struct ProbeSample {
+    let lane: ProbeLane
     let delta: NettopDelta
     let attributed: AttributedProcess
 }
@@ -58,8 +62,16 @@ private final class ProbeCounters: @unchecked Sendable {
     private var proxySamples = 0
     private var storageErrors = 0
     private var printedSamples = 0
+    private var externalFrames = 0
+    private var loopbackFrames = 0
+    private var externalSamples = 0
+    private var loopbackSamples = 0
 
-    func recordFrame(isBaseline: Bool, samples: [ProbeSample]) -> [ProbeSample] {
+    func recordFrame(
+        lane: ProbeLane,
+        isBaseline: Bool,
+        samples: [ProbeSample]
+    ) -> [ProbeSample] {
         lock.lock()
         defer { lock.unlock() }
 
@@ -68,6 +80,14 @@ private final class ProbeCounters: @unchecked Sendable {
             baselineFrames += 1
         }
         nonzeroSamples += samples.count
+        switch lane {
+        case .external:
+            externalFrames += 1
+            externalSamples += samples.count
+        case .loopback:
+            loopbackFrames += 1
+            loopbackSamples += samples.count
+        }
         for sample in samples {
             attributedAppKeys.insert(sample.attributed.appKey)
             if sample.attributed.category == .proxyTransport {
@@ -117,14 +137,21 @@ private final class ProbeCounters: @unchecked Sendable {
             incompatibleSchemas: incompatibleSchemas,
             attributedApps: attributedAppKeys.count,
             proxySamples: proxySamples,
-            storageErrors: storageErrors
+            storageErrors: storageErrors,
+            externalFrames: externalFrames,
+            loopbackFrames: loopbackFrames,
+            externalSamples: externalSamples,
+            loopbackSamples: loopbackSamples
         )
     }
 }
 
 private final class ProbeRuntime: @unchecked Sendable {
     let counters = ProbeCounters()
-    let collector = NettopCollector()
+    let externalCollector = NettopCollector(scope: .externalProcessSummary)
+    let loopbackCollector = NettopCollector(scope: .loopbackConnections)
+    let proxyEndpointMonitor = SystemProxyEndpointMonitor()
+    let loopbackReducer = LoopbackTrafficReducer()
     let resolver = SystemProcessIdentityResolver()
     let attributionCache = ProcessAttributionCache()
     let store: UsageStore
@@ -178,6 +205,12 @@ private final class ProbeRuntime: @unchecked Sendable {
     }
 }
 
+private func endpointLabel(_ endpoint: NettopEndpoint) -> String {
+    let host = endpoint.host.contains(":") ? "[\(endpoint.host)]" : endpoint.host
+    guard let port = endpoint.port else { return host }
+    return "\(host):\(port)"
+}
+
 private func runProbe(options: Options) -> Int32 {
     let runtime: ProbeRuntime
     do {
@@ -187,18 +220,25 @@ private func runProbe(options: Options) -> Int32 {
         return 1
     }
 
-    runtime.collector.onEvent = { [runtime] event in
+    func handleCollectorEvent(_ event: NettopCollectorEvent, lane: ProbeLane) {
         switch event {
         case let .started(pid):
-            print("[collector] started nettop pid=\(pid)")
+            print("[collector] lane=\(lane.rawValue) started nettop pid=\(pid)")
 
         case let .parser(parserEvent):
             switch parserEvent {
             case let .frameCompleted(rowCount, deltas, isBaseline):
-                let filtered = options.applyFilter
-                    ? deltas.filter { !TrafficFilter().shouldDiscard($0) }
-                    : deltas
-                let samples = filtered.map { delta in
+                let acceptedDeltas: [NettopDelta]
+                switch lane {
+                case .external:
+                    acceptedDeltas = deltas
+                case .loopback:
+                    acceptedDeltas = runtime.loopbackReducer.reduce(
+                        deltas,
+                        proxyEndpoints: runtime.proxyEndpointMonitor.currentLoopbackEndpoints
+                    )
+                }
+                let samples = acceptedDeltas.map { delta in
                     let token = NettopProcessToken(rawValue: delta.processName)
                     let identity = runtime.resolver.resolve(token)
                     let attributed = runtime.attributionCache.attribute(identity)
@@ -222,15 +262,19 @@ private func runProbe(options: Options) -> Int32 {
                         print("[storage] ingest_failed error=\(error.localizedDescription)")
                     }
 
-                    return ProbeSample(delta: delta, attributed: attributed)
+                    return ProbeSample(lane: lane, delta: delta, attributed: attributed)
                 }
-                let preview = runtime.counters.recordFrame(isBaseline: isBaseline, samples: samples)
+                let preview = runtime.counters.recordFrame(
+                    lane: lane,
+                    isBaseline: isBaseline,
+                    samples: samples
+                )
                 print(
-                    "[parser] frame rows=\(rowCount) baseline=\(isBaseline) nonzero_deltas=\(deltas.count)"
+                    "[parser] lane=\(lane.rawValue) frame rows=\(rowCount) baseline=\(isBaseline) raw_nonzero_deltas=\(deltas.count) accepted_deltas=\(acceptedDeltas.count)"
                 )
                 for sample in preview {
                     print(
-                        "[sample] process=\(sample.delta.processName) app=\(sample.attributed.displayName) app_key=\(sample.attributed.appKey) category=\(sample.attributed.category.rawValue) download_bytes=\(sample.delta.downloadBytes) upload_bytes=\(sample.delta.uploadBytes)"
+                        "[sample] lane=\(sample.lane.rawValue) process=\(sample.delta.processName) app=\(sample.attributed.displayName) app_key=\(sample.attributed.appKey) category=\(sample.attributed.category.rawValue) download_bytes=\(sample.delta.downloadBytes) upload_bytes=\(sample.delta.uploadBytes)"
                     )
                 }
 
@@ -239,34 +283,50 @@ private func runProbe(options: Options) -> Int32 {
 
             case .schemaChanged:
                 runtime.counters.recordSchemaChange()
-                print("[parser] schema_changed")
+                print("[parser] lane=\(lane.rawValue) schema_changed")
 
             case let .incompatibleSchema(missingColumns):
                 runtime.counters.recordIncompatibleSchema()
-                print("[parser] incompatible_schema missing=\(missingColumns.joined(separator: ","))")
+                print("[parser] lane=\(lane.rawValue) incompatible_schema missing=\(missingColumns.joined(separator: ","))")
             }
 
         case let .stderr(message):
-            print("[collector] stderr=\(message)")
+            print("[collector] lane=\(lane.rawValue) stderr=\(message)")
 
         case let .exited(status):
-            print("[collector] exited status=\(status)")
+            print("[collector] lane=\(lane.rawValue) exited status=\(status)")
         }
     }
 
-    print("ByteTrace 阶段 3 nettop → attribution → SQLite probe")
+    runtime.externalCollector.onEvent = { event in
+        handleCollectorEvent(event, lane: .external)
+    }
+    runtime.loopbackCollector.onEvent = { event in
+        handleCollectorEvent(event, lane: .loopback)
+    }
+
+    print("ByteTrace 双通道 nettop → attribution → SQLite probe")
     print("[collector] executable=\(NettopCollector.executablePath)")
-    print("[collector] arguments=\(NettopCollector.arguments.joined(separator: " "))")
+    print("[collector] external_arguments=\(NettopCollectorScope.externalProcessSummary.arguments.joined(separator: " "))")
+    print("[collector] loopback_arguments=\(NettopCollectorScope.loopbackConnections.arguments.joined(separator: " "))")
     print("[collector] duration_seconds=\(options.duration)")
-    print("[collector] filter_clean_mode=\(options.applyFilter)")
+
+    runtime.proxyEndpointMonitor.start()
+    defer { runtime.proxyEndpointMonitor.stop() }
+    let proxyEndpoints = runtime.proxyEndpointMonitor.currentLoopbackEndpoints
+        .map(endpointLabel)
+        .sorted()
+    print("[proxy] active_loopback_endpoints=\(proxyEndpoints.joined(separator: ","))")
 
     do {
-        try runtime.collector.start()
+        try runtime.externalCollector.start()
+        try runtime.loopbackCollector.start()
 
         let deadline = Date().addingTimeInterval(options.duration)
         RunLoop.main.run(until: deadline)
 
-        runtime.collector.stop()
+        runtime.externalCollector.stop()
+        runtime.loopbackCollector.stop()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
 
         let flushedEntries = try runtime.aggregator.flush()
@@ -278,7 +338,14 @@ private func runProbe(options: Options) -> Int32 {
         print("[storage] day=\(day) persisted_records=\(records.count)")
         print("[storage] persisted_download_bytes=\(persistedDownload)")
         print("[storage] persisted_upload_bytes=\(persistedUpload)")
+        for record in records {
+            print(
+                "[storage-record] app=\(record.displayName) app_key=\(record.appKey) category=\(record.category.rawValue) download_bytes=\(record.downloadBytes) upload_bytes=\(record.uploadBytes)"
+            )
+        }
     } catch {
+        runtime.externalCollector.stop()
+        runtime.loopbackCollector.stop()
         print("[result] FAIL: collector 或 SQLite 闭环失败：\(error.localizedDescription)")
         return 1
     }
@@ -293,9 +360,17 @@ private func runProbe(options: Options) -> Int32 {
     print("[probe] attributed_apps=\(summary.attributedApps)")
     print("[probe] proxy_samples=\(summary.proxySamples)")
     print("[probe] storage_errors=\(summary.storageErrors)")
+    print("[probe] external_frames=\(summary.externalFrames)")
+    print("[probe] loopback_frames=\(summary.loopbackFrames)")
+    print("[probe] external_samples=\(summary.externalSamples)")
+    print("[probe] loopback_samples=\(summary.loopbackSamples)")
 
-    guard summary.completeFrames > 0 else {
-        print("[result] FAIL: 未获得完整 nettop CSV 帧")
+    guard summary.externalFrames > 0, summary.loopbackFrames > 0 else {
+        print("[result] FAIL: 未从两个 nettop 通道都获得完整 CSV 帧")
+        return 1
+    }
+    guard summary.incompatibleSchemas == 0 else {
+        print("[result] FAIL: 存在不兼容的 nettop CSV 格式")
         return 1
     }
     guard summary.storageErrors == 0 else {

@@ -3,6 +3,22 @@ import XCTest
 @testable import ByteTraceCore
 
 final class ProcessAttributorTests: XCTestCase {
+    func testResolverKeepsRecentIdentityAfterProcessExits() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["0.1"]
+        try process.run()
+
+        let resolver = SystemProcessIdentityResolver(cacheTTL: 15)
+        let token = NettopProcessToken(rawValue: "sleep.\(process.processIdentifier)")
+        let beforeExit = resolver.resolve(token)
+        process.waitUntilExit()
+        let afterExit = resolver.resolve(token)
+
+        XCTAssertNotNil(beforeExit.processStartTime)
+        XCTAssertEqual(afterExit, beforeExit)
+    }
+
     func testProcessTokenUsesTheLastNumericSuffixAsPID() {
         let token = NettopProcessToken(rawValue: "GitHub Desktop .2168")
 

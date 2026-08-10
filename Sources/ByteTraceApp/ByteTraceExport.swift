@@ -24,6 +24,7 @@ struct ByteTraceExportDocument: Encodable {
     }
 
     let formatVersion: Int
+    let accountingVersion: Int64
     let product: String
     let exportedAt: Date
     let range: Range

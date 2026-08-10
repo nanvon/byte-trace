@@ -3,66 +3,81 @@ import XCTest
 @testable import ByteTraceCore
 
 final class TrafficFilterTests: XCTestCase {
+    private let proxyEndpoint = NettopEndpoint(host: "127.0.0.1", port: 7890)
+
     private func delta(
         _ process: String = "Dia.1",
         target: String?,
-        interface: String? = "utun4"
+        interface: String? = "lo0",
+        download: Int64 = 100,
+        upload: Int64 = 200
     ) -> NettopDelta {
         NettopDelta(
             sampledAt: "20:00:00.000",
             processName: process,
-            downloadBytes: 100,
-            uploadBytes: 200,
+            downloadBytes: download,
+            uploadBytes: upload,
             interface: interface,
-            connectionTarget: target
+            connectionTarget: target,
+            remoteEndpoint: target.flatMap(NettopEndpoint.parse)
         )
     }
 
-    func testLoopbackIPv4TargetIsDiscarded() {
-        let filter = TrafficFilter()
-        XCTAssertTrue(filter.shouldDiscard(delta(target: "127.0.0.1:59169", interface: "lo0")))
-        XCTAssertTrue(filter.shouldDiscard(delta(target: "127.0.0.1:7890", interface: "lo0")))
+    func testSystemProxyLoopbackEndpointIsKept() {
+        let filter = TrafficFilter(proxyEndpoints: [proxyEndpoint])
+        XCTAssertTrue(filter.shouldKeepLoopback(delta(target: "127.0.0.1:7890")))
+        XCTAssertFalse(filter.shouldDiscard(delta(target: "127.0.0.1:7890")))
     }
 
-    func testLoopbackIPv6TargetIsDiscarded() {
-        let filter = TrafficFilter()
-        XCTAssertTrue(filter.shouldDiscard(delta(target: "[::1]:443", interface: "lo0")))
-        XCTAssertTrue(filter.shouldDiscard(delta(target: "::1.8021", interface: "lo0")))
+    func testOtherLoopbackEndpointsAreDiscarded() {
+        let filter = TrafficFilter(proxyEndpoints: [proxyEndpoint])
+        XCTAssertTrue(filter.shouldDiscard(delta(target: "127.0.0.1:59169")))
+        XCTAssertTrue(filter.shouldDiscard(delta(target: "[::1]:9090")))
     }
 
-    func testPublicAndLANTargetsAreKept() {
-        let filter = TrafficFilter()
-        XCTAssertFalse(filter.shouldDiscard(delta(target: "91.108.56.139:443")))
-        XCTAssertFalse(filter.shouldDiscard(delta(target: "54.199.45.99:443")))
-        XCTAssertFalse(filter.shouldDiscard(delta(target: "192.168.31.5:5000")))
-        XCTAssertFalse(filter.shouldDiscard(delta(target: "198.18.0.2:12246", interface: "utun4")))
-        XCTAssertFalse(
-            filter.shouldDiscard(
-                delta(target: "fe80::8af:5f9:677:e110%en0.50231", interface: "en0")
-            )
+    func testNonLoopbackAndMissingEndpointsAreNotAcceptedByLoopbackLane() {
+        let filter = TrafficFilter(proxyEndpoints: [proxyEndpoint])
+        XCTAssertTrue(filter.shouldDiscard(delta(target: "91.108.56.139:443", interface: "en0")))
+        XCTAssertTrue(filter.shouldDiscard(delta(target: nil)))
+    }
+
+    func testReducerFiltersAndGroupsByProcessWithSaturation() {
+        let reducer = LoopbackTrafficReducer()
+        let result = reducer.reduce(
+            [
+                delta("Dia.1", target: "127.0.0.1:7890", download: Int64.max, upload: 2),
+                delta("Dia.1", target: "127.0.0.1:7890", download: 1, upload: 3),
+                delta("Dia.1", target: "127.0.0.1:59169", download: 500, upload: 500),
+                delta("Drive.2", target: "127.0.0.1:7890", download: 7, upload: 11)
+            ],
+            proxyEndpoints: [proxyEndpoint]
         )
-        XCTAssertFalse(filter.shouldDiscard(delta(target: "2408:4004:2000::1:443")))
+
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(result[0].processName, "Dia.1")
+        XCTAssertEqual(result[0].downloadBytes, Int64.max)
+        XCTAssertEqual(result[0].uploadBytes, 5)
+        XCTAssertEqual(result[1].processName, "Drive.2")
+        XCTAssertEqual(result[1].downloadBytes, 7)
     }
 
-    func testWildcardAndMissingTargetsAreKept() {
-        let filter = TrafficFilter()
-        XCTAssertFalse(filter.shouldDiscard(delta(target: "*")))
-        XCTAssertFalse(filter.shouldDiscard(delta(target: "*:*")))
-        XCTAssertFalse(filter.shouldDiscard(delta(target: nil)))
-        XCTAssertFalse(filter.shouldDiscard(delta(target: "*.62849")))
-    }
-
-    func testProcessLevelRowsWithoutTargetAreKept() {
-        // 兜底路径（旧 -P 风格）产出的 delta 没有接口/目标信息，必须保留。
-        let filter = TrafficFilter()
-        XCTAssertFalse(filter.shouldDiscard(delta(target: nil, interface: nil)))
-    }
-
-    func testHostSeparatorParsing() {
-        XCTAssertTrue(TrafficFilter.isLoopbackTarget("127.0.0.1:59169"))
+    func testEndpointParsingAndLoopbackDetection() {
+        XCTAssertEqual(
+            NettopEndpoint.parse("127.0.0.1:7890"),
+            NettopEndpoint(host: "127.0.0.1", port: 7890)
+        )
+        XCTAssertEqual(
+            NettopEndpoint.parse("::1.7890"),
+            NettopEndpoint(host: "::1", port: 7890)
+        )
+        XCTAssertEqual(
+            NettopEndpoint.parse("[::1]:7890"),
+            NettopEndpoint(host: "::1", port: 7890)
+        )
         XCTAssertTrue(TrafficFilter.isLoopbackTarget("127.255.255.255:1"))
+        XCTAssertTrue(TrafficFilter.isLoopbackTarget("::1.8021"))
+        XCTAssertFalse(TrafficFilter.isLoopbackTarget("::10.8021"))
         XCTAssertFalse(TrafficFilter.isLoopbackTarget("128.0.0.1:1"))
-        XCTAssertFalse(TrafficFilter.isLoopbackTarget("127.0.0.1x:1"))
-        XCTAssertFalse(TrafficFilter.isLoopbackTarget(""))
+        XCTAssertFalse(NettopEndpoint(host: "127.invalid.address.value", port: 1).isLoopback)
     }
 }

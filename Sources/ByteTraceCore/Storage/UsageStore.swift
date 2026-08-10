@@ -2,7 +2,8 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 5
+    public static let schemaVersion: Int64 = 6
+    public static let accountingVersion: Int64 = 2
 
     private let database: SQLiteDatabase
     private static let legacyCCBarAppKey = "proxy:ccbar"
@@ -82,14 +83,15 @@ public final class UsageStore: @unchecked Sendable {
                    d.download_bytes, d.upload_bytes, d.sample_count
             FROM daily_usage AS d
             JOIN apps AS a ON a.app_key = d.app_key
-            WHERE d.day >= ? AND d.day <= ?
+            WHERE d.accounting_version = ? AND d.day >= ? AND d.day <= ?
             ORDER BY d.day ASC, (d.download_bytes + d.upload_bytes) DESC,
                      d.app_key ASC;
             """
         )
         defer { sqlite3_finalize(statement) }
-        try database.bind(startDay, at: 1, in: statement)
-        try database.bind(endDay, at: 2, in: statement)
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(startDay, at: 2, in: statement)
+        try database.bind(endDay, at: 3, in: statement)
 
         var records: [DailyUsageRecord] = []
         while true {
@@ -128,14 +130,15 @@ public final class UsageStore: @unchecked Sendable {
                    b.download_bytes, b.upload_bytes, b.sample_count
             FROM usage_buckets AS b
             JOIN apps AS a ON a.app_key = b.app_key
-            WHERE b.bucket_start >= ? AND b.bucket_start < ?
+            WHERE b.accounting_version = ? AND b.bucket_start >= ? AND b.bucket_start < ?
             ORDER BY b.bucket_start ASC, (b.download_bytes + b.upload_bytes) DESC,
                      b.app_key ASC;
             """
         )
         defer { sqlite3_finalize(statement) }
-        try database.bind(Self.epochSeconds(start), at: 1, in: statement)
-        try database.bind(Self.epochSeconds(end), at: 2, in: statement)
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(Self.epochSeconds(start), at: 2, in: statement)
+        try database.bind(Self.epochSeconds(end), at: 3, in: statement)
 
         var records: [UsageBucketRecord] = []
         while true {
@@ -172,9 +175,15 @@ public final class UsageStore: @unchecked Sendable {
 
     public func bucketStats() throws -> UsageBucketStats {
         let statement = try database.prepare(
-            "SELECT COUNT(*), MIN(bucket_start), MAX(bucket_start) FROM usage_buckets;"
+            """
+            SELECT COUNT(*), MIN(bucket_start), MAX(bucket_start)
+            FROM usage_buckets
+            WHERE accounting_version = ?;
+            """
         )
         defer { sqlite3_finalize(statement) }
+
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
 
         guard sqlite3_step(statement) == SQLITE_ROW else {
             throw SQLiteDatabaseError.stepFailed(database.errorMessage)
@@ -320,6 +329,72 @@ public final class UsageStore: @unchecked Sendable {
                 PRAGMA user_version = 5;
                 """
             )
+        }
+
+        if currentVersion <= 5 {
+            try migrateAccountingVersion()
+        }
+    }
+
+    private func migrateAccountingVersion() throws {
+        try database.execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try database.execute(
+                """
+                CREATE TABLE daily_usage_v6 (
+                    accounting_version INTEGER NOT NULL CHECK (accounting_version > 0),
+                    day TEXT NOT NULL,
+                    app_key TEXT NOT NULL,
+                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
+                    sample_count INTEGER NOT NULL DEFAULT 0 CHECK (sample_count >= 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (accounting_version, day, app_key),
+                    FOREIGN KEY (app_key) REFERENCES apps(app_key)
+                );
+
+                INSERT INTO daily_usage_v6 (
+                    accounting_version, day, app_key, download_bytes,
+                    upload_bytes, sample_count, updated_at
+                )
+                SELECT 1, day, app_key, download_bytes, upload_bytes, sample_count, updated_at
+                FROM daily_usage;
+
+                CREATE TABLE usage_buckets_v6 (
+                    accounting_version INTEGER NOT NULL CHECK (accounting_version > 0),
+                    bucket_start INTEGER NOT NULL,
+                    app_key TEXT NOT NULL,
+                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
+                    sample_count INTEGER NOT NULL DEFAULT 0 CHECK (sample_count >= 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (accounting_version, bucket_start, app_key),
+                    FOREIGN KEY (app_key) REFERENCES apps(app_key)
+                );
+
+                INSERT INTO usage_buckets_v6 (
+                    accounting_version, bucket_start, app_key, download_bytes,
+                    upload_bytes, sample_count, updated_at
+                )
+                SELECT 1, bucket_start, app_key, download_bytes, upload_bytes, sample_count, updated_at
+                FROM usage_buckets;
+
+                DROP INDEX IF EXISTS idx_usage_buckets_start;
+                DROP TABLE daily_usage;
+                DROP TABLE usage_buckets;
+                ALTER TABLE daily_usage_v6 RENAME TO daily_usage;
+                ALTER TABLE usage_buckets_v6 RENAME TO usage_buckets;
+
+                CREATE INDEX idx_usage_buckets_start
+                    ON usage_buckets(accounting_version, bucket_start);
+
+                PRAGMA user_version = 6;
+                """
+            )
+            try database.execute("COMMIT;")
+        } catch {
+            try? database.execute("ROLLBACK;")
+            throw error
         }
     }
 
@@ -572,9 +647,10 @@ public final class UsageStore: @unchecked Sendable {
         let statement = try database.prepare(
             """
             INSERT INTO daily_usage (
-                day, app_key, download_bytes, upload_bytes, sample_count, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(day, app_key) DO UPDATE SET
+                accounting_version, day, app_key, download_bytes,
+                upload_bytes, sample_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accounting_version, day, app_key) DO UPDATE SET
                 download_bytes = daily_usage.download_bytes + excluded.download_bytes,
                 upload_bytes = daily_usage.upload_bytes + excluded.upload_bytes,
                 sample_count = daily_usage.sample_count + excluded.sample_count,
@@ -583,12 +659,13 @@ public final class UsageStore: @unchecked Sendable {
         )
         defer { sqlite3_finalize(statement) }
 
-        try database.bind(aggregate.day, at: 1, in: statement)
-        try database.bind(aggregate.appKey, at: 2, in: statement)
-        try database.bind(aggregate.downloadBytes, at: 3, in: statement)
-        try database.bind(aggregate.uploadBytes, at: 4, in: statement)
-        try database.bind(aggregate.sampleCount, at: 5, in: statement)
-        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 6, in: statement)
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(aggregate.day, at: 2, in: statement)
+        try database.bind(aggregate.appKey, at: 3, in: statement)
+        try database.bind(aggregate.downloadBytes, at: 4, in: statement)
+        try database.bind(aggregate.uploadBytes, at: 5, in: statement)
+        try database.bind(aggregate.sampleCount, at: 6, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
         try database.stepDone(statement)
     }
 
@@ -596,10 +673,10 @@ public final class UsageStore: @unchecked Sendable {
         let statement = try database.prepare(
             """
             INSERT INTO usage_buckets (
-                bucket_start, app_key, download_bytes, upload_bytes,
-                sample_count, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(bucket_start, app_key) DO UPDATE SET
+                accounting_version, bucket_start, app_key, download_bytes,
+                upload_bytes, sample_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accounting_version, bucket_start, app_key) DO UPDATE SET
                 download_bytes = usage_buckets.download_bytes + excluded.download_bytes,
                 upload_bytes = usage_buckets.upload_bytes + excluded.upload_bytes,
                 sample_count = usage_buckets.sample_count + excluded.sample_count,
@@ -608,12 +685,13 @@ public final class UsageStore: @unchecked Sendable {
         )
         defer { sqlite3_finalize(statement) }
 
-        try database.bind(Self.epochSeconds(aggregate.bucketStart), at: 1, in: statement)
-        try database.bind(aggregate.appKey, at: 2, in: statement)
-        try database.bind(aggregate.downloadBytes, at: 3, in: statement)
-        try database.bind(aggregate.uploadBytes, at: 4, in: statement)
-        try database.bind(aggregate.sampleCount, at: 5, in: statement)
-        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 6, in: statement)
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(Self.epochSeconds(aggregate.bucketStart), at: 2, in: statement)
+        try database.bind(aggregate.appKey, at: 3, in: statement)
+        try database.bind(aggregate.downloadBytes, at: 4, in: statement)
+        try database.bind(aggregate.uploadBytes, at: 5, in: statement)
+        try database.bind(aggregate.sampleCount, at: 6, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
         try database.stepDone(statement)
     }
 
