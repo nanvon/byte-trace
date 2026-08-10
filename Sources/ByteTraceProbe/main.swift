@@ -25,7 +25,7 @@ private struct Options {
 
 private enum ProbeLane: String {
     case external
-    case loopback
+    case supplemental
 }
 
 private struct ProbeSummary {
@@ -39,9 +39,9 @@ private struct ProbeSummary {
     let proxySamples: Int
     let storageErrors: Int
     let externalFrames: Int
-    let loopbackFrames: Int
+    let supplementalFrames: Int
     let externalSamples: Int
-    let loopbackSamples: Int
+    let supplementalSamples: Int
 }
 
 private struct ProbeSample {
@@ -63,9 +63,9 @@ private final class ProbeCounters: @unchecked Sendable {
     private var storageErrors = 0
     private var printedSamples = 0
     private var externalFrames = 0
-    private var loopbackFrames = 0
+    private var supplementalFrames = 0
     private var externalSamples = 0
-    private var loopbackSamples = 0
+    private var supplementalSamples = 0
 
     func recordFrame(
         lane: ProbeLane,
@@ -84,9 +84,9 @@ private final class ProbeCounters: @unchecked Sendable {
         case .external:
             externalFrames += 1
             externalSamples += samples.count
-        case .loopback:
-            loopbackFrames += 1
-            loopbackSamples += samples.count
+        case .supplemental:
+            supplementalFrames += 1
+            supplementalSamples += samples.count
         }
         for sample in samples {
             attributedAppKeys.insert(sample.attributed.appKey)
@@ -139,9 +139,9 @@ private final class ProbeCounters: @unchecked Sendable {
             proxySamples: proxySamples,
             storageErrors: storageErrors,
             externalFrames: externalFrames,
-            loopbackFrames: loopbackFrames,
+            supplementalFrames: supplementalFrames,
             externalSamples: externalSamples,
-            loopbackSamples: loopbackSamples
+            supplementalSamples: supplementalSamples
         )
     }
 }
@@ -149,9 +149,9 @@ private final class ProbeCounters: @unchecked Sendable {
 private final class ProbeRuntime: @unchecked Sendable {
     let counters = ProbeCounters()
     let externalCollector = NettopCollector(scope: .externalProcessSummary)
-    let loopbackCollector = NettopCollector(scope: .loopbackConnections)
+    let supplementalCollector = NettopCollector(scope: .supplementalConnections)
     let proxyEndpointMonitor = SystemProxyEndpointMonitor()
-    let loopbackReducer = LoopbackTrafficReducer()
+    let supplementalReducer = SupplementalTrafficReducer()
     let resolver = SystemProcessIdentityResolver()
     let attributionCache = ProcessAttributionCache()
     let store: UsageStore
@@ -232,16 +232,19 @@ private func runProbe(options: Options) -> Int32 {
                 switch lane {
                 case .external:
                     acceptedDeltas = deltas
-                case .loopback:
-                    acceptedDeltas = runtime.loopbackReducer.reduce(
+                case .supplemental:
+                    acceptedDeltas = runtime.supplementalReducer.reduce(
                         deltas,
                         proxyEndpoints: runtime.proxyEndpointMonitor.currentLoopbackEndpoints
                     )
                 }
-                let samples = acceptedDeltas.map { delta in
+                let samples = acceptedDeltas.compactMap { delta -> ProbeSample? in
                     let token = NettopProcessToken(rawValue: delta.processName)
                     let identity = runtime.resolver.resolve(token)
                     let attributed = runtime.attributionCache.attribute(identity)
+                    if !TrafficFilter.shouldKeepAfterAttribution(delta, category: attributed.category) {
+                        return nil
+                    }
 
                     do {
                         try runtime.aggregator.ingest(
@@ -301,14 +304,14 @@ private func runProbe(options: Options) -> Int32 {
     runtime.externalCollector.onEvent = { event in
         handleCollectorEvent(event, lane: .external)
     }
-    runtime.loopbackCollector.onEvent = { event in
-        handleCollectorEvent(event, lane: .loopback)
+    runtime.supplementalCollector.onEvent = { event in
+        handleCollectorEvent(event, lane: .supplemental)
     }
 
     print("ByteTrace 双通道 nettop → attribution → SQLite probe")
     print("[collector] executable=\(NettopCollector.executablePath)")
     print("[collector] external_arguments=\(NettopCollectorScope.externalProcessSummary.arguments.joined(separator: " "))")
-    print("[collector] loopback_arguments=\(NettopCollectorScope.loopbackConnections.arguments.joined(separator: " "))")
+    print("[collector] supplemental_arguments=\(NettopCollectorScope.supplementalConnections.arguments.joined(separator: " "))")
     print("[collector] duration_seconds=\(options.duration)")
 
     runtime.proxyEndpointMonitor.start()
@@ -320,13 +323,13 @@ private func runProbe(options: Options) -> Int32 {
 
     do {
         try runtime.externalCollector.start()
-        try runtime.loopbackCollector.start()
+        try runtime.supplementalCollector.start()
 
         let deadline = Date().addingTimeInterval(options.duration)
         RunLoop.main.run(until: deadline)
 
         runtime.externalCollector.stop()
-        runtime.loopbackCollector.stop()
+        runtime.supplementalCollector.stop()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
 
         let flushedEntries = try runtime.aggregator.flush()
@@ -345,7 +348,7 @@ private func runProbe(options: Options) -> Int32 {
         }
     } catch {
         runtime.externalCollector.stop()
-        runtime.loopbackCollector.stop()
+        runtime.supplementalCollector.stop()
         print("[result] FAIL: collector 或 SQLite 闭环失败：\(error.localizedDescription)")
         return 1
     }
@@ -361,11 +364,11 @@ private func runProbe(options: Options) -> Int32 {
     print("[probe] proxy_samples=\(summary.proxySamples)")
     print("[probe] storage_errors=\(summary.storageErrors)")
     print("[probe] external_frames=\(summary.externalFrames)")
-    print("[probe] loopback_frames=\(summary.loopbackFrames)")
+    print("[probe] supplemental_frames=\(summary.supplementalFrames)")
     print("[probe] external_samples=\(summary.externalSamples)")
-    print("[probe] loopback_samples=\(summary.loopbackSamples)")
+    print("[probe] supplemental_samples=\(summary.supplementalSamples)")
 
-    guard summary.externalFrames > 0, summary.loopbackFrames > 0 else {
+    guard summary.externalFrames > 0, summary.supplementalFrames > 0 else {
         print("[result] FAIL: 未从两个 nettop 通道都获得完整 CSV 帧")
         return 1
     }

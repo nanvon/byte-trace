@@ -27,19 +27,19 @@ swift run ByteTraceProbe --duration 15 # 应用级采集
 
 ## 架构：按接口拆分的双通道采集管线
 
-ByteTrace 按接口拆分采集，避免高功耗的全接口连接级采集：外部通道始终运行；只有检测到已启用的本机系统代理端点时才运行回环通道，代理关闭后由系统通知立即停掉第二个子进程。
+ByteTrace 按 nettop 接口类型拆分成两个常驻通道，避免高功耗的全接口连接级采集：外部通道按进程汇总已定义的非回环接口；补充通道只读取 `loopback` 与 `undefined` 连接，用于补齐系统代理入口和 utun/TUN 应用侧流量。
 
-- 外部通道：`nettop -n -P -d -x -L 0 -s 5 -t external -J time,interface,state,bytes_in,bytes_out`。`-P` 按进程汇总，覆盖直连、TUN 和代理进程的外层连接。
-- 回环通道：`nettop -n -d -x -L 0 -s 1 -t loopback -J time,interface,state,bytes_in,bytes_out`。连接级解析只用于补齐应用到 macOS 系统代理的流量；1 秒采样用于减少短连接在两个 5 秒采样点之间结束造成的漏记，落库和 UI 刷新仍保持低频。
+- 外部通道：`nettop -n -P -d -x -L 0 -s 5 -t external -J time,interface,state,bytes_in,bytes_out`。`-P` 按进程汇总，覆盖 Wi-Fi／有线等已定义非回环接口上的直连和代理进程外层连接。
+- 补充通道：`nettop -n -d -x -L 0 -s 1 -t loopback -t undefined -J time,interface,state,bytes_in,bytes_out`。连接级解析只保留两类应用侧流量：目标精确命中当前系统代理的 `lo0` 连接，以及具有明确本地／远端端点的 `utun*` 连接。1 秒采样用于减少短连接漏记，落库和 UI 刷新仍保持低频。
 
-系统代理端点通过 `SCDynamicStoreCopyProxies` 首次读取，并监听 `State:/Network/Global/Proxies` 变化；只接受启用的 HTTP／HTTPS／SOCKS 本机回环端点，因此不写死 `7890`、不轮询 Mihomo API。回环通道仅保留“远端端点精确等于当前系统代理”的应用侧连接，代理服务端连接和其他本地 IPC 全部丢弃。外部通道中的 `proxy:` 流量仍单独展示、不反向抵扣、不计入应用总量。端点仅参与内存过滤，不落库、不展示。
+系统代理端点通过 `SCDynamicStoreCopyProxies` 首次读取，并监听 `State:/Network/Global/Proxies` 变化；只接受启用的 HTTP／HTTPS／SOCKS 本机回环端点，因此不写死 `7890`、不轮询 Mihomo API。补充通道丢弃其他本地 IPC、无明确端点的广播／通配连接，并在进程归属后丢弃代理进程的 utun 镜像；代理外层流量仍由外部通道单独展示、不反向抵扣、不计入应用总量。端点仅参与内存过滤，不落库、不展示。
 
 ### 数据流（正式管线）
 
 ```
 external nettop stdout (-P, external) ─┐
                                        ├→ NettopDelta（进程名 + 上下行字节）
-loopback nettop stdout (connections) ──┘  → 精确匹配当前系统代理端点 → 按进程合并
+supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 → 按进程和来源合并
   → ByteTraceViewModel.ingest()          NettopProcessToken 拆 pid → SystemProcessIdentityResolver
                                          → ProcessAttributionCache → AttributedProcess（appKey/分类）
   → UsageAggregator.ingest()             内存中按 (day, 分钟桶, appKey) 合并
@@ -51,7 +51,7 @@ loopback nettop stdout (connections) ──┘  → 精确匹配当前系统代�
 
 - nettop 每个采样周期重复输出一次以 `time` 开头的表头行；解析器**靠下一个表头到来才结束上一帧**（`beginFrame` 内先调 `completeCurrentFrame`）。因此流中最后一帧只会在 `stop()` / `finish()` 时才吐出。
 - **两个通道分别丢弃首帧**（`deltas = []`，仅置 `hasBaseline = true`）：`-d` 模式下首帧携带的是启动时刻的累计值而非增量。每次重启 nettop（重连、唤醒、网络切换）都会重新经历一次基线帧，这个间隙的流量必然丢失，属于已知取舍。
-- 外部通道表头缺少 `time` / `bytes_in` / `bytes_out` / 进程列 → 全部采集停止且不再自动重连，避免写入脏数据。回环通道还要求 `interface`；仅回环格式不兼容时，外部通道继续工作并提示系统代理流量暂不可统计。
+- 外部通道表头缺少 `time` / `bytes_in` / `bytes_out` / 进程列 → 全部采集停止且不再自动重连，避免写入脏数据。补充通道还要求 `interface`；仅补充格式不兼容时，外部通道继续工作并提示系统代理与 TUN 补充流量暂不可统计。
 - 两个子进程都设置 `NSUnbufferedIO=YES`：`-L 0` 输出到普通 Pipe 时默认会整块缓冲，精简 `-J` 列后低流量场景可能长时间收不到完整帧；禁用子进程 stdio 缓冲可按各自采样周期逐帧交付。
 - 父进程读取 stdout 使用 POSIX `read()`；不要改回 `FileHandle.read(upToCount: 64KB)`，后者在低输出的 `-P` 通道上可能等到大块数据或 EOF 才返回，导致 UI 长时间收不到帧。
 - **两个子进程的 stdin 都必须是父进程持有的空 `Pipe`**（`T0` 修复，勿改回 `/dev/null`）：nettop 是 curses 交互程序，会 poll stdin 等按键；`/dev/null` 永远立即可读并 EOF，导致 poll 死循环、子进程空转占满一个多核心（实测 124%–139% CPU）。空 pipe 写端被父进程持有且永不写入，stdin 永远不就绪。
@@ -77,7 +77,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 四张表：`apps`、`daily_usage`（键 `accounting_version`+`day`+`app_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`，分钟粒度）、`collector_events`。
 
-**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 6`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`。旧口径标为 1 并保留，当前双通道口径为 2，查询只返回当前口径，避免新旧数据直接相加。
+**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 6`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
 
 **写入是累加而非幂等**：所有 upsert 都是 `ON CONFLICT ... DO UPDATE SET x = x + excluded.x`。同一批聚合重复 flush 会双计。`flush()` 成功后必须清空 pending（现有代码已如此）。
 

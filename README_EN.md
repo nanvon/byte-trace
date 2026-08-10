@@ -31,7 +31,7 @@
 ## ✨ Features
 
 - **Menu bar panel** — today's total / download / upload summary and a traffic-sorted app list with real app icons; proxy-transport traffic and system background processes sit in their own collapsible groups, kept out of the app total; live collection status, with start/stop at any time
-- **Proxy-aware accounting** — covers direct, TUN, and macOS system-proxy traffic; the active proxy port is read from system settings instead of hard-coding a Clash/Mihomo listen port, and the loopback collector does not run while the system proxy is off
+- **Proxy-aware accounting** — covers direct, TUN, and macOS system-proxy traffic; active proxy endpoints are read from system settings instead of hard-coding Clash/Mihomo ports, while the supplemental lane filters proxy mirrors, local IPC, and broadcast traffic to avoid missing, duplicate, or inflated app usage
 - **Main window overview** — five time ranges (last 10 minutes / last hour / today / this week / this month): summary cards, a traffic trend chart, and an app ranking; click any app to open its detail page
 - **App detail** — one app's total, upload/download, and its own trend chart
 - **Settings** — minute-level data retention policy (never / 7 / 30 / 90 days), JSON export of the current range, clear statistics, show system processes, and launch at login

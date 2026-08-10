@@ -33,7 +33,7 @@ public enum NettopCollectorError: LocalizedError {
 
 public enum NettopCollectorScope: Equatable, Sendable {
     case externalProcessSummary
-    case loopbackConnections
+    case supplementalConnections
 
     public var arguments: [String] {
         let common = ["-n", "-d", "-x", "-L", "0"]
@@ -41,15 +41,15 @@ public enum NettopCollectorScope: Equatable, Sendable {
         switch self {
         case .externalProcessSummary:
             return ["-n", "-P", "-d", "-x", "-L", "0", "-s", "5", "-t", "external"] + columns
-        case .loopbackConnections:
-            return common + ["-s", "1", "-t", "loopback"] + columns
+        case .supplementalConnections:
+            return common + ["-s", "1", "-t", "loopback", "-t", "undefined"] + columns
         }
     }
 
     var parserMode: NettopCSVParserMode {
         switch self {
         case .externalProcessSummary: return .processSummary
-        case .loopbackConnections: return .connections
+        case .supplementalConnections: return .connections
         }
     }
 }

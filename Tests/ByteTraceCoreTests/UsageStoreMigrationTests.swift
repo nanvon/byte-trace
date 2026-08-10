@@ -84,6 +84,15 @@ final class UsageStoreMigrationTests: XCTestCase {
 
         try seedVersionFiveUsage(at: url)
         let store = try UsageStore(databaseURL: url)
+        let migratedDatabase = try SQLiteDatabase(url: url)
+        try migratedDatabase.execute(
+            """
+            INSERT INTO daily_usage (
+                accounting_version, day, app_key, download_bytes,
+                upload_bytes, sample_count, updated_at
+            ) VALUES (2, '2025-07-18', 'bundle:example.app', 50, 20, 1, '1754000000.000000');
+            """
+        )
         XCTAssertTrue(try store.dailyUsage(for: "2025-07-18").isEmpty)
 
         let sampleDate = Date(timeIntervalSince1970: 1_754_000_000)
@@ -111,16 +120,21 @@ final class UsageStoreMigrationTests: XCTestCase {
         XCTAssertEqual(current[0].downloadBytes, 7)
         XCTAssertEqual(current[0].uploadBytes, 3)
 
-        let database = try SQLiteDatabase(url: url)
         XCTAssertEqual(
-            try database.scalarInt64(
+            try migratedDatabase.scalarInt64(
                 "SELECT download_bytes FROM daily_usage WHERE accounting_version = 1 AND app_key = 'bundle:example.app';"
             ),
             100
         )
         XCTAssertEqual(
-            try database.scalarInt64(
+            try migratedDatabase.scalarInt64(
                 "SELECT download_bytes FROM daily_usage WHERE accounting_version = 2 AND app_key = 'bundle:example.app';"
+            ),
+            50
+        )
+        XCTAssertEqual(
+            try migratedDatabase.scalarInt64(
+                "SELECT download_bytes FROM daily_usage WHERE accounting_version = \(UsageStore.accountingVersion) AND app_key = 'bundle:example.app';"
             ),
             7
         )

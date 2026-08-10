@@ -3,7 +3,7 @@ import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
     public static let schemaVersion: Int64 = 6
-    public static let accountingVersion: Int64 = 2
+    public static let accountingVersion: Int64 = 3
 
     private let database: SQLiteDatabase
     private static let legacyCCBarAppKey = "proxy:ccbar"

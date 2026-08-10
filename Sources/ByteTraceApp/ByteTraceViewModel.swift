@@ -189,7 +189,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private let store: UsageStore?
     private let aggregator: UsageAggregator?
     private let proxyEndpointMonitor = SystemProxyEndpointMonitor()
-    private let loopbackReducer = LoopbackTrafficReducer()
+    private let supplementalReducer = SupplementalTrafficReducer()
     private var flushTimer: Timer?
     private var restartTimer: Timer?
     private var restartAttempt = 0
@@ -219,7 +219,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     override init() {
         databaseURL = UsageStore.defaultDatabaseURL(bundleIdentifier: Self.bundleIdentifier)
         collector = NettopCollector(scope: .externalProcessSummary)
-        loopbackCollector = NettopCollector(scope: .loopbackConnections)
+        loopbackCollector = NettopCollector(scope: .supplementalConnections)
         resolver = SystemProcessIdentityResolver()
         attributionCache = ProcessAttributionCache()
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
@@ -627,25 +627,15 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private func handleProxyEndpointsChanged(_ endpoints: Set<NettopEndpoint>) {
         guard wantsCollection else { return }
         if endpoints.isEmpty {
-            loopbackRestartTimer?.invalidate()
-            loopbackRestartTimer = nil
-            loopbackRestartAttempt = 0
-            isLoopbackStarted = false
-            if loopbackCollector.state != .stopped {
-                loopbackCollector.stop()
-            }
-            loopbackLastError = nil
-            if status == .collecting || status == .baseline {
-                lastError = nil
-            }
             recordCollectorEvent(kind: "system_proxy_disabled")
         } else {
             recordCollectorEvent(
                 kind: "system_proxy_enabled",
                 details: "loopback_endpoint_count=\(endpoints.count)"
             )
-            startLoopbackCollectorProcess()
         }
+        // 补充通道还负责 utun/TUN 应用侧流量，因此系统代理关闭时也必须运行。
+        startLoopbackCollectorProcess()
     }
 
     private func handle(_ event: NettopCollectorEvent, lane: CollectorLane) {
@@ -690,8 +680,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 if wantsCollection,
                    !isSleeping,
                    networkPathSatisfied,
-                   loopbackCollectorCompatible,
-                   !proxyEndpointMonitor.currentLoopbackEndpoints.isEmpty {
+                   loopbackCollectorCompatible {
                     recordCollectorEvent(
                         kind: "loopback_collector_exited",
                         details: "status=\(statusCode)"
@@ -763,7 +752,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
             let acceptedDeltas: [NettopDelta]
             if lane == .loopback {
-                acceptedDeltas = loopbackReducer.reduce(
+                acceptedDeltas = supplementalReducer.reduce(
                     deltas,
                     proxyEndpoints: proxyEndpointMonitor.currentLoopbackEndpoints
                 )
@@ -808,7 +797,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 if loopbackCollector.state != .stopped {
                     loopbackCollector.stop()
                 }
-                loopbackLastError = "系统代理流量暂时无法统计：\(message)"
+                loopbackLastError = "系统代理与 TUN 补充流量暂时无法统计：\(message)"
                 lastError = loopbackLastError
                 recordCollectorEvent(kind: "loopback_parse_schema_changed", details: message)
             }
@@ -819,6 +808,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         let token = NettopProcessToken(rawValue: delta.processName)
         let identity = resolver.resolve(token)
         let attributed = attributionCache.attribute(identity)
+        // undefined 接口同时包含应用侧 TUN 连接与代理进程的镜像连接。
+        // 应用侧记入对应应用；代理镜像丢弃，代理外层仍由 external 通道单独统计。
+        if !TrafficFilter.shouldKeepAfterAttribution(delta, category: attributed.category) {
+            return
+        }
         guard let aggregator else { return }
 
         do {
@@ -926,7 +920,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
               !isSleeping,
               networkPathSatisfied,
               loopbackCollectorCompatible,
-              !proxyEndpointMonitor.currentLoopbackEndpoints.isEmpty,
               !isLoopbackStarted else {
             return
         }
@@ -971,7 +964,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
               !isSleeping,
               networkPathSatisfied,
               loopbackCollectorCompatible,
-              !proxyEndpointMonitor.currentLoopbackEndpoints.isEmpty,
               loopbackRestartTimer == nil else {
             return
         }

@@ -11,10 +11,10 @@ final class NettopCollectorTests: XCTestCase {
         XCTAssertEqual(value(after: "-J", in: arguments), "time,interface,state,bytes_in,bytes_out")
     }
 
-    func testLoopbackCollectorKeepsConnectionDetailsOnlyForLoopback() {
-        let arguments = NettopCollectorScope.loopbackConnections.arguments
+    func testSupplementalCollectorKeepsConnectionDetailsForLoopbackAndUndefinedInterfaces() {
+        let arguments = NettopCollectorScope.supplementalConnections.arguments
         XCTAssertFalse(arguments.contains("-P"))
-        XCTAssertEqual(value(after: "-t", in: arguments), "loopback")
+        XCTAssertEqual(values(after: "-t", in: arguments), ["loopback", "undefined"])
         XCTAssertEqual(value(after: "-s", in: arguments), "1")
         XCTAssertEqual(value(after: "-J", in: arguments), "time,interface,state,bytes_in,bytes_out")
     }
@@ -28,5 +28,12 @@ final class NettopCollectorTests: XCTestCase {
             return nil
         }
         return arguments[index + 1]
+    }
+
+    private func values(after option: String, in arguments: [String]) -> [String] {
+        arguments.indices.compactMap { index in
+            guard arguments[index] == option, arguments.indices.contains(index + 1) else { return nil }
+            return arguments[index + 1]
+        }
     }
 }
