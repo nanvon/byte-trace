@@ -33,8 +33,8 @@
 - **Menu bar panel** — today's total / download / upload summary and a traffic-sorted app list with real app icons; proxy-transport traffic and system background processes sit in their own collapsible groups, kept out of the app total; live collection status, with start/stop at any time
 - **Proxy-aware accounting** — covers direct, TUN, and macOS system-proxy traffic; active proxy endpoints are read from system settings instead of hard-coding Clash/Mihomo ports, while the supplemental lane filters proxy mirrors, local IPC, and broadcast traffic to avoid missing, duplicate, or inflated app usage
 - **Main window overview** — five time ranges (last 10 minutes / last hour / today / this week / this month): summary cards, a traffic trend chart, and an app ranking; click any app to open its detail page
-- **App detail** — one app's total, upload/download, and its own trend chart
-- **Settings** — minute-level data retention policy (never / 7 / 30 / 90 days), JSON export of the current range, clear statistics, show system processes, and launch at login
+- **App detail** — one app's total, upload/download, and its own trend chart, plus an optional registrable-domain ranking identified through Mihomo
+- **Settings** — optional local Mihomo website accounting, minute-level data retention (never / 7 / 30 / 90 days), JSON export of the current range, clear statistics, show system processes, and launch at login
 
 ### 📸 Screenshots
 
@@ -76,7 +76,9 @@ shasum -a 256 -c ByteTrace_<version>_macOS-Apple-Silicon.dmg.sha256
 
 ## 🔒 Data & Security
 
-- The only data source is the read-only system command `/usr/bin/nettop`; no Network Extension is used
+- Application totals come exclusively from the read-only system command `/usr/bin/nettop`; no Network Extension is used
+- Website rankings are off by default. When enabled, ByteTrace only connects to a Mihomo API on a loopback address and reads active connections' host, process path, and cumulative byte counters; it never guesses a domain from a destination IP
+- The optional Mihomo secret is stored in the macOS Keychain. Very short connections may be missed, so identified-domain totals do not equal an app's total traffic
 - ByteTrace only reads enabled local-proxy addresses and ports from macOS `SystemConfiguration` to identify app-to-proxy loopback traffic; endpoints are neither stored nor displayed
 - Everything is stored locally in SQLite: `~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3` — inspectable with any SQLite client
 - Nothing is uploaded; no stats ever leave your machine
@@ -104,7 +106,9 @@ Artifacts land under `dist/`: `ByteTrace.app`, `ByteTrace.dmg`, and `ByteTrace.z
 
 ## 🙏 Acknowledgments
 
-- [`nettop`](https://keith.github.io/xcode-man-pages/nettop.1.html) — the network statistics command built into macOS, ByteTrace's only data source
+- [`nettop`](https://keith.github.io/xcode-man-pages/nettop.1.html) — the network statistics command built into macOS and the only source for ByteTrace application totals
+- [Mihomo](https://github.com/MetaCubeX/mihomo) — optional active-connection snapshots for website traffic
+- [Public Suffix List](https://publicsuffix.org/) — offline registrable-domain rules; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for licensing
 
 ## 📄 License
 

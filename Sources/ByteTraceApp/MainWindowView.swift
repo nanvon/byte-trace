@@ -76,6 +76,9 @@ private struct MainOverviewView: View {
                     summary
                     timeline
                     applicationSection
+                    if model.unattributedSiteTotals.totalBytes > 0 {
+                        unattributedSiteSummary
+                    }
                     if !proxyRecords.isEmpty {
                         CollapsibleUsageSection(
                             title: "代理运输流量",
@@ -237,6 +240,31 @@ private struct MainOverviewView: View {
                 usageRows(applicationRecords, showsAll: $showsAllApplications)
             }
         }
+    }
+
+    private var unattributedSiteSummary: some View {
+        let totals = model.unattributedSiteTotals
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("无法识别/其他网站流量", systemImage: "questionmark.app.dashed")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(ByteTraceViewModel.formatBytes(totals.totalBytes))
+                    .font(.callout.weight(.semibold))
+                    .monospacedDigit()
+            }
+            HStack(spacing: 12) {
+                Text("↓ \(ByteTraceViewModel.formatBytes(totals.downloadBytes))")
+                Text("↑ \(ByteTraceViewModel.formatBytes(totals.uploadBytes))")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Text("这些 Mihomo 连接缺少可用的 processPath，无法安全归属到具体应用，因此不会进入应用总量或任一应用详情。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func usageRows(_ records: [DailyUsageRecord], showsAll: Binding<Bool>) -> some View {
@@ -455,6 +483,7 @@ private struct MainWindowRegistration: NSViewRepresentable {
 private struct AppDetailView: View {
     let appKey: String
     @ObservedObject var model: ByteTraceViewModel
+    @State private var showsAllSites = false
 
     private var record: DailyUsageRecord? {
         model.rangeRecords.first { $0.appKey == appKey }
@@ -467,6 +496,7 @@ private struct AppDetailView: View {
                     appHeader(record)
                     appStats(record)
                     appTimeline
+                    siteRanking
                 } else {
                     Text("当前时间范围内没有这个应用的统计数据")
                         .foregroundStyle(.secondary)
@@ -549,9 +579,111 @@ private struct AppDetailView: View {
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
+    private var siteRanking: some View {
+        let records = model.siteUsage(for: appKey)
+        let visible = showsAllSites ? records : Array(records.prefix(10))
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("已识别网站流量")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text(model.selectedRange.title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("仅覆盖经过 Mihomo 且被活动连接快照捕获的流量，可能漏掉极短连接；域名之和不等于应用全部流量。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if records.isEmpty {
+                Text(siteEmptyMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 24)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(visible.enumerated()), id: \.element.siteKey) { index, site in
+                        SiteUsageRow(record: site)
+                        if index < visible.count - 1 {
+                            Divider()
+                        }
+                    }
+                    if records.count > 10 {
+                        Divider()
+                        Button(showsAllSites ? "收起" : "显示全部 \(records.count) 个") {
+                            withAnimation(.smooth(duration: 0.22)) {
+                                showsAllSites.toggle()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .pointingHandCursor()
+                    }
+                }
+                .padding(.horizontal, 12)
+                .background(
+                    .quaternary.opacity(0.35),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+            }
+        }
+        .padding(16)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var siteEmptyMessage: String {
+        if !model.mihomoEnabled {
+            return "尚未启用 Mihomo 网站统计，可在设置中开启。"
+        }
+        switch model.mihomoStatus {
+        case .connecting, .reconnecting:
+            return "正在连接 Mihomo，取得快照后会显示网站排行。"
+        case let .failed(message):
+            return "Mihomo 暂不可用：\(message)"
+        default:
+            return "当前时间范围内暂无已识别网站流量。"
+        }
+    }
+
     private func totalBytes(for record: DailyUsageRecord) -> Int64 {
         let result = record.downloadBytes.addingReportingOverflow(record.uploadBytes)
         return result.overflow ? Int64.max : result.partialValue
+    }
+}
+
+private struct SiteUsageRow: View {
+    let record: SiteUsageRecord
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: record.siteKey == PublicSuffixList.unidentifiedSiteKey
+                ? "questionmark.circle"
+                : "globe")
+                .foregroundStyle(.secondary)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(ByteTraceViewModel.displaySiteKey(record.siteKey))
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                HStack(spacing: 10) {
+                    Text("↓ \(ByteTraceViewModel.formatBytes(record.downloadBytes))")
+                    Text("↑ \(ByteTraceViewModel.formatBytes(record.uploadBytes))")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+            Spacer()
+            Text(ByteTraceViewModel.formatBytes(record.totalBytes))
+                .font(.callout.weight(.medium))
+                .monospacedDigit()
+        }
+        .padding(.vertical, 10)
     }
 }
 

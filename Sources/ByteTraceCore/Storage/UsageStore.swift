@@ -2,8 +2,9 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 6
+    public static let schemaVersion: Int64 = 7
     public static let accountingVersion: Int64 = 3
+    public static let siteAccountingVersion: Int64 = 1
 
     private let database: SQLiteDatabase
     private static let legacyCCBarAppKey = "proxy:ccbar"
@@ -44,6 +45,48 @@ public final class UsageStore: @unchecked Sendable {
             for aggregate in bucketAggregates {
                 try upsertApp(for: aggregate)
                 try upsertBucketUsage(for: aggregate)
+            }
+            try database.execute("COMMIT;")
+        } catch {
+            try? database.execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Mihomo 网站流量使用独立事务，失败时不能影响 nettop 应用总量的落库。
+    public func applySiteUsage(
+        _ aggregates: [SiteDailyUsageAggregate],
+        bucketAggregates: [SiteBucketUsageAggregate] = []
+    ) throws {
+        guard !aggregates.isEmpty || !bucketAggregates.isEmpty else { return }
+
+        try database.execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            for aggregate in aggregates {
+                try insertSiteAppIfNeeded(
+                    appKey: aggregate.appKey,
+                    bundleID: aggregate.bundleID,
+                    bundlePath: aggregate.bundlePath,
+                    executablePath: aggregate.executablePath,
+                    displayName: aggregate.displayName,
+                    category: aggregate.category,
+                    firstSeenAt: aggregate.firstSeenAt,
+                    lastSeenAt: aggregate.lastSeenAt
+                )
+                try upsertSiteDailyUsage(aggregate)
+            }
+            for aggregate in bucketAggregates {
+                try insertSiteAppIfNeeded(
+                    appKey: aggregate.appKey,
+                    bundleID: aggregate.bundleID,
+                    bundlePath: aggregate.bundlePath,
+                    executablePath: aggregate.executablePath,
+                    displayName: aggregate.displayName,
+                    category: aggregate.category,
+                    firstSeenAt: aggregate.firstSeenAt,
+                    lastSeenAt: aggregate.lastSeenAt
+                )
+                try upsertSiteBucketUsage(aggregate)
             }
             try database.execute("COMMIT;")
         } catch {
@@ -173,6 +216,41 @@ public final class UsageStore: @unchecked Sendable {
         return records
     }
 
+    public func siteUsage(
+        from startDay: String,
+        through endDay: String
+    ) throws -> [SiteUsageRecord] {
+        let statement = try database.prepare(
+            """
+            SELECT app_key, site_key, download_bytes, upload_bytes, sample_count
+            FROM mihomo_site_daily_usage
+            WHERE site_accounting_version = ? AND day >= ? AND day <= ?
+            ORDER BY day ASC;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try database.bind(Self.siteAccountingVersion, at: 1, in: statement)
+        try database.bind(startDay, at: 2, in: statement)
+        try database.bind(endDay, at: 3, in: statement)
+        return try aggregateSiteRows(statement)
+    }
+
+    public func siteUsage(from start: Date, to end: Date) throws -> [SiteUsageRecord] {
+        let statement = try database.prepare(
+            """
+            SELECT app_key, site_key, download_bytes, upload_bytes, sample_count
+            FROM mihomo_site_buckets
+            WHERE site_accounting_version = ? AND bucket_start >= ? AND bucket_start < ?
+            ORDER BY bucket_start ASC;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try database.bind(Self.siteAccountingVersion, at: 1, in: statement)
+        try database.bind(Self.epochSeconds(start), at: 2, in: statement)
+        try database.bind(Self.epochSeconds(end), at: 3, in: statement)
+        return try aggregateSiteRows(statement)
+    }
+
     public func bucketStats() throws -> UsageBucketStats {
         let statement = try database.prepare(
             """
@@ -210,8 +288,12 @@ public final class UsageStore: @unchecked Sendable {
                 from: "usage_buckets",
                 before: date
             )
+            let siteDeleted = try deleteBuckets(
+                from: "mihomo_site_buckets",
+                before: date
+            )
             try database.execute("COMMIT;")
-            return usageDeleted
+            return saturatingAdd(usageDeleted, siteDeleted)
         } catch {
             try? database.execute("ROLLBACK;")
             throw error
@@ -236,6 +318,8 @@ public final class UsageStore: @unchecked Sendable {
     }
 
     public func clearAll() throws {
+        try database.execute("DELETE FROM mihomo_site_buckets;")
+        try database.execute("DELETE FROM mihomo_site_daily_usage;")
         try database.execute("DELETE FROM usage_buckets;")
         try database.execute("DELETE FROM daily_usage;")
         try database.execute("DELETE FROM apps;")
@@ -333,6 +417,45 @@ public final class UsageStore: @unchecked Sendable {
 
         if currentVersion <= 5 {
             try migrateAccountingVersion()
+        }
+
+        if currentVersion <= 6 {
+            try database.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mihomo_site_daily_usage (
+                    site_accounting_version INTEGER NOT NULL CHECK (site_accounting_version > 0),
+                    day TEXT NOT NULL,
+                    app_key TEXT NOT NULL,
+                    site_key TEXT NOT NULL,
+                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
+                    sample_count INTEGER NOT NULL DEFAULT 0 CHECK (sample_count >= 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (site_accounting_version, day, app_key, site_key),
+                    FOREIGN KEY (app_key) REFERENCES apps(app_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS mihomo_site_buckets (
+                    site_accounting_version INTEGER NOT NULL CHECK (site_accounting_version > 0),
+                    bucket_start INTEGER NOT NULL,
+                    app_key TEXT NOT NULL,
+                    site_key TEXT NOT NULL,
+                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
+                    sample_count INTEGER NOT NULL DEFAULT 0 CHECK (sample_count >= 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (site_accounting_version, bucket_start, app_key, site_key),
+                    FOREIGN KEY (app_key) REFERENCES apps(app_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_mihomo_site_daily_range
+                    ON mihomo_site_daily_usage(site_accounting_version, day, app_key);
+                CREATE INDEX IF NOT EXISTS idx_mihomo_site_buckets_range
+                    ON mihomo_site_buckets(site_accounting_version, bucket_start, app_key);
+
+                PRAGMA user_version = 7;
+                """
+            )
         }
     }
 
@@ -693,6 +816,151 @@ public final class UsageStore: @unchecked Sendable {
         try database.bind(aggregate.sampleCount, at: 6, in: statement)
         try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
         try database.stepDone(statement)
+    }
+
+    /// 网站侧只补充尚不存在的应用行；若 nettop 已写入同一 appKey，绝不覆盖其元数据。
+    private func insertSiteAppIfNeeded(
+        appKey: String,
+        bundleID: String?,
+        bundlePath: String?,
+        executablePath: String?,
+        displayName: String,
+        category: AppCategory,
+        firstSeenAt: Date,
+        lastSeenAt: Date
+    ) throws {
+        let statement = try database.prepare(
+            """
+            INSERT OR IGNORE INTO apps (
+                app_key, bundle_id, bundle_path, executable_path,
+                display_name, category, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(appKey, at: 1, in: statement)
+        try database.bind(bundleID, at: 2, in: statement)
+        try database.bind(bundlePath, at: 3, in: statement)
+        try database.bind(executablePath, at: 4, in: statement)
+        try database.bind(displayName, at: 5, in: statement)
+        try database.bind(category.rawValue, at: 6, in: statement)
+        try database.bind(Self.timestamp(firstSeenAt), at: 7, in: statement)
+        try database.bind(Self.timestamp(lastSeenAt), at: 8, in: statement)
+        try database.stepDone(statement)
+    }
+
+    private func upsertSiteDailyUsage(_ aggregate: SiteDailyUsageAggregate) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO mihomo_site_daily_usage (
+                site_accounting_version, day, app_key, site_key,
+                download_bytes, upload_bytes, sample_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site_accounting_version, day, app_key, site_key) DO UPDATE SET
+                download_bytes = CASE
+                    WHEN download_bytes > 9223372036854775807 - excluded.download_bytes
+                    THEN 9223372036854775807 ELSE download_bytes + excluded.download_bytes END,
+                upload_bytes = CASE
+                    WHEN upload_bytes > 9223372036854775807 - excluded.upload_bytes
+                    THEN 9223372036854775807 ELSE upload_bytes + excluded.upload_bytes END,
+                sample_count = CASE
+                    WHEN sample_count > 9223372036854775807 - excluded.sample_count
+                    THEN 9223372036854775807 ELSE sample_count + excluded.sample_count END,
+                updated_at = excluded.updated_at;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(Self.siteAccountingVersion, at: 1, in: statement)
+        try database.bind(aggregate.day, at: 2, in: statement)
+        try database.bind(aggregate.appKey, at: 3, in: statement)
+        try database.bind(aggregate.siteKey, at: 4, in: statement)
+        try database.bind(aggregate.downloadBytes, at: 5, in: statement)
+        try database.bind(aggregate.uploadBytes, at: 6, in: statement)
+        try database.bind(aggregate.sampleCount, at: 7, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 8, in: statement)
+        try database.stepDone(statement)
+    }
+
+    private func upsertSiteBucketUsage(_ aggregate: SiteBucketUsageAggregate) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO mihomo_site_buckets (
+                site_accounting_version, bucket_start, app_key, site_key,
+                download_bytes, upload_bytes, sample_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site_accounting_version, bucket_start, app_key, site_key) DO UPDATE SET
+                download_bytes = CASE
+                    WHEN download_bytes > 9223372036854775807 - excluded.download_bytes
+                    THEN 9223372036854775807 ELSE download_bytes + excluded.download_bytes END,
+                upload_bytes = CASE
+                    WHEN upload_bytes > 9223372036854775807 - excluded.upload_bytes
+                    THEN 9223372036854775807 ELSE upload_bytes + excluded.upload_bytes END,
+                sample_count = CASE
+                    WHEN sample_count > 9223372036854775807 - excluded.sample_count
+                    THEN 9223372036854775807 ELSE sample_count + excluded.sample_count END,
+                updated_at = excluded.updated_at;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(Self.siteAccountingVersion, at: 1, in: statement)
+        try database.bind(Self.epochSeconds(aggregate.bucketStart), at: 2, in: statement)
+        try database.bind(aggregate.appKey, at: 3, in: statement)
+        try database.bind(aggregate.siteKey, at: 4, in: statement)
+        try database.bind(aggregate.downloadBytes, at: 5, in: statement)
+        try database.bind(aggregate.uploadBytes, at: 6, in: statement)
+        try database.bind(aggregate.sampleCount, at: 7, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 8, in: statement)
+        try database.stepDone(statement)
+    }
+
+    private func aggregateSiteRows(_ statement: OpaquePointer) throws -> [SiteUsageRecord] {
+        var records: [String: SiteUsageRecord] = [:]
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+
+            let appKey = database.columnString(statement, at: 0) ?? ""
+            let siteKey = database.columnString(statement, at: 1)
+                ?? PublicSuffixList.unidentifiedSiteKey
+            let dictionaryKey = appKey + "\0" + siteKey
+            let downloadBytes = sqlite3_column_int64(statement, 2)
+            let uploadBytes = sqlite3_column_int64(statement, 3)
+            let sampleCount = sqlite3_column_int64(statement, 4)
+            if let existing = records[dictionaryKey] {
+                records[dictionaryKey] = SiteUsageRecord(
+                    appKey: appKey,
+                    siteKey: siteKey,
+                    downloadBytes: saturatingAdd(existing.downloadBytes, downloadBytes),
+                    uploadBytes: saturatingAdd(existing.uploadBytes, uploadBytes),
+                    sampleCount: saturatingAdd(existing.sampleCount, sampleCount)
+                )
+            } else {
+                records[dictionaryKey] = SiteUsageRecord(
+                    appKey: appKey,
+                    siteKey: siteKey,
+                    downloadBytes: downloadBytes,
+                    uploadBytes: uploadBytes,
+                    sampleCount: sampleCount
+                )
+            }
+        }
+        return records.values.sorted {
+            if $0.totalBytes == $1.totalBytes {
+                return $0.siteKey < $1.siteKey
+            }
+            return $0.totalBytes > $1.totalBytes
+        }
+    }
+
+    private func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let result = lhs.addingReportingOverflow(rhs)
+        return result.overflow ? Int64.max : result.partialValue
     }
 
     private func deleteBuckets(from table: String, before date: Date) throws -> Int64 {

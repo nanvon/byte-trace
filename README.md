@@ -33,8 +33,8 @@
 - **菜单栏面板** —— 今日总量／下载／上传汇总,按流量排序的应用列表(带真实应用图标);代理运输流量与系统后台进程各自折叠分组,不混入应用总量;采集状态实时提示,可随时开始或停止
 - **代理兼容** —— 同时覆盖直连、TUN 与 macOS 系统代理流量;系统代理端点从系统配置实时读取,无需写死 Clash／Mihomo 的监听端口;补充通道会过滤代理镜像、本地 IPC 与广播流量,避免应用漏记、双计和虚高
 - **主窗口概览** —— 最近 10 分钟／最近 1 小时／今天／本周／本月五档时间范围:汇总卡片、流量趋势图与应用流量排行,点击任一应用进入详情
-- **应用详情** —— 单个应用的总量、上下行与独立趋势图
-- **设置** —— 分钟级数据保留策略(永不／7／30／90 天)、导出当前范围 JSON、清空统计、显示系统进程、登录时启动
+- **应用详情** —— 单个应用的总量、上下行与独立趋势图；可选展示经 Mihomo 识别的主域名流量排行
+- **设置** —— 可选的本机 Mihomo 网站统计、分钟级数据保留策略(永不／7／30／90 天)、导出当前范围 JSON、清空统计、显示系统进程、登录时启动
 
 ### 📸 界面预览
 
@@ -76,7 +76,9 @@ shasum -a 256 -c ByteTrace_<版本>_macOS-Apple-Silicon.dmg.sha256
 
 ## 🔒 数据与安全
 
-- 唯一数据源是系统自带的只读命令 `/usr/bin/nettop`,不使用 Network Extension
+- 应用总量唯一来自系统自带的只读命令 `/usr/bin/nettop`,不使用 Network Extension
+- 网站排行默认关闭；启用后只连接本机回环地址上的 Mihomo API，读取活动连接的域名、进程路径与累计字节，不读取目标 IP 猜测域名
+- Mihomo 密钥保存到 macOS 钥匙串；网站排行可能漏掉极短连接，域名之和不等于应用总量
 - 仅从 macOS `SystemConfiguration` 读取当前启用的本机代理地址和端口,用于识别应用到代理的回环流量;端点不保存、不展示
 - 所有数据保存在本机 SQLite:`~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3`,可用任意 SQLite 客户端自行查询
 - 不上传、不联网回传任何统计结果
@@ -104,7 +106,9 @@ shasum -a 256 -c ByteTrace_<版本>_macOS-Apple-Silicon.dmg.sha256
 
 ## 🙏 致谢
 
-- [`nettop`](https://keith.github.io/xcode-man-pages/nettop.1.html) —— macOS 系统自带的网络统计命令,ByteTrace 的唯一数据源
+- [`nettop`](https://keith.github.io/xcode-man-pages/nettop.1.html) —— macOS 系统自带的网络统计命令，ByteTrace 应用总量的唯一数据源
+- [Mihomo](https://github.com/MetaCubeX/mihomo) —— 可选的网站流量活动连接快照
+- [Public Suffix List](https://publicsuffix.org/) —— 离线主域名归并规则，使用条款见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 
 ## 📄 许可证
 
