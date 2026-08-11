@@ -188,11 +188,15 @@ final class NettopCSVParserTests: XCTestCase {
         var parser = NettopCSVParser(mode: .connections)
         let events = parser.consume(Data(input.utf8)) + parser.finish()
 
+        // 本用例的核心：Listen 行的空 bytes 列不能被当成畸形行。
         XCTAssertEqual(parser.malformedRowCount, 0)
         guard case let .frameCompleted(rowCount, deltas, false) = events.last else {
             return XCTFail("expected a collecting frame")
         }
-        XCTAssertEqual(rowCount, 1)
+        // 零字节连接行现在在 parseRow 之前就被预筛掉，不再进入本帧的行集合。
+        // rowCount 只用于探针诊断日志（ByteTraceViewModel 与 NettopCollector 都忽略它），
+        // 它的变化不影响任何流量口径；deltas 为空这一点与改动前完全一致。
+        XCTAssertEqual(rowCount, 0)
         XCTAssertTrue(deltas.isEmpty)
     }
 
@@ -262,6 +266,86 @@ final class NettopCSVParserTests: XCTestCase {
         }
         XCTAssertEqual(rowCount, 0)
         XCTAssertTrue(deltas.isEmpty)
+    }
+
+    /// 零字节连接行（Listen、`*:*<->*:*` 通配、空闲连接）在 `parseRow` 之前就被丢弃，
+    /// 真实采集里它们占八成以上。这里确认：噪声再多，有字节的行仍被完整保留，
+    /// 且分块喂入（考验 lineBuffer 游标）时结果一致。
+    func testZeroByteConnectionNoiseDoesNotAffectDeltas() {
+        let input = """
+        time,,interface,state,bytes_in,bytes_out,
+        20:00:00.000,ClashBar.1,,,0,0,
+        20:00:00.000,tcp4 127.0.0.1:8021<->*:*,lo0,Listen,,,
+        20:00:00.000,tcp4 127.0.0.1:61060<->127.0.0.1:7890,lo0,Established,10,20,
+        time,,interface,state,bytes_in,bytes_out,
+        20:00:01.000,ClashBar.1,,,0,0,
+        20:00:01.000,tcp4 127.0.0.1:8021<->*:*,lo0,Listen,,,
+        20:00:01.000,udp4 *:*<->*:*,,,,,
+        20:00:01.000,udp6 *.*<->*.*,,,,,
+        20:00:01.000,tcp4 127.0.0.1:52000<->127.0.0.1:7890,lo0,Established,0,0,
+        20:00:01.000,tcp4 127.0.0.1:61060<->127.0.0.1:7890,lo0,Established,30,40,
+
+        """
+
+        var whole = NettopCSVParser(mode: .connections)
+        let wholeEvents = whole.consume(Data(input.utf8)) + whole.finish()
+
+        guard case let .frameCompleted(rowCount, deltas, false) = wholeEvents.last else {
+            return XCTFail("expected a collecting frame")
+        }
+        // 只有那一条带字节的连接行进入本帧。
+        XCTAssertEqual(rowCount, 1)
+        XCTAssertEqual(
+            deltas,
+            [
+                NettopDelta(
+                    sampledAt: "20:00:01.000",
+                    processName: "ClashBar.1",
+                    downloadBytes: 30,
+                    uploadBytes: 40,
+                    interface: "lo0",
+                    connectionTarget: "127.0.0.1:7890",
+                    localEndpoint: NettopEndpoint(host: "127.0.0.1", port: 61060),
+                    remoteEndpoint: NettopEndpoint(host: "127.0.0.1", port: 7890),
+                    connectionState: "Established"
+                )
+            ]
+        )
+
+        // 逐字节分块喂入，结果必须完全一致。
+        var chunked = NettopCSVParser(mode: .connections)
+        var chunkedEvents: [NettopParserEvent] = []
+        let data = Data(input.utf8)
+        for offset in stride(from: 0, to: data.count, by: 7) {
+            let end = min(offset + 7, data.count)
+            chunkedEvents.append(contentsOf: chunked.consume(data.subdata(in: offset..<end)))
+        }
+        chunkedEvents.append(contentsOf: chunked.finish())
+
+        guard case let .frameCompleted(chunkedRowCount, chunkedDeltas, false) = chunkedEvents.last else {
+            return XCTFail("expected a collecting frame from chunked input")
+        }
+        XCTAssertEqual(chunkedRowCount, rowCount)
+        XCTAssertEqual(chunkedDeltas, deltas)
+        XCTAssertEqual(chunked.malformedRowCount, whole.malformedRowCount)
+    }
+
+    /// 预筛只认「空」和「0」；非法字节值仍必须被判为畸形行，保持 malformedRowCount 口径。
+    func testMalformedByteValuesStillCountAsMalformedRows() {
+        let input = """
+        time,,interface,state,bytes_in,bytes_out,
+        20:00:00.000,Dia.1,,,0,0,
+        time,,interface,state,bytes_in,bytes_out,
+        20:00:01.000,Dia.1,,,0,0,
+        20:00:01.000,tcp4 10.0.0.1:80<->10.0.0.2:443,utun2,Established,abc,-5,
+
+        """
+
+        var parser = NettopCSVParser(mode: .connections)
+        let events = parser.consume(Data(input.utf8)) + parser.finish()
+
+        XCTAssertEqual(parser.malformedRowCount, 1)
+        XCTAssertTrue(events.contains { if case .malformedRow = $0 { return true } else { return false } })
     }
 
     func testIPv6LoopbackTargetParsing() {

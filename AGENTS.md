@@ -29,8 +29,10 @@ swift run ByteTraceProbe --duration 15 # 应用级采集
 
 ByteTrace 按 nettop 接口类型拆分成两个常驻通道，避免高功耗的全接口连接级采集：外部通道按进程汇总已定义的非回环接口；补充通道只读取 `loopback` 与 `undefined` 连接，用于补齐系统代理入口和 utun/TUN 应用侧流量。
 
-- 外部通道：`nettop -n -P -d -x -L 0 -s 5 -t external -J time,interface,state,bytes_in,bytes_out`。`-P` 按进程汇总，覆盖 Wi-Fi／有线等已定义非回环接口上的直连和代理进程外层连接。
-- 补充通道：`nettop -n -d -x -L 0 -s 1 -t loopback -t undefined -J time,interface,state,bytes_in,bytes_out`。连接级解析只保留两类应用侧流量：目标精确命中当前系统代理的 `lo0` 连接，以及具有明确本地／远端端点的 `utun*` 连接。1 秒采样用于减少短连接漏记，落库和 UI 刷新仍保持低频。
+- 外部通道：`nettop -c -n -P -d -x -L 0 -s 5 -t external -J time,interface,state,bytes_in,bytes_out`。`-P` 按进程汇总，覆盖 Wi-Fi／有线等已定义非回环接口上的直连和代理进程外层连接。
+- 补充通道：`nettop -c -n -d -x -L 0 -s 1 -t loopback -t undefined -J time,interface,state,bytes_in,bytes_out`。连接级解析只保留两类应用侧流量：目标精确命中当前系统代理的 `lo0` 连接，以及具有明确本地／远端端点的 `utun*` 连接。1 秒采样用于减少短连接漏记，落库和 UI 刷新仍保持低频。
+
+**`-c` 是性能关键参数，不要移除**（man: "Less intensive use of the CPU - draws less often"）。在 `-L 0` 日志模式下它只跳过 curses 绘制，不改变采样周期与 CSV 输出：同时运行带／不带 `-c` 的两个补充通道 30 秒，帧数、有效行数、上下行字节完全一致（0.00% 差异），而补充通道 CPU 从 9.0% 降到 2.1%。这是实测结论而非文档保证，未来 macOS 升级后若出现帧率或数据异常，应优先排查这里。
 
 系统代理端点通过 `SCDynamicStoreCopyProxies` 首次读取，并监听 `State:/Network/Global/Proxies` 变化；只接受启用的 HTTP／HTTPS／SOCKS 本机回环端点，因此不写死 `7890`、不轮询 Mihomo API。补充通道丢弃其他本地 IPC、无明确端点的广播／通配连接，并在进程归属后丢弃代理进程的 utun 镜像；代理外层流量仍由外部通道单独展示、不反向抵扣、不计入应用总量。端点仅参与内存过滤，不落库、不展示。
 
@@ -44,8 +46,10 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
                                          → ProcessAttributionCache → AttributedProcess（appKey/分类）
   → UsageAggregator.ingest()             内存中按 (day, 分钟桶, appKey) 合并
   → UsageAggregator.flush()              每 5 秒定时器触发，一个事务写入 SQLite
-  → ByteTraceViewModel.refresh()         回读 SQLite 刷新 UI
+  → ByteTraceViewModel.refresh()         回读 SQLite 刷新 UI（仅在有界面可见时）
 ```
+
+解析器在 `parseRow` 之前会预筛掉**零字节的连接行**（`canSkipZeroByteConnection`）。真实采集里 `Listen`、`udp4 *:*<->*:*` 通配和空闲连接占八成以上，它们在 `completeCurrentFrame` 里本来也会被 `downloadBytes > 0 || uploadBytes > 0` 丢掉，提前判断不改变任何产出。进程行不参与预筛——它们自身不产出流量，但决定后续连接行的归属。副作用：`frameCompleted` 的 `rowCount` 现在只统计有效行，该字段仅用于探针诊断日志。
 
 ### 帧与基线
 
@@ -91,9 +95,12 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 `ByteTraceViewModel`（`@MainActor`、`ObservableObject`）是唯一的编排者，持有应用级采集器、`UsageStore`、聚合器、定时器与生命周期监听。需要留意：
 
-- **并发约定**：`NettopCollector` / `UsageStore` / `UsageAggregator` / `ProcessAttributionCache` / `SystemProxyEndpointMonitor` 都是 `@unchecked Sendable` + `NSLock`；两个采集器分别在串行队列解析，回调经 `Task { @MainActor }` 跳回主线程。`SystemProcessIdentityResolver` 读 `NSRunningApplication` 时若不在主线程会 `DispatchQueue.main.sync`——不要从任何会阻塞主线程的路径调用它。
+- **并发约定**：`NettopCollector` / `UsageStore` / `UsageAggregator` / `ProcessAttributionCache` / `SystemProxyEndpointMonitor` 都是 `@unchecked Sendable` + 锁；两个采集器分别在串行队列解析，回调经 `Task { @MainActor }` 跳回主线程。`SystemProcessIdentityResolver` 读 `NSRunningApplication` 时若不在主线程会 `DispatchQueue.main.sync`——不要从任何会阻塞主线程的路径调用它。
+  `UsageStore` 用 **`NSRecursiveLock` 保护每个 public 方法**（可重入是因为 `dailyUsage(for:)` 转调 `dailyUsage(from:through:)`）。锁必须留在 `UsageStore` 这一层：`apply` 与 `purgeBuckets` 都是 `BEGIN IMMEDIATE … COMMIT` 的多语句事务，下沉到 `SQLiteDatabase` 的单条语句上保护不了事务边界。主线程落库与后台队列的保留策略共用同一个 sqlite3 连接，无锁并发会撞上 `cannot start a transaction within a transaction` **并真的丢样本**（见 `UsageStoreConcurrencyTests`）。
 - **两个通道独立重连**，退避均为 `[1, 2, 5, 10, 30]` 秒；睡眠/唤醒（`NSWorkspace` 通知）与网络路径切换（`NWPathMonitor`）都会先停两个采集器 + `flushNow()` 再走重连。
-- **UI 刷新由 5 秒 flush 定时器驱动**（`flushNow()` 内部调 `refresh()`），没有独立的轮询。
+- **UI 刷新由 5 秒 flush 定时器驱动**（`flushNow()` 内部调 `refresh()`），没有独立的轮询。定时器带 `tolerance = 1`，允许系统合并唤醒以降低能耗；落库最多晚 1 秒，聚合结果仍在内存里，一条不丢。
+- **UI 刷新受可见性门控**：`refreshIfNeeded` 在 `visibleSurfaceCount == 0` 时直接返回，菜单栏面板与主窗口各自用 `beginObservingUsage()` / `endObservingUsage()` 加减计数（`onAppear` / `onDisappear`），从 0 变 1 时立即补一次刷新。终止路径（`stop` / `shutdown` / 网络切换）传 `force: true` 绕过门控。采集与落库完全不受影响。
+  **因此数据保留策略不能挂在 `refresh()` 里**——它已移到 `flushTimerFired`，否则无人打开界面时清理永远不会执行。
 - **「今天」是双数据源**：汇总数字来自 `daily_usage`，趋势图来自 `usage_buckets`（`usesBucketSummary` 与 `usesFineGrainedTimeline` 两个开关分别控制）。「最近 10 分钟 / 1 小时」两者都用分钟桶，「本周 / 本月」两者都用日汇总。
 - **nettop 的时间字段只有时钟没有日期**，`sampleDate(for:)` 把「今天」的年月日嫁接上去，跨零点存在已知误差。
 - 设置持久化：`UserDefaults` 键 `ByteTrace.showSystemProcesses`、`ByteTrace.usageRetentionPolicy`（默认 90 天）；登录时启动用 `SMAppService.mainApp`。

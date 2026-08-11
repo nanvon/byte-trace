@@ -27,6 +27,9 @@ struct MenuBarView: View {
             }
         }
         .frame(width: 390, height: 672)
+        // 面板收起后就没人看数据了，停掉周期性 UI 刷新；重新展开时立即补一次。
+        .onAppear { model.beginObservingUsage() }
+        .onDisappear { model.endObservingUsage() }
     }
 
     private var header: some View {
@@ -261,7 +264,8 @@ private struct UsageRows: View {
         }
         .padding(.horizontal, 10)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .animation(.smooth, value: records)
+        // 只在行集合本身变化（排名变动、增删应用）时做布局动画，字节数变化不触发。
+        .animation(.smooth, value: records.map(\.appKey))
     }
 }
 
@@ -295,11 +299,11 @@ private struct UsageRowView: View {
 
             Spacer(minLength: 6)
 
+            // 与主窗口列表同理，逐行数字滚动动画会让整个面板持续重绘；
+            // 顶部「今日总量」数量固定，仍保留动画。
             Text(ByteTraceViewModel.formatBytes(totalBytes))
                 .font(.callout.weight(.medium))
                 .monospacedDigit()
-                .contentTransition(.numericText())
-                .animation(.smooth, value: totalBytes)
         }
         .padding(.vertical, 8)
         .contentShape(Rectangle())
@@ -313,7 +317,7 @@ private struct UsageRowView: View {
     @ViewBuilder
     private var appIcon: some View {
         if let path = record.bundlePath ?? record.executablePath {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+            Image(nsImage: AppIconCache.icon(forPath: path))
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: 28, height: 28)

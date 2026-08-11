@@ -31,6 +31,10 @@ struct MainWindowView: View {
             ByteTraceAppDelegate.installOpenMainWindowAction { openWindow(id: "main") }
             ByteTraceAppDelegate.prepareMainWindow()
             NSApplication.shared.activate(ignoringOtherApps: true)
+            model.beginObservingUsage()
+        }
+        .onDisappear {
+            model.endObservingUsage()
         }
         .onChange(of: model.requestedMainWindowPage) { _, page in
             selection = page
@@ -285,7 +289,9 @@ private struct MainOverviewView: View {
         }
         .padding(.horizontal, 12)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .animation(.smooth, value: visible)
+        // 只在行集合本身变化（展开/收起、排名变动、增删应用）时做布局动画。
+        // 原本绑定整个 [DailyUsageRecord]，任何一行字节数变化都会触发整个容器重新布局。
+        .animation(.smooth, value: visible.map(\.appKey))
     }
 
     private func totalBytes(for record: DailyUsageRecord) -> Int64 {
@@ -301,52 +307,72 @@ private struct UsageTimelineChart: View {
     @State private var hoverLocation: CGPoint?
 
     private struct Slice: Identifiable {
-        let id: String
+        let id: Int
         let start: Date
         let seriesKey: String
         let bytes: Int64
     }
 
-    private var slices: [Slice] {
-        points.flatMap { point in
-            [
-                Slice(
-                    id: "down-\(point.segmentID)-\(point.start.timeIntervalSince1970)",
-                    start: point.start,
-                    seriesKey: "download#\(point.segmentID)",
-                    bytes: point.downloadBytes
-                ),
-                Slice(
-                    id: "up-\(point.segmentID)-\(point.start.timeIntervalSince1970)",
-                    start: point.start,
-                    seriesKey: "upload#\(point.segmentID)",
-                    bytes: point.uploadBytes
-                )
-            ]
-        }
+    private struct ChartData {
+        let slices: [Slice]
+        let domain: [String]
+        let range: [Color]
     }
 
-    private var colorScale: (domain: [String], range: [Color]) {
+    /// 一次遍历同时产出绘图数据与配色标度。
+    ///
+    /// 原实现有两个问题：`colorScale` 对每个点做 `Array.contains` 线性查找（O(n²)），
+    /// `slices` 又单独遍历一遍并为每个切片做字符串插值构造 id。「今天」范围下
+    /// 分钟桶聚合出的点数可达上千，这些都发生在每次 body 求值时。
+    ///
+    /// domain 的追加顺序与原实现一致（每遇到新 segment 先 download 后 upload），
+    /// 配色结果不变。
+    private var chartData: ChartData {
+        var slices: [Slice] = []
+        slices.reserveCapacity(points.count * 2)
         var domain: [String] = []
         var range: [Color] = []
+        var keysBySegment: [Int: (download: String, upload: String)] = [:]
+
         for point in points {
-            let downloadKey = "download#\(point.segmentID)"
-            let uploadKey = "upload#\(point.segmentID)"
-            if !domain.contains(downloadKey) {
-                domain.append(downloadKey)
+            let keys: (download: String, upload: String)
+            if let cached = keysBySegment[point.segmentID] {
+                keys = cached
+            } else {
+                keys = (
+                    download: "download#\(point.segmentID)",
+                    upload: "upload#\(point.segmentID)"
+                )
+                keysBySegment[point.segmentID] = keys
+                domain.append(keys.download)
                 range.append(.blue)
-            }
-            if !domain.contains(uploadKey) {
-                domain.append(uploadKey)
+                domain.append(keys.upload)
                 range.append(.orange)
             }
+
+            slices.append(
+                Slice(
+                    id: slices.count,
+                    start: point.start,
+                    seriesKey: keys.download,
+                    bytes: point.downloadBytes
+                )
+            )
+            slices.append(
+                Slice(
+                    id: slices.count,
+                    start: point.start,
+                    seriesKey: keys.upload,
+                    bytes: point.uploadBytes
+                )
+            )
         }
-        return (domain, range)
+        return ChartData(slices: slices, domain: domain, range: range)
     }
 
     var body: some View {
-        let scale = colorScale
-        Chart(slices) { slice in
+        let data = chartData
+        Chart(data.slices) { slice in
             AreaMark(
                 x: .value("时间", slice.start),
                 y: .value("字节", slice.bytes)
@@ -363,7 +389,7 @@ private struct UsageTimelineChart: View {
             .lineStyle(StrokeStyle(lineWidth: 1.6))
             .interpolationMethod(.monotone)
         }
-        .chartForegroundStyleScale(domain: scale.domain, range: scale.range)
+        .chartForegroundStyleScale(domain: data.domain, range: data.range)
         .chartLegend(.hidden)
         .chartYAxis {
             AxisMarks(position: .leading) { value in
@@ -610,11 +636,12 @@ private struct MainUsageRow: View {
 
             Spacer(minLength: 8)
 
+            // 这里刻意不加 .contentTransition(.numericText())：列表每 10 秒刷新一次且
+            // 数值必然变化，逐行数字滚动动画会让整个可见列表持续重绘，是渲染开销的主要来源。
+            // 顶部三张统计卡数量固定，仍保留动画作为视觉焦点。
             Text(ByteTraceViewModel.formatBytes(totalBytes))
                 .font(.callout.weight(.medium))
                 .monospacedDigit()
-                .contentTransition(.numericText())
-                .animation(.smooth, value: totalBytes)
         }
         .padding(.vertical, 10)
         .contentShape(Rectangle())
@@ -632,7 +659,7 @@ private struct AppIconView: View {
 
     var body: some View {
         if let path = record.bundlePath ?? record.executablePath {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+            Image(nsImage: AppIconCache.icon(forPath: path))
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: size, height: size)

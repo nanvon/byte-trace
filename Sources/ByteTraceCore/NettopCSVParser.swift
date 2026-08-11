@@ -190,10 +190,18 @@ public struct NettopCSVParser: Sendable {
         lineBuffer.append(data)
         var events: [NettopParserEvent] = []
 
-        while let newlineIndex = lineBuffer.firstIndex(of: 0x0A) {
-            let line = Data(lineBuffer[..<newlineIndex])
-            lineBuffer.removeSubrange(...newlineIndex)
+        // 用游标逐行推进，循环结束后一次性裁掉已消费部分。
+        // 原实现对每一行都 removeSubrange，即每行一次 O(n) memmove；补充通道每帧
+        // 约 22 KB / 375 行，累计每秒数 MB 的无谓拷贝。
+        // 注意 Data 切片的索引不从 0 开始，一律基于 startIndex 计算。
+        var consumed = lineBuffer.startIndex
+        while let newlineIndex = lineBuffer[consumed...].firstIndex(of: 0x0A) {
+            let line = Data(lineBuffer[consumed..<newlineIndex])
+            consumed = lineBuffer.index(after: newlineIndex)
             events.append(contentsOf: consumeLine(line))
+        }
+        if consumed > lineBuffer.startIndex {
+            lineBuffer.removeSubrange(..<consumed)
         }
 
         return events
@@ -229,6 +237,7 @@ public struct NettopCSVParser: Sendable {
         }
 
         guard let schema else { return [] }
+        if Self.canSkipZeroByteConnection(fields, using: schema) { return [] }
         guard let row = parseRow(fields, using: schema) else {
             malformedRowCount += 1
             return [.malformedRow]
@@ -368,6 +377,35 @@ public struct NettopCSVParser: Sendable {
             remoteEndpoint: endpoints.flatMap { NettopEndpoint.parse($0.target) },
             connectionState: connectionState
         )
+    }
+
+    /// 零字节连接行的廉价预筛：在 `parseRow`（含端点切分与两次 `NettopEndpoint.parse`）
+    /// 之前把它们丢掉。
+    ///
+    /// 补充通道每帧约 375 行里只有约 71 行最终有效，其余是 `Listen` 行、
+    /// `udp4 *:*<->*:*` 通配行和零字节连接。这些行在 `completeCurrentFrame` 里本来就会被
+    /// `downloadBytes > 0 || uploadBytes > 0` 过滤掉，这里只是提前判断，产出完全不变。
+    ///
+    /// 两类行不参与预筛：
+    /// - 进程行（第 2 列不是连接描述）自身不产出流量，但决定后续连接行归属哪个进程；
+    /// - 字段数不足的行交给 `parseRow` 判定为畸形行，保持 `malformedRowCount` 的口径。
+    private static func canSkipZeroByteConnection(
+        _ fields: [String],
+        using schema: Schema
+    ) -> Bool {
+        let requiredIndex = max(schema.processIndex, max(schema.bytesInIndex, schema.bytesOutIndex))
+        guard fields.count > requiredIndex,
+              isConnectionDescription(fields[schema.processIndex]) else {
+            return false
+        }
+        return isZeroOrEmptyByteField(fields[schema.bytesInIndex])
+            && isZeroOrEmptyByteField(fields[schema.bytesOutIndex])
+    }
+
+    /// 只认「空」与「0」。非法值（负数、非数字）留给 `parseRow` 判定为畸形行。
+    private static func isZeroOrEmptyByteField(_ field: String) -> Bool {
+        let trimmed = field.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty || trimmed == "0"
     }
 
     private static func byteValue(_ field: String) -> Int64? {

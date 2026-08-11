@@ -6,6 +6,14 @@ public final class UsageStore: @unchecked Sendable {
     public static let accountingVersion: Int64 = 3
 
     private let database: SQLiteDatabase
+    /// 保护整个数据库连接：单个 sqlite3 句柄会被主线程（落库、查询）与后台队列
+    /// （保留策略的 purge / VACUUM）同时使用。`apply` 与 `purgeBuckets` 各自是
+    /// `BEGIN IMMEDIATE … COMMIT` 的多语句事务，光靠 SQLite 自身的串行化不够——
+    /// 两边并发会撞上 "cannot start a transaction within a transaction"，
+    /// 落库因此失败（数据留在聚合器里等下次重试，但会持续报错）。
+    /// 锁必须加在事务边界这一层，不能下沉到 SQLiteDatabase 的单条语句上。
+    /// 用可重入锁：`dailyUsage(for:)` 会转调 `dailyUsage(from:through:)`。
+    private let lock = NSRecursiveLock()
     private static let legacyCCBarAppKey = "proxy:ccbar"
 
     private struct StoredApp {
@@ -35,6 +43,8 @@ public final class UsageStore: @unchecked Sendable {
     ) throws {
         guard !aggregates.isEmpty || !bucketAggregates.isEmpty else { return }
 
+        lock.lock()
+        defer { lock.unlock() }
         try database.execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             for aggregate in aggregates {
@@ -57,6 +67,8 @@ public final class UsageStore: @unchecked Sendable {
         occurredAt: Date = Date(),
         details: String? = nil
     ) throws {
+        lock.lock()
+        defer { lock.unlock() }
         let statement = try database.prepare(
             "INSERT INTO collector_events (occurred_at, kind, details) VALUES (?, ?, ?);"
         )
@@ -69,13 +81,17 @@ public final class UsageStore: @unchecked Sendable {
     }
 
     public func dailyUsage(for day: String) throws -> [DailyUsageRecord] {
-        try dailyUsage(from: day, through: day)
+        lock.lock()
+        defer { lock.unlock() }
+        return try dailyUsage(from: day, through: day)
     }
 
     public func dailyUsage(
         from startDay: String,
         through endDay: String
     ) throws -> [DailyUsageRecord] {
+        lock.lock()
+        defer { lock.unlock() }
         let statement = try database.prepare(
             """
             SELECT d.day, d.app_key, a.display_name, a.category,
@@ -123,6 +139,8 @@ public final class UsageStore: @unchecked Sendable {
     }
 
     public func bucketUsage(from start: Date, to end: Date) throws -> [UsageBucketRecord] {
+        lock.lock()
+        defer { lock.unlock() }
         let statement = try database.prepare(
             """
             SELECT b.bucket_start, b.app_key, a.display_name, a.category,
@@ -174,6 +192,8 @@ public final class UsageStore: @unchecked Sendable {
     }
 
     public func bucketStats() throws -> UsageBucketStats {
+        lock.lock()
+        defer { lock.unlock() }
         let statement = try database.prepare(
             """
             SELECT COUNT(*), MIN(bucket_start), MAX(bucket_start)
@@ -204,6 +224,8 @@ public final class UsageStore: @unchecked Sendable {
     }
 
     public func purgeBuckets(before date: Date) throws -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
         try database.execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             let usageDeleted = try deleteBuckets(
@@ -220,6 +242,8 @@ public final class UsageStore: @unchecked Sendable {
 
     /// 按时间清理诊断事件表（occurred_at 是定宽零填充文本时间戳，字典序等于数值序）。
     public func purgeCollectorEvents(before date: Date) throws -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
         let statement = try database.prepare(
             "DELETE FROM collector_events WHERE occurred_at < ?;"
         )
@@ -232,10 +256,14 @@ public final class UsageStore: @unchecked Sendable {
 
     /// WAL 下 DELETE 不收缩文件；大量删除后按需调用。阻塞操作，勿在主线程执行。
     public func vacuum() throws {
+        lock.lock()
+        defer { lock.unlock() }
         try database.execute("VACUUM;")
     }
 
     public func clearAll() throws {
+        lock.lock()
+        defer { lock.unlock() }
         try database.execute("DELETE FROM usage_buckets;")
         try database.execute("DELETE FROM daily_usage;")
         try database.execute("DELETE FROM apps;")

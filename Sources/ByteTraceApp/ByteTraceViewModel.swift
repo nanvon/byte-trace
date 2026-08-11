@@ -209,6 +209,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var networkPathSatisfied = true
     private var lastRetentionCleanupDay: String?
     private var lastUIRefreshDate: Date?
+    /// 当前有多少个界面正在展示统计数据（菜单栏面板 + 主窗口）。
+    /// 为 0 时跳过周期性 refresh：落库节奏完全不变，只是不做 SQLite 回读与
+    /// `@Published` 更新，避免菜单栏常驻时无人观看仍持续触发 SwiftUI 重绘。
+    private var visibleSurfaceCount = 0
 
     private static let restartDelays: [TimeInterval] = [1, 2, 5, 10, 30]
     /// 诊断事件保留时长（分钟桶保留策略之外的独立上限）。
@@ -306,6 +310,22 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         pendingAppDetailKey = appKey
     }
 
+    /// 界面开始展示统计数据时调用（菜单栏面板展开、主窗口出现）。
+    /// 从「无人观看」变为「有人观看」时立即补一次刷新，避免展示陈旧数据。
+    func beginObservingUsage() {
+        visibleSurfaceCount += 1
+        guard visibleSurfaceCount == 1 else { return }
+        lastUIRefreshDate = nil
+        refresh()
+    }
+
+    /// 界面不再展示统计数据时调用（菜单栏面板收起、主窗口关闭）。
+    func endObservingUsage() {
+        visibleSurfaceCount = max(0, visibleSurfaceCount - 1)
+    }
+
+    private var hasVisibleSurface: Bool { visibleSurfaceCount > 0 }
+
     func start() {
         guard !wantsCollection else { return }
         guard store != nil, aggregator != nil else {
@@ -392,8 +412,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
 
         do {
-            applyRetentionPolicyIfNeeded()
-            records = try store.dailyUsage(for: dayKey)
+            // 数据保留策略不在这里触发：refresh() 会被可见性门控跳过，挂在这里会让清理
+            // 永远不执行。它改由 5 秒 flush 定时器驱动（内部有日级守卫）。
+            let newRecords = try store.dailyUsage(for: dayKey)
+            if newRecords != records { records = newRecords }
             try loadRange(from: store)
         } catch {
             lastError = "读取今日统计失败：\(error.localizedDescription)"
@@ -844,12 +866,20 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             userInfo: nil,
             repeats: true
         )
+        // 允许系统把这次唤醒与其他定时器合并，减少闲置唤醒次数（菜单栏常驻工具的能耗大头
+        // 之一）。落库晚最多 1 秒不影响任何统计口径：聚合结果仍在内存里，一条不丢。
+        timer.tolerance = 1
         RunLoop.main.add(timer, forMode: .common)
         flushTimer = timer
     }
 
     @objc private func flushTimerFired(_ timer: Timer) {
         flushNow()
+        // 保留策略从 refresh() 移到这里：refresh() 受可见性门控，挂在那边会让清理永不执行。
+        // 内部有 lastRetentionCleanupDay 日级守卫，每天最多真正执行一次。
+        // 必须排在 flushNow() 之后：清理在后台队列执行、与落库共用 UsageStore 的锁，
+        // 先完成本次落库能把两者的竞争窗口压到最小。
+        applyRetentionPolicyIfNeeded()
     }
 
     @objc private func restartTimerFired(_ timer: Timer) {
@@ -1007,8 +1037,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     /// 落库保持 5 秒节奏；UI 刷新降频到 10 秒一次（分钟粒度数据无需秒级刷新），
-    /// 停止/休眠/网络切换等终止路径强制刷新以展示最终状态。
+    /// 且只在有界面正在展示时才做，停止/休眠/网络切换等终止路径强制刷新以展示最终状态。
     private func refreshIfNeeded(force: Bool) {
+        guard force || hasVisibleSurface else { return }
         let now = Date()
         guard force
                 || lastUIRefreshDate == nil
@@ -1067,7 +1098,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             let buckets = try store.bucketUsage(from: start, to: end)
             rangeBuckets = buckets
             dailyRangeRecords = []
-            rangeRecords = aggregateRecords(
+            setRangeRecords(aggregateRecords(
                 buckets.map {
                     DailyUsageRecord(
                         day: Self.dayKey(for: $0.bucketStart),
@@ -1082,10 +1113,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                         sampleCount: $0.sampleCount
                     )
                 }
-            )
-            rangeTimeline = makeTimeline(
+            ))
+            setRangeTimeline(makeTimeline(
                 from: buckets.filter { $0.category != .proxyTransport }
-            )
+            ))
             return
         }
 
@@ -1094,16 +1125,28 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             through: Self.dayKey(for: end)
         )
         dailyRangeRecords = daily
-        rangeRecords = aggregateRecords(daily)
+        setRangeRecords(aggregateRecords(daily))
         if selectedRange == .today {
             rangeBuckets = try store.bucketUsage(from: start, to: end)
-            rangeTimeline = makeTimeline(
+            setRangeTimeline(makeTimeline(
                 from: rangeBuckets.filter { $0.category != .proxyTransport }
-            )
+            ))
         } else {
             rangeBuckets = []
-            rangeTimeline = makeTimeline(from: daily.filter { $0.category != .proxyTransport })
+            setRangeTimeline(makeTimeline(from: daily.filter { $0.category != .proxyTransport }))
         }
+    }
+
+    /// `@Published` 赋值一律触发 objectWillChange 与全树失效，即使内容一字未变
+    /// （夜间无流量时很常见）。这两个 setter 用 Equatable 短路掉无意义的重绘。
+    private func setRangeRecords(_ newValue: [DailyUsageRecord]) {
+        guard newValue != rangeRecords else { return }
+        rangeRecords = newValue
+    }
+
+    private func setRangeTimeline(_ newValue: [UsageTimelinePoint]) {
+        guard newValue != rangeTimeline else { return }
+        rangeTimeline = newValue
     }
 
     private func aggregateRecords(_ records: [DailyUsageRecord]) -> [DailyUsageRecord] {
