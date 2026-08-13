@@ -4,7 +4,7 @@ import XCTest
 @testable import ByteTraceCore
 
 /// `UsageStore` 的单个 sqlite3 连接会被主线程（落库、查询）与后台队列
-/// （保留策略的 purge / VACUUM）同时使用。`apply` 与 `purgeBuckets` 都是
+/// （保留策略的 purge，或手动维护的 VACUUM）同时使用。`apply` 与 `purgeBuckets` 都是
 /// `BEGIN IMMEDIATE … COMMIT` 的多语句事务，没有互斥就会撞上
 /// "cannot start a transaction within a transaction"。
 final class UsageStoreConcurrencyTests: XCTestCase {

@@ -107,6 +107,179 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(dailyAfterPurge[0].sampleCount, 2)
     }
 
+    func testBatchedApplyKeepsLatestAppMetadataAcrossBuckets() throws {
+        let calendar = utcCalendar()
+        let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let aggregator = UsageAggregator(store: store, calendar: calendar)
+        let firstSample = calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 1, hour: 10, minute: 0, second: 1)
+        )!
+        let secondSample = firstSample.addingTimeInterval(61)
+
+        try aggregator.ingest(
+            makeDelta(
+                at: firstSample,
+                displayName: "Example Old",
+                download: 100,
+                upload: 10
+            )
+        )
+        try aggregator.ingest(
+            makeDelta(
+                at: secondSample,
+                displayName: "Example Current",
+                download: 30,
+                upload: 3
+            )
+        )
+        try aggregator.flush()
+
+        let daily = try XCTUnwrap(try store.dailyUsage(for: "2026-08-01").first)
+        XCTAssertEqual(daily.displayName, "Example Current")
+        XCTAssertEqual(daily.downloadBytes, 130)
+        XCTAssertEqual(daily.uploadBytes, 13)
+
+        let buckets = try store.bucketUsage(
+            from: firstSample.addingTimeInterval(-1),
+            to: secondSample.addingTimeInterval(60)
+        )
+        XCTAssertEqual(buckets.count, 2)
+        XCTAssertEqual(Set(buckets.map(\.displayName)), ["Example Current"])
+        XCTAssertEqual(buckets.map(\.downloadBytes), [100, 30])
+    }
+
+    func testBucketSummaryAndTimelineMatchDetailedRows() throws {
+        let calendar = utcCalendar()
+        let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let aggregator = UsageAggregator(store: store, calendar: calendar)
+        let firstMinute = calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 1, hour: 10)
+        )!
+        let secondMinute = firstMinute.addingTimeInterval(60)
+        let end = secondMinute.addingTimeInterval(60)
+
+        try aggregator.ingest(makeDelta(at: firstMinute, download: 100, upload: 10))
+        try aggregator.ingest(makeDelta(at: secondMinute, download: 30, upload: 3))
+        try aggregator.ingest(
+            makeDelta(
+                at: firstMinute,
+                appKey: "bundle:com.example.second",
+                displayName: "Second",
+                download: 7,
+                upload: 4
+            )
+        )
+        try aggregator.ingest(
+            makeDelta(
+                at: firstMinute,
+                appKey: "proxy:test",
+                displayName: "Proxy",
+                category: .proxyTransport,
+                download: 1_000,
+                upload: 2_000
+            )
+        )
+        try aggregator.flush()
+
+        let detailed = try store.bucketUsage(from: firstMinute, to: end)
+        let summaries = try store.bucketUsageSummary(from: firstMinute, to: end)
+        XCTAssertEqual(summaries.count, 3)
+        for summary in summaries {
+            let rows = detailed.filter { $0.appKey == summary.appKey }
+            XCTAssertEqual(summary.firstBucketStart, rows.map(\.bucketStart).min())
+            XCTAssertEqual(summary.downloadBytes, rows.reduce(0) { $0 + $1.downloadBytes })
+            XCTAssertEqual(summary.uploadBytes, rows.reduce(0) { $0 + $1.uploadBytes })
+            XCTAssertEqual(summary.sampleCount, rows.reduce(0) { $0 + $1.sampleCount })
+        }
+
+        XCTAssertEqual(
+            try store.bucketTimeline(from: firstMinute, to: end),
+            [
+                UsageTimelineRecord(
+                    bucketStart: firstMinute,
+                    downloadBytes: 107,
+                    uploadBytes: 14
+                ),
+                UsageTimelineRecord(
+                    bucketStart: secondMinute,
+                    downloadBytes: 30,
+                    uploadBytes: 3
+                )
+            ]
+        )
+        XCTAssertEqual(
+            try store.bucketTimeline(
+                from: firstMinute,
+                to: end,
+                appKey: "bundle:com.example.app",
+                excludingProxyTransport: false
+            ),
+            [
+                UsageTimelineRecord(
+                    bucketStart: firstMinute,
+                    downloadBytes: 100,
+                    uploadBytes: 10
+                ),
+                UsageTimelineRecord(
+                    bucketStart: secondMinute,
+                    downloadBytes: 30,
+                    uploadBytes: 3
+                )
+            ]
+        )
+    }
+
+    func testBucketAggregatesPreserveSaturatingOverflowSemantics() throws {
+        let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let firstMinute = Date(timeIntervalSince1970: 1_786_000_000)
+        let secondMinute = firstMinute.addingTimeInterval(60)
+        let end = secondMinute.addingTimeInterval(60)
+
+        try store.apply(
+            [],
+            bucketAggregates: [
+                makeBucketAggregate(
+                    at: firstMinute,
+                    appKey: "bundle:com.example.first",
+                    download: Int64.max
+                ),
+                makeBucketAggregate(
+                    at: secondMinute,
+                    appKey: "bundle:com.example.first",
+                    download: 1
+                ),
+                makeBucketAggregate(
+                    at: firstMinute,
+                    appKey: "bundle:com.example.second",
+                    download: Int64.max
+                )
+            ]
+        )
+
+        let summaries = try store.bucketUsageSummary(from: firstMinute, to: end)
+        let firstSummary = try XCTUnwrap(
+            summaries.first { $0.appKey == "bundle:com.example.first" }
+        )
+        XCTAssertEqual(firstSummary.downloadBytes, Int64.max)
+        XCTAssertEqual(firstSummary.sampleCount, 2)
+
+        XCTAssertEqual(
+            try store.bucketTimeline(from: firstMinute, to: end),
+            [
+                UsageTimelineRecord(
+                    bucketStart: firstMinute,
+                    downloadBytes: Int64.max,
+                    uploadBytes: 0
+                ),
+                UsageTimelineRecord(
+                    bucketStart: secondMinute,
+                    downloadBytes: 1,
+                    uploadBytes: 0
+                )
+            ]
+        )
+    }
+
     func testSamplesAcrossMidnightUseDifferentLocalDays() throws {
         let calendar = utcCalendar()
         let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
@@ -163,19 +336,42 @@ final class UsageAggregatorTests: XCTestCase {
     private func makeDelta(
         at date: Date,
         appKey: String = "bundle:com.example.app",
+        displayName: String = "Example",
+        category: AppCategory = .userApp,
         download: Int64,
         upload: Int64
     ) -> UsageDelta {
         UsageDelta(
             sampledAt: date,
             appKey: appKey,
-            displayName: "Example",
-            category: .userApp,
+            displayName: displayName,
+            category: category,
             bundleID: "com.example.app",
             bundlePath: "/Applications/Example.app",
             executablePath: "/Applications/Example.app/Contents/MacOS/Example",
             downloadBytes: download,
             uploadBytes: upload
+        )
+    }
+
+    private func makeBucketAggregate(
+        at date: Date,
+        appKey: String,
+        download: Int64
+    ) -> UsageBucketAggregate {
+        UsageBucketAggregate(
+            bucketStart: date,
+            appKey: appKey,
+            displayName: appKey,
+            category: .userApp,
+            bundleID: nil,
+            bundlePath: nil,
+            executablePath: nil,
+            firstSeenAt: date,
+            lastSeenAt: date,
+            downloadBytes: download,
+            uploadBytes: 0,
+            sampleCount: 1
         )
     }
 

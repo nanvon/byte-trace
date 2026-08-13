@@ -25,6 +25,76 @@ public final class UsageStore: @unchecked Sendable {
         let lastSeenAt: String
     }
 
+    /// One app row per appKey for a whole flush. Daily and bucket aggregates
+    /// carry the same attribution metadata, so writing the app once avoids a
+    /// duplicate UPSERT without changing usage accounting.
+    private struct AppAggregate {
+        let appKey: String
+        let displayName: String
+        let category: AppCategory
+        let bundleID: String?
+        let bundlePath: String?
+        let executablePath: String?
+        let firstSeenAt: Date
+        let lastSeenAt: Date
+
+        init(_ aggregate: DailyUsageAggregate) {
+            appKey = aggregate.appKey
+            displayName = aggregate.displayName
+            category = aggregate.category
+            bundleID = aggregate.bundleID
+            bundlePath = aggregate.bundlePath
+            executablePath = aggregate.executablePath
+            firstSeenAt = aggregate.firstSeenAt
+            lastSeenAt = aggregate.lastSeenAt
+        }
+
+        init(_ aggregate: UsageBucketAggregate) {
+            appKey = aggregate.appKey
+            displayName = aggregate.displayName
+            category = aggregate.category
+            bundleID = aggregate.bundleID
+            bundlePath = aggregate.bundlePath
+            executablePath = aggregate.executablePath
+            firstSeenAt = aggregate.firstSeenAt
+            lastSeenAt = aggregate.lastSeenAt
+        }
+
+        init(
+            appKey: String,
+            displayName: String,
+            category: AppCategory,
+            bundleID: String?,
+            bundlePath: String?,
+            executablePath: String?,
+            firstSeenAt: Date,
+            lastSeenAt: Date
+        ) {
+            self.appKey = appKey
+            self.displayName = displayName
+            self.category = category
+            self.bundleID = bundleID
+            self.bundlePath = bundlePath
+            self.executablePath = executablePath
+            self.firstSeenAt = firstSeenAt
+            self.lastSeenAt = lastSeenAt
+        }
+
+        func merging(_ candidate: AppAggregate) -> AppAggregate {
+            let latest = candidate.lastSeenAt >= lastSeenAt ? candidate : self
+            return AppAggregate(
+                appKey: appKey,
+                displayName: latest.displayName,
+                category: latest.category,
+                bundleID: latest.bundleID,
+                bundlePath: latest.bundlePath,
+                executablePath: latest.executablePath,
+                firstSeenAt: min(firstSeenAt, candidate.firstSeenAt),
+                lastSeenAt: max(lastSeenAt, candidate.lastSeenAt)
+            )
+        }
+    }
+
     public init(databaseURL: URL) throws {
         database = try SQLiteDatabase(url: databaseURL)
         try migrate()
@@ -47,13 +117,29 @@ public final class UsageStore: @unchecked Sendable {
         defer { lock.unlock() }
         try database.execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
+            let appStatement = try prepareAppUpsert()
+            defer { sqlite3_finalize(appStatement) }
+            let dailyStatement = try prepareDailyUsageUpsert()
+            defer { sqlite3_finalize(dailyStatement) }
+            let bucketStatement = try prepareBucketUsageUpsert()
+            defer { sqlite3_finalize(bucketStatement) }
+
+            var apps: [String: AppAggregate] = [:]
             for aggregate in aggregates {
-                try upsertApp(for: aggregate)
-                try upsertDailyUsage(for: aggregate)
+                mergeApp(AppAggregate(aggregate), into: &apps)
             }
             for aggregate in bucketAggregates {
-                try upsertApp(for: aggregate)
-                try upsertBucketUsage(for: aggregate)
+                mergeApp(AppAggregate(aggregate), into: &apps)
+            }
+
+            for app in apps.values {
+                try upsertApp(app, using: appStatement)
+            }
+            for aggregate in aggregates {
+                try upsertDailyUsage(aggregate, using: dailyStatement)
+            }
+            for aggregate in bucketAggregates {
+                try upsertBucketUsage(aggregate, using: bucketStatement)
             }
             try database.execute("COMMIT;")
         } catch {
@@ -189,6 +275,242 @@ public final class UsageStore: @unchecked Sendable {
             )
         }
         return records
+    }
+
+    public func bucketUsageSummary(
+        from start: Date,
+        to end: Date
+    ) throws -> [UsageBucketSummaryRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        do {
+            return try queryBucketUsageSummary(from: start, to: end)
+        } catch where Self.isSQLiteIntegerOverflow(error) {
+            // SQLite SUM() aborts on integer overflow, while ByteTrace's public
+            // accounting contract saturates at Int64.max. Keep the compact SQL
+            // path for normal data and preserve the old behavior at the edge.
+            return try saturatedBucketUsageSummary(from: start, to: end)
+        }
+    }
+
+    private func queryBucketUsageSummary(
+        from start: Date,
+        to end: Date
+    ) throws -> [UsageBucketSummaryRecord] {
+        let statement = try database.prepare(
+            """
+            SELECT MIN(b.bucket_start), b.app_key, a.display_name, a.category,
+                   a.bundle_id, a.bundle_path, a.executable_path,
+                   SUM(b.download_bytes), SUM(b.upload_bytes), SUM(b.sample_count)
+            FROM usage_buckets AS b
+            JOIN apps AS a ON a.app_key = b.app_key
+            WHERE b.accounting_version = ? AND b.bucket_start >= ? AND b.bucket_start < ?
+            GROUP BY b.app_key, a.display_name, a.category,
+                     a.bundle_id, a.bundle_path, a.executable_path
+            ORDER BY (SUM(b.download_bytes) + SUM(b.upload_bytes)) DESC,
+                     b.app_key ASC;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(Self.epochSeconds(start), at: 2, in: statement)
+        try database.bind(Self.epochSeconds(end), at: 3, in: statement)
+
+        var records: [UsageBucketSummaryRecord] = []
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            let category = AppCategory(
+                rawValue: database.columnString(statement, at: 3) ?? ""
+            ) ?? .unclassified
+            records.append(
+                UsageBucketSummaryRecord(
+                    firstBucketStart: Date(
+                        timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 0))
+                    ),
+                    appKey: database.columnString(statement, at: 1) ?? "",
+                    displayName: database.columnString(statement, at: 2) ?? "未知进程",
+                    category: category,
+                    bundleID: database.columnString(statement, at: 4),
+                    bundlePath: database.columnString(statement, at: 5),
+                    executablePath: database.columnString(statement, at: 6),
+                    downloadBytes: sqlite3_column_int64(statement, 7),
+                    uploadBytes: sqlite3_column_int64(statement, 8),
+                    sampleCount: sqlite3_column_int64(statement, 9)
+                )
+            )
+        }
+        return records
+    }
+
+    public func bucketTimeline(
+        from start: Date,
+        to end: Date,
+        appKey: String? = nil,
+        excludingProxyTransport: Bool = true
+    ) throws -> [UsageTimelineRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        do {
+            return try queryBucketTimeline(
+                from: start,
+                to: end,
+                appKey: appKey,
+                excludingProxyTransport: excludingProxyTransport
+            )
+        } catch where Self.isSQLiteIntegerOverflow(error) {
+            return try saturatedBucketTimeline(
+                from: start,
+                to: end,
+                appKey: appKey,
+                excludingProxyTransport: excludingProxyTransport
+            )
+        }
+    }
+
+    private func queryBucketTimeline(
+        from start: Date,
+        to end: Date,
+        appKey: String?,
+        excludingProxyTransport: Bool
+    ) throws -> [UsageTimelineRecord] {
+        var conditions = [
+            "b.accounting_version = ?",
+            "b.bucket_start >= ?",
+            "b.bucket_start < ?"
+        ]
+        if appKey != nil {
+            conditions.append("b.app_key = ?")
+        }
+        if excludingProxyTransport {
+            conditions.append("a.category != ?")
+        }
+
+        let statement = try database.prepare(
+            """
+            SELECT b.bucket_start, SUM(b.download_bytes), SUM(b.upload_bytes)
+            FROM usage_buckets AS b
+            JOIN apps AS a ON a.app_key = b.app_key
+            WHERE \(conditions.joined(separator: " AND "))
+            GROUP BY b.bucket_start
+            ORDER BY b.bucket_start ASC;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        var bindingIndex: Int32 = 1
+        try database.bind(Self.accountingVersion, at: bindingIndex, in: statement)
+        bindingIndex += 1
+        try database.bind(Self.epochSeconds(start), at: bindingIndex, in: statement)
+        bindingIndex += 1
+        try database.bind(Self.epochSeconds(end), at: bindingIndex, in: statement)
+        bindingIndex += 1
+        if let appKey {
+            try database.bind(appKey, at: bindingIndex, in: statement)
+            bindingIndex += 1
+        }
+        if excludingProxyTransport {
+            try database.bind(AppCategory.proxyTransport.rawValue, at: bindingIndex, in: statement)
+        }
+
+        var records: [UsageTimelineRecord] = []
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            records.append(
+                UsageTimelineRecord(
+                    bucketStart: Date(
+                        timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 0))
+                    ),
+                    downloadBytes: sqlite3_column_int64(statement, 1),
+                    uploadBytes: sqlite3_column_int64(statement, 2)
+                )
+            )
+        }
+        return records
+    }
+
+    private func saturatedBucketUsageSummary(
+        from start: Date,
+        to end: Date
+    ) throws -> [UsageBucketSummaryRecord] {
+        var summaries: [String: UsageBucketSummaryRecord] = [:]
+        for record in try bucketUsage(from: start, to: end) {
+            if let existing = summaries[record.appKey] {
+                summaries[record.appKey] = UsageBucketSummaryRecord(
+                    firstBucketStart: min(existing.firstBucketStart, record.bucketStart),
+                    appKey: record.appKey,
+                    displayName: record.displayName,
+                    category: record.category,
+                    bundleID: record.bundleID,
+                    bundlePath: record.bundlePath,
+                    executablePath: record.executablePath,
+                    downloadBytes: Self.saturatingAdd(
+                        existing.downloadBytes,
+                        record.downloadBytes
+                    ),
+                    uploadBytes: Self.saturatingAdd(
+                        existing.uploadBytes,
+                        record.uploadBytes
+                    ),
+                    sampleCount: Self.saturatingAdd(
+                        existing.sampleCount,
+                        record.sampleCount
+                    )
+                )
+            } else {
+                summaries[record.appKey] = UsageBucketSummaryRecord(
+                    firstBucketStart: record.bucketStart,
+                    appKey: record.appKey,
+                    displayName: record.displayName,
+                    category: record.category,
+                    bundleID: record.bundleID,
+                    bundlePath: record.bundlePath,
+                    executablePath: record.executablePath,
+                    downloadBytes: record.downloadBytes,
+                    uploadBytes: record.uploadBytes,
+                    sampleCount: record.sampleCount
+                )
+            }
+        }
+        return summaries.values.sorted {
+            let left = Self.saturatingAdd($0.downloadBytes, $0.uploadBytes)
+            let right = Self.saturatingAdd($1.downloadBytes, $1.uploadBytes)
+            if left != right { return left > right }
+            return $0.appKey < $1.appKey
+        }
+    }
+
+    private func saturatedBucketTimeline(
+        from start: Date,
+        to end: Date,
+        appKey: String?,
+        excludingProxyTransport: Bool
+    ) throws -> [UsageTimelineRecord] {
+        var totals: [Date: (download: Int64, upload: Int64)] = [:]
+        for record in try bucketUsage(from: start, to: end) {
+            if let appKey, record.appKey != appKey { continue }
+            if excludingProxyTransport, record.category == .proxyTransport { continue }
+            let existing = totals[record.bucketStart] ?? (0, 0)
+            totals[record.bucketStart] = (
+                Self.saturatingAdd(existing.download, record.downloadBytes),
+                Self.saturatingAdd(existing.upload, record.uploadBytes)
+            )
+        }
+        return totals.keys.sorted().compactMap { bucketStart in
+            guard let total = totals[bucketStart] else { return nil }
+            return UsageTimelineRecord(
+                bucketStart: bucketStart,
+                downloadBytes: total.download,
+                uploadBytes: total.upload
+            )
+        }
     }
 
     public func bucketStats() throws -> UsageBucketStats {
@@ -607,43 +929,19 @@ public final class UsageStore: @unchecked Sendable {
         try database.stepDone(statement)
     }
 
-    private func upsertApp(for aggregate: DailyUsageAggregate) throws {
-        try upsertApp(
-            appKey: aggregate.appKey,
-            displayName: aggregate.displayName,
-            category: aggregate.category,
-            bundleID: aggregate.bundleID,
-            bundlePath: aggregate.bundlePath,
-            executablePath: aggregate.executablePath,
-            firstSeenAt: aggregate.firstSeenAt,
-            lastSeenAt: aggregate.lastSeenAt
-        )
+    private func mergeApp(
+        _ aggregate: AppAggregate,
+        into apps: inout [String: AppAggregate]
+    ) {
+        if let existing = apps[aggregate.appKey] {
+            apps[aggregate.appKey] = existing.merging(aggregate)
+        } else {
+            apps[aggregate.appKey] = aggregate
+        }
     }
 
-    private func upsertApp(for aggregate: UsageBucketAggregate) throws {
-        try upsertApp(
-            appKey: aggregate.appKey,
-            displayName: aggregate.displayName,
-            category: aggregate.category,
-            bundleID: aggregate.bundleID,
-            bundlePath: aggregate.bundlePath,
-            executablePath: aggregate.executablePath,
-            firstSeenAt: aggregate.firstSeenAt,
-            lastSeenAt: aggregate.lastSeenAt
-        )
-    }
-
-    private func upsertApp(
-        appKey: String,
-        displayName: String,
-        category: AppCategory,
-        bundleID: String?,
-        bundlePath: String?,
-        executablePath: String?,
-        firstSeenAt: Date,
-        lastSeenAt: Date
-    ) throws {
-        let statement = try database.prepare(
+    private func prepareAppUpsert() throws -> OpaquePointer {
+        try database.prepare(
             """
             INSERT INTO apps (
                 app_key, bundle_id, bundle_path, executable_path,
@@ -658,21 +956,10 @@ public final class UsageStore: @unchecked Sendable {
                 last_seen_at = excluded.last_seen_at;
             """
         )
-        defer { sqlite3_finalize(statement) }
-
-        try database.bind(appKey, at: 1, in: statement)
-        try database.bind(bundleID, at: 2, in: statement)
-        try database.bind(bundlePath, at: 3, in: statement)
-        try database.bind(executablePath, at: 4, in: statement)
-        try database.bind(displayName, at: 5, in: statement)
-        try database.bind(category.rawValue, at: 6, in: statement)
-        try database.bind(Self.timestamp(firstSeenAt), at: 7, in: statement)
-        try database.bind(Self.timestamp(lastSeenAt), at: 8, in: statement)
-        try database.stepDone(statement)
     }
 
-    private func upsertDailyUsage(for aggregate: DailyUsageAggregate) throws {
-        let statement = try database.prepare(
+    private func prepareDailyUsageUpsert() throws -> OpaquePointer {
+        try database.prepare(
             """
             INSERT INTO daily_usage (
                 accounting_version, day, app_key, download_bytes,
@@ -685,20 +972,10 @@ public final class UsageStore: @unchecked Sendable {
                 updated_at = excluded.updated_at;
             """
         )
-        defer { sqlite3_finalize(statement) }
-
-        try database.bind(Self.accountingVersion, at: 1, in: statement)
-        try database.bind(aggregate.day, at: 2, in: statement)
-        try database.bind(aggregate.appKey, at: 3, in: statement)
-        try database.bind(aggregate.downloadBytes, at: 4, in: statement)
-        try database.bind(aggregate.uploadBytes, at: 5, in: statement)
-        try database.bind(aggregate.sampleCount, at: 6, in: statement)
-        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
-        try database.stepDone(statement)
     }
 
-    private func upsertBucketUsage(for aggregate: UsageBucketAggregate) throws {
-        let statement = try database.prepare(
+    private func prepareBucketUsageUpsert() throws -> OpaquePointer {
+        try database.prepare(
             """
             INSERT INTO usage_buckets (
                 accounting_version, bucket_start, app_key, download_bytes,
@@ -711,8 +988,43 @@ public final class UsageStore: @unchecked Sendable {
                 updated_at = excluded.updated_at;
             """
         )
-        defer { sqlite3_finalize(statement) }
+    }
 
+    private func upsertApp(
+        _ aggregate: AppAggregate,
+        using statement: OpaquePointer
+    ) throws {
+        try database.bind(aggregate.appKey, at: 1, in: statement)
+        try database.bind(aggregate.bundleID, at: 2, in: statement)
+        try database.bind(aggregate.bundlePath, at: 3, in: statement)
+        try database.bind(aggregate.executablePath, at: 4, in: statement)
+        try database.bind(aggregate.displayName, at: 5, in: statement)
+        try database.bind(aggregate.category.rawValue, at: 6, in: statement)
+        try database.bind(Self.timestamp(aggregate.firstSeenAt), at: 7, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 8, in: statement)
+        try database.stepDone(statement)
+        try database.reset(statement)
+    }
+
+    private func upsertDailyUsage(
+        _ aggregate: DailyUsageAggregate,
+        using statement: OpaquePointer
+    ) throws {
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(aggregate.day, at: 2, in: statement)
+        try database.bind(aggregate.appKey, at: 3, in: statement)
+        try database.bind(aggregate.downloadBytes, at: 4, in: statement)
+        try database.bind(aggregate.uploadBytes, at: 5, in: statement)
+        try database.bind(aggregate.sampleCount, at: 6, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
+        try database.stepDone(statement)
+        try database.reset(statement)
+    }
+
+    private func upsertBucketUsage(
+        _ aggregate: UsageBucketAggregate,
+        using statement: OpaquePointer
+    ) throws {
         try database.bind(Self.accountingVersion, at: 1, in: statement)
         try database.bind(Self.epochSeconds(aggregate.bucketStart), at: 2, in: statement)
         try database.bind(aggregate.appKey, at: 3, in: statement)
@@ -721,6 +1033,7 @@ public final class UsageStore: @unchecked Sendable {
         try database.bind(aggregate.sampleCount, at: 6, in: statement)
         try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
         try database.stepDone(statement)
+        try database.reset(statement)
     }
 
     private func deleteBuckets(from table: String, before date: Date) throws -> Int64 {
@@ -738,10 +1051,19 @@ public final class UsageStore: @unchecked Sendable {
         String(format: "%.6f", date.timeIntervalSince1970)
     }
 
+    private static func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let result = lhs.addingReportingOverflow(rhs)
+        return result.overflow ? Int64.max : result.partialValue
+    }
+
+    private static func isSQLiteIntegerOverflow(_ error: Error) -> Bool {
+        guard case let SQLiteDatabaseError.stepFailed(message) = error else { return false }
+        return message.localizedCaseInsensitiveContains("integer overflow")
+    }
+
     private static func epochSeconds(_ date: Date) -> Int64 {
         Int64(date.timeIntervalSince1970.rounded(.down))
     }
-
 
     private static func dateValue(_ value: String?) -> Date {
         guard let value, let seconds = Double(value) else { return .distantPast }

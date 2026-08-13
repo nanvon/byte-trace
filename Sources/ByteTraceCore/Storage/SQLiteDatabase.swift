@@ -134,6 +134,17 @@ final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    /// Reuses a prepared statement for the next row in the same transaction.
+    /// Both the previous execution state and all bindings must be cleared.
+    func reset(_ statement: OpaquePointer) throws {
+        guard sqlite3_reset(statement) == SQLITE_OK else {
+            throw SQLiteDatabaseError.stepFailed(errorMessage)
+        }
+        guard sqlite3_clear_bindings(statement) == SQLITE_OK else {
+            throw SQLiteDatabaseError.bindFailed(errorMessage)
+        }
+    }
+
     func changes() -> Int64 {
         Int64(sqlite3_changes(handle))
     }

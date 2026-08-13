@@ -193,6 +193,59 @@ public struct UsageBucketRecord: Equatable, Sendable {
     }
 }
 
+/// Aggregated usage for one app over a bucket-backed time range.
+/// `firstBucketStart` preserves the existing range record day semantics without
+/// materializing every app-minute row in the application process.
+public struct UsageBucketSummaryRecord: Equatable, Sendable {
+    public let firstBucketStart: Date
+    public let appKey: String
+    public let displayName: String
+    public let category: AppCategory
+    public let bundleID: String?
+    public let bundlePath: String?
+    public let executablePath: String?
+    public let downloadBytes: Int64
+    public let uploadBytes: Int64
+    public let sampleCount: Int64
+
+    public init(
+        firstBucketStart: Date,
+        appKey: String,
+        displayName: String,
+        category: AppCategory,
+        bundleID: String?,
+        bundlePath: String?,
+        executablePath: String?,
+        downloadBytes: Int64,
+        uploadBytes: Int64,
+        sampleCount: Int64
+    ) {
+        self.firstBucketStart = firstBucketStart
+        self.appKey = appKey
+        self.displayName = displayName
+        self.category = category
+        self.bundleID = bundleID
+        self.bundlePath = bundlePath
+        self.executablePath = executablePath
+        self.downloadBytes = downloadBytes
+        self.uploadBytes = uploadBytes
+        self.sampleCount = sampleCount
+    }
+}
+
+/// Minimal minute-level data used by total and per-app charts.
+public struct UsageTimelineRecord: Equatable, Sendable {
+    public let bucketStart: Date
+    public let downloadBytes: Int64
+    public let uploadBytes: Int64
+
+    public init(bucketStart: Date, downloadBytes: Int64, uploadBytes: Int64) {
+        self.bucketStart = bucketStart
+        self.downloadBytes = downloadBytes
+        self.uploadBytes = uploadBytes
+    }
+}
+
 public struct UsageBucketStats: Equatable, Sendable {
     public let bucketCount: Int64
     public let earliestBucket: Date?
