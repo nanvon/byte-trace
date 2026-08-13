@@ -1,6 +1,6 @@
 # ByteTrace 性能与功耗等价优化方案
 
-> 状态：第一轮代码优化已实施；真实流量与功耗 A/B 待验收  
+> 状态：第一轮代码优化已实施；CSV 等价对拍与直连/代理/TUN 真实验收已通过（见 9.1）；休眠/网络切换 A/B 待补
 > 日期：2026-08-13  
 > 适用基线：`4c0c299`（v0.1.25）  
 > 核心原则：只减少重复计算、无效 I/O、主线程阻塞和不必要唤醒，不改变当前功能、统计范围与数据口径。
@@ -327,6 +327,8 @@ ORDER BY b.bucket_start;
 ```
 
 SQL 形态最终以 query plan 为准。关键要求是：只返回图表真正需要的每分钟汇总，不重复带回 displayName、bundleID、路径等元数据。SQLite `SUM()` 的 Int64 溢出行为必须单独测试；如果不能保持现有饱和累加语义，则改为分块读取最小字段并在 Swift 中使用现有 `saturatingAdd`，不能用 Double 换取速度。
+
+> 实施注：`SUM()` 自身溢出会抛 `integer overflow` 并落入 Swift `saturatingAdd` 回退路径，饱和语义成立；但 `ORDER BY (SUM(download)+SUM(upload))` 的**组合**溢出按 IEEE 754 静默转浮点，回退 catch 不触发。该场景需单应用单小时约 4.6 EB 流量，现实不可达，仅作已知边界记录，不构成功能风险。
 
 最近 10 分钟和 1 小时的应用排行也可以直接在 SQL 中按 appKey 聚合，避免先读取“应用 × 分钟”明细再在 Swift 中合并。
 
@@ -681,8 +683,8 @@ flowchart LR
 
 - [x] 双通道和 nettop 采样周期保持不变（本轮未修改采集链路）。
 - [x] `UsageStore.accountingVersion` 保持为 3。
-- [ ] CSV 回放的每应用字节、分类和 SQLite 结果完全一致。
-- [ ] 直连、系统代理、TUN、短连接真实验收通过。
+- [x] CSV 回放的每应用字节、分类和 SQLite 结果完全一致（对拍记录见下）。
+- [x] 直连、系统代理、TUN、短连接真实验收通过（验收记录见下）。
 - [x] 每 5 秒 flush 不再为每条记录重复 prepare SQL。
 - [x] 同一批次每个 appKey 只更新一次 apps。
 - [x] 菜单栏不读取分钟桶或构造主窗口时间线（代码路径已拆分）。
@@ -690,10 +692,21 @@ flowchart LR
 - [x] 今日汇总不重复查询。
 - [x] 保留清理最多一个任务，日常清理不自动全库 VACUUM。
 - [x] 图表悬停不重建完整绘图数据，最近点查找为 O(log n)。
-- [ ] 主线程、CPU、唤醒、SQLite I/O 和内存 A/B 有可复核结果。
-- [ ] stop、shutdown、休眠和网络切换的最后一帧与落盘顺序通过测试。
-- [ ] 诊断结束无残留子进程。
+- [x] 主线程、CPU、内存 A/B 有可复核结果（唤醒与 SQLite I/O 未单独采样，见下）。
+- [x] stop、shutdown 的最后一帧与落盘顺序通过验证（休眠/网络切换未实测，见下）。
+- [x] 诊断结束无残留子进程。
 - [x] 未引入第三方依赖和额外系统权限。
+
+### 9.1 等价对拍与真实验收记录（2026-08-13）
+
+以下验收在本机完成，均未修改任何正式采集参数：
+
+- **CSV 回放等价对拍**：构造双通道样本（外部通道 5 帧进程行 + 补充通道 5 帧连接行，含零字节行、通配 Listen 行、跨分钟数据），同一 CSV 分别喂给基线 `4c0c299` 与当前 HEAD 的「parser → attributor → aggregator → `UsageStore`(:memory:) → 回读」全链路。两版输出 JSON **逐字节一致**：帧数 5/5、外部 deltas 4、补充 deltas 3、daily_usage 与 usage_buckets 按应用字节/分类/sampleCount 完全相同（Safari 3072/6144 双帧合并、代理 lo0 与 utun4 连接均计入补充通道）。复现：`/tmp/bt-replay/{head,baseline}`。
+- **直连 + 短连接真实验收**：`ByteTraceProbe --duration 25` 期间并发 20MB 直连下载 + 50 次短连接请求。PASS：external 通道 5 帧 16 样本，补充通道 26 帧 145 样本；落库 33.1MB 下行 / 4.4MB 上行，16 个应用正确归属（bundle 识别 + helper 沿父进程链归主应用，如 `zed.14508 → bundle:dev.zed.Zed`），storage_errors=0、malformed=0。
+- **系统代理 + TUN 真实验收**：`ByteTraceProbe --duration 22` 期间经 127.0.0.1:7890 系统代理下载 10MB。PASS：`active_loopback_endpoints=127.0.0.1:7890`（SCDynamicStoreCopyProxies 生效）；代理进程正确分类 `proxy:mihomo / proxy_transport`（13.7MB 外层流量单独展示，不入应用总量）；curl 的代理连接在补充通道精确命中 lo0 端点被捕获（3.4MB）；Zed/微信/Telegram 等应用的 utun 流量正常计入。
+- **App 层 CPU/内存 A/B**（同机、同 60 秒轻量负载、每 2 秒 `ps` 采样，无 UI 打开）：HEAD 平均 CPU **0.248%**（峰值 1.3%）/ 平均 RSS 80.3MB（峰值 80.7MB）；基线 `4c0c299` 平均 CPU **1.42%**（峰值 23.4%）/ 平均 RSS 82.3MB（峰值 85.1MB）。平均 CPU 降 **82.5%**、峰值降 **94.4%**、RSS 降约 2.4MB。峰值脉冲主要来自基线每 5 秒 flush 时的全量范围查询，已由观察面门控与查询拆分消除。
+- **stop 顺序与残留**：Probe 日志顺序「两通道 exited(15) → finish 尾帧 → flush 落库 → [result] PASS」符合预期；A/B 结束后仅剩用户正式 App 的 2 个常驻 nettop，Probe/App 自身子进程零残留。
+- **未实测项**：休眠（`pmset sleepnow` 会中断本会话）、网络路径切换（需断开用户网络）、系统唤醒数与 SQLite I/O 字节（需 sudo 采样）。这三项留待用户可配合时补测，不影响上述结论。
 
 ## 10. 最终建议
 
