@@ -132,6 +132,11 @@ struct UsageTimelinePoint: Identifiable, Equatable {
     }
 }
 
+enum UsageObservationSurface: Hashable {
+    case menuBar
+    case mainOverview
+}
+
 @MainActor
 final class ByteTraceViewModel: NSObject, ObservableObject {
     static let bundleIdentifier = "com.nanvon.ByteTrace"
@@ -145,14 +150,17 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published var selectedRange: UsageTimeRange = .today {
         didSet {
             guard oldValue != selectedRange else { return }
-            refreshRange()
+            if observedUsageSurfaces.contains(.mainOverview) {
+                refreshOverview()
+            }
         }
     }
     @Published private(set) var rangeRecords: [DailyUsageRecord] = []
     @Published private(set) var rangeTimeline: [UsageTimelinePoint] = []
+    @Published private(set) var detailTimeline: [UsageTimelinePoint] = []
     @Published private(set) var bucketStats: UsageBucketStats?
-    private(set) var rangeBuckets: [UsageBucketRecord] = []
     private var dailyRangeRecords: [DailyUsageRecord] = []
+    private var activeDetailAppKey: String?
     @Published private(set) var launchAtLoginEnabled: Bool
     @Published var showsSystemProcesses: Bool {
         didSet {
@@ -208,18 +216,20 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var networkPathSignature: String?
     private var networkPathSatisfied = true
     private var lastRetentionCleanupDay: String?
-    private var lastUIRefreshDate: Date?
-    /// 当前有多少个界面正在展示统计数据（菜单栏面板 + 主窗口）。
-    /// 为 0 时跳过周期性 refresh：落库节奏完全不变，只是不做 SQLite 回读与
-    /// `@Published` 更新，避免菜单栏常驻时无人观看仍持续触发 SwiftUI 重绘。
-    private var visibleSurfaceCount = 0
+    private var retentionCleanupInProgress = false
+    private var retentionCleanupNeedsRerun = false
+    private let retentionQueue = DispatchQueue(
+        label: "com.nanvon.ByteTrace.retention",
+        qos: .utility
+    )
+    private var lastTodayRefreshDate: Date?
+    private var lastRangeRefreshDate: Date?
+    /// 每种界面只触发自己真正需要的查询，避免菜单栏连带加载完整分钟趋势。
+    private var observedUsageSurfaces: Set<UsageObservationSurface> = []
 
     private static let restartDelays: [TimeInterval] = [1, 2, 5, 10, 30]
     /// 诊断事件保留时长（分钟桶保留策略之外的独立上限）。
     nonisolated private static let collectorEventRetentionInterval: TimeInterval = 30 * 24 * 60 * 60
-    /// 单次删除超过该阈值才 VACUUM（阻塞操作，放后台）。
-    nonisolated private static let vacuumPurgeThreshold: Int64 = 10_000
-
     override init() {
         databaseURL = UsageStore.defaultDatabaseURL(bundleIdentifier: Self.bundleIdentifier)
         collector = NettopCollector(scope: .externalProcessSummary)
@@ -260,7 +270,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         configureProxyEndpointMonitor()
         registerWorkspaceNotifications()
         registerNetworkPathMonitor()
-        refresh()
+        refreshToday()
         if store != nil {
             start()
         }
@@ -310,21 +320,33 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         pendingAppDetailKey = appKey
     }
 
-    /// 界面开始展示统计数据时调用（菜单栏面板展开、主窗口出现）。
-    /// 从「无人观看」变为「有人观看」时立即补一次刷新，避免展示陈旧数据。
-    func beginObservingUsage() {
-        visibleSurfaceCount += 1
-        guard visibleSurfaceCount == 1 else { return }
-        lastUIRefreshDate = nil
-        refresh()
+    /// 界面开始展示统计数据时调用。每个 surface 只加载自己需要的数据。
+    func beginObservingUsage(_ surface: UsageObservationSurface) {
+        guard observedUsageSurfaces.insert(surface).inserted else { return }
+        switch surface {
+        case .menuBar:
+            lastTodayRefreshDate = nil
+            refreshToday()
+        case .mainOverview:
+            lastRangeRefreshDate = nil
+            refreshOverview()
+        }
     }
 
-    /// 界面不再展示统计数据时调用（菜单栏面板收起、主窗口关闭）。
-    func endObservingUsage() {
-        visibleSurfaceCount = max(0, visibleSurfaceCount - 1)
+    func endObservingUsage(_ surface: UsageObservationSurface) {
+        observedUsageSurfaces.remove(surface)
     }
 
-    private var hasVisibleSurface: Bool { visibleSurfaceCount > 0 }
+    func beginObservingAppDetail(_ appKey: String) {
+        activeDetailAppKey = appKey
+        refreshDetailTimeline(for: appKey)
+    }
+
+    func endObservingAppDetail(_ appKey: String) {
+        guard activeDetailAppKey == appKey else { return }
+        activeDetailAppKey = nil
+        detailTimeline = []
+    }
 
     func start() {
         guard !wantsCollection else { return }
@@ -406,19 +428,55 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             records = []
             rangeRecords = []
             rangeTimeline = []
+            detailTimeline = []
             bucketStats = nil
-            rangeBuckets = []
             return
         }
 
         do {
-            // 数据保留策略不在这里触发：refresh() 会被可见性门控跳过，挂在这里会让清理
-            // 永远不执行。它改由 5 秒 flush 定时器驱动（内部有日级守卫）。
-            let newRecords = try store.dailyUsage(for: dayKey)
-            if newRecords != records { records = newRecords }
-            try loadRange(from: store)
+            let today = try loadToday(from: store)
+            try loadRange(
+                from: store,
+                cachedToday: selectedRange == .today ? today : nil
+            )
+            let now = Date()
+            lastTodayRefreshDate = now
+            lastRangeRefreshDate = now
         } catch {
             lastError = "读取今日统计失败：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "database_error", details: lastError)
+        }
+    }
+
+    func refreshToday() {
+        guard let store else {
+            records = []
+            return
+        }
+        do {
+            _ = try loadToday(from: store)
+            lastTodayRefreshDate = Date()
+        } catch {
+            lastError = "读取今日统计失败：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "database_error", details: lastError)
+        }
+    }
+
+    func refreshOverview() {
+        guard let store else {
+            rangeRecords = []
+            rangeTimeline = []
+            detailTimeline = []
+            return
+        }
+        do {
+            let today = selectedRange == .today ? try loadToday(from: store) : nil
+            try loadRange(from: store, cachedToday: today)
+            let now = Date()
+            lastRangeRefreshDate = now
+            if today != nil { lastTodayRefreshDate = now }
+        } catch {
+            lastError = "读取时间范围统计失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
         }
     }
@@ -438,35 +496,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     func refreshRange() {
-        guard let store else {
-            rangeRecords = []
-            rangeTimeline = []
-            rangeBuckets = []
-            return
-        }
-
-        do {
-            try loadRange(from: store)
-        } catch {
-            lastError = "读取时间范围统计失败：\(error.localizedDescription)"
-            recordCollectorEvent(kind: "database_error", details: lastError)
-        }
+        refreshOverview()
     }
 
     func timeline(for appKey: String) -> [UsageTimelinePoint] {
-        if selectedRange.usesFineGrainedTimeline, !rangeBuckets.isEmpty {
-            return makeTimeline(
-                from: rangeBuckets.filter {
-                    $0.appKey == appKey && $0.category != .proxyTransport
-                }
-            )
-        }
-
-        return makeTimeline(
-            from: dailyRangeRecords.filter {
-                $0.appKey == appKey && $0.category != .proxyTransport
-            }
-        )
+        activeDetailAppKey == appKey ? detailTimeline : []
     }
 
     func clearAllData() {
@@ -483,8 +517,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 earliestBucket: nil,
                 latestBucket: nil
             )
-            rangeBuckets = []
             dailyRangeRecords = []
+            detailTimeline = []
+            activeDetailAppKey = nil
             lastRetentionCleanupDay = nil
             lastError = nil
         } catch {
@@ -494,6 +529,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     func exportCurrentRange(to url: URL) throws {
+        if let store {
+            let today = selectedRange == .today ? try loadToday(from: store) : nil
+            try loadRange(from: store, cachedToday: today)
+        }
         let end = Date()
         let start = selectedRange.startDate(
             relativeTo: end,
@@ -1036,18 +1075,39 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
-    /// 落库保持 5 秒节奏；UI 刷新降频到 10 秒一次（分钟粒度数据无需秒级刷新），
-    /// 且只在有界面正在展示时才做，停止/休眠/网络切换等终止路径强制刷新以展示最终状态。
+    /// 落库保持 5 秒节奏；每种可见界面只刷新自己需要的数据。
     private func refreshIfNeeded(force: Bool) {
-        guard force || hasVisibleSurface else { return }
-        let now = Date()
-        guard force
-                || lastUIRefreshDate == nil
-                || now.timeIntervalSince(lastUIRefreshDate ?? now) >= 10 else {
+        if force {
+            refresh()
             return
         }
-        lastUIRefreshDate = now
-        refresh()
+        guard let store, !observedUsageSurfaces.isEmpty else { return }
+        let now = Date()
+        let todayDue = observedUsageSurfaces.contains(.menuBar)
+            && (lastTodayRefreshDate == nil
+                || now.timeIntervalSince(lastTodayRefreshDate ?? now) >= 10)
+        let rangeDue = observedUsageSurfaces.contains(.mainOverview)
+            && (lastRangeRefreshDate == nil
+                || now.timeIntervalSince(lastRangeRefreshDate ?? now) >= 10)
+        guard todayDue || rangeDue else { return }
+
+        do {
+            var today: [DailyUsageRecord]?
+            if todayDue || (rangeDue && selectedRange == .today) {
+                today = try loadToday(from: store)
+                lastTodayRefreshDate = now
+            }
+            if rangeDue {
+                try loadRange(
+                    from: store,
+                    cachedToday: selectedRange == .today ? today : nil
+                )
+                lastRangeRefreshDate = now
+            }
+        } catch {
+            lastError = "读取统计失败：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "database_error", details: lastError)
+        }
     }
 
     private func applyRetentionPolicyIfNeeded(force: Bool = false) {
@@ -1055,33 +1115,47 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
         let cleanupDay = Self.dayKey(for: Date())
         guard force || lastRetentionCleanupDay != cleanupDay else { return }
+        guard !retentionCleanupInProgress else {
+            if force { retentionCleanupNeedsRerun = true }
+            return
+        }
+        retentionCleanupInProgress = true
 
         let cutoff = Date().addingTimeInterval(-interval)
         let eventCutoff = Date().addingTimeInterval(-Self.collectorEventRetentionInterval)
-        // 清理可能涉及数百万行的首次批量删除，必须在后台执行，不能阻塞主线程。
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        // 串行队列 + in-flight 门控保证同一时刻只有一个维护任务。DELETE 后的空闲页由
+        // SQLite 后续写入复用，不再按删除行数自动 VACUUM，避免周期性重写整个数据库。
+        retentionQueue.async { [weak self] in
             do {
                 let deletedCount = try store.purgeBuckets(before: cutoff)
                 let eventsDeleted = try store.purgeCollectorEvents(before: eventCutoff)
-                if deletedCount > Self.vacuumPurgeThreshold {
-                    try? store.vacuum()
-                }
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.lastRetentionCleanupDay = cleanupDay
-                    guard deletedCount > 0 || eventsDeleted > 0 else { return }
-                    self.recordCollectorEvent(
-                        kind: "usage_buckets_purged",
-                        details: "deleted=\(deletedCount);events=\(eventsDeleted);before=\(Int(cutoff.timeIntervalSince1970))"
-                    )
+                    if deletedCount > 0 || eventsDeleted > 0 {
+                        self.recordCollectorEvent(
+                            kind: "usage_buckets_purged",
+                            details: "deleted=\(deletedCount);events=\(eventsDeleted);before=\(Int(cutoff.timeIntervalSince1970))"
+                        )
+                    }
+                    self.finishRetentionCleanup()
                 }
             } catch {
                 Task { @MainActor [weak self] in
-                    self?.lastError = "分钟级数据清理失败：\(error.localizedDescription)"
-                    self?.recordCollectorEvent(kind: "database_error", details: self?.lastError)
+                    guard let self else { return }
+                    self.lastError = "分钟级数据清理失败：\(error.localizedDescription)"
+                    self.recordCollectorEvent(kind: "database_error", details: self.lastError)
+                    self.finishRetentionCleanup()
                 }
             }
         }
+    }
+
+    private func finishRetentionCleanup() {
+        retentionCleanupInProgress = false
+        guard retentionCleanupNeedsRerun else { return }
+        retentionCleanupNeedsRerun = false
+        applyRetentionPolicyIfNeeded(force: true)
     }
 
     private func recordCollectorEvent(kind: String, details: String? = nil) {
@@ -1089,19 +1163,28 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         try? store.recordCollectorEvent(kind: kind, details: details)
     }
 
-    private func loadRange(from store: UsageStore) throws {
+    @discardableResult
+    private func loadToday(from store: UsageStore) throws -> [DailyUsageRecord] {
+        let newRecords = try store.dailyUsage(for: dayKey)
+        if newRecords != records { records = newRecords }
+        return newRecords
+    }
+
+    private func loadRange(
+        from store: UsageStore,
+        cachedToday: [DailyUsageRecord]? = nil
+    ) throws {
         let calendar = Calendar.autoupdatingCurrent
         let end = Date()
         let start = selectedRange.startDate(relativeTo: end, calendar: calendar)
 
         if selectedRange.usesBucketSummary {
-            let buckets = try store.bucketUsage(from: start, to: end)
-            rangeBuckets = buckets
+            let summaries = try store.bucketUsageSummary(from: start, to: end)
             dailyRangeRecords = []
-            setRangeRecords(aggregateRecords(
-                buckets.map {
+            setRangeRecords(
+                summaries.map {
                     DailyUsageRecord(
-                        day: Self.dayKey(for: $0.bucketStart),
+                        day: Self.dayKey(for: $0.firstBucketStart),
                         appKey: $0.appKey,
                         displayName: $0.displayName,
                         category: $0.category,
@@ -1113,27 +1196,94 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                         sampleCount: $0.sampleCount
                     )
                 }
-            ))
-            setRangeTimeline(makeTimeline(
-                from: buckets.filter { $0.category != .proxyTransport }
-            ))
+            )
+            setRangeTimeline(
+                makeTimeline(
+                    from: try store.bucketTimeline(from: start, to: end)
+                )
+            )
+            try loadActiveDetailTimeline(from: store, start: start, end: end)
             return
         }
 
-        let daily = try store.dailyUsage(
-            from: Self.dayKey(for: start),
-            through: Self.dayKey(for: end)
-        )
+        let daily: [DailyUsageRecord]
+        if let cachedToday {
+            daily = cachedToday
+        } else {
+            daily = try store.dailyUsage(
+                from: Self.dayKey(for: start),
+                through: Self.dayKey(for: end)
+            )
+        }
         dailyRangeRecords = daily
         setRangeRecords(aggregateRecords(daily))
         if selectedRange == .today {
-            rangeBuckets = try store.bucketUsage(from: start, to: end)
-            setRangeTimeline(makeTimeline(
-                from: rangeBuckets.filter { $0.category != .proxyTransport }
-            ))
+            setRangeTimeline(
+                makeTimeline(
+                    from: try store.bucketTimeline(from: start, to: end)
+                )
+            )
         } else {
-            rangeBuckets = []
             setRangeTimeline(makeTimeline(from: daily.filter { $0.category != .proxyTransport }))
+        }
+        try loadActiveDetailTimeline(from: store, start: start, end: end)
+    }
+
+    private func refreshDetailTimeline(for appKey: String) {
+        guard let store else {
+            detailTimeline = []
+            return
+        }
+        let calendar = Calendar.autoupdatingCurrent
+        let end = Date()
+        let start = selectedRange.startDate(relativeTo: end, calendar: calendar)
+        do {
+            try loadDetailTimeline(for: appKey, from: store, start: start, end: end)
+        } catch {
+            lastError = "读取应用趋势失败：\(error.localizedDescription)"
+            recordCollectorEvent(kind: "database_error", details: lastError)
+        }
+    }
+
+    private func loadActiveDetailTimeline(
+        from store: UsageStore,
+        start: Date,
+        end: Date
+    ) throws {
+        guard let activeDetailAppKey else { return }
+        try loadDetailTimeline(
+            for: activeDetailAppKey,
+            from: store,
+            start: start,
+            end: end
+        )
+    }
+
+    private func loadDetailTimeline(
+        for appKey: String,
+        from store: UsageStore,
+        start: Date,
+        end: Date
+    ) throws {
+        guard rangeRecords.first(where: { $0.appKey == appKey })?.category != .proxyTransport else {
+            detailTimeline = []
+            return
+        }
+        if selectedRange.usesFineGrainedTimeline {
+            detailTimeline = makeTimeline(
+                from: try store.bucketTimeline(
+                    from: start,
+                    to: end,
+                    appKey: appKey,
+                    excludingProxyTransport: false
+                )
+            )
+        } else {
+            detailTimeline = makeTimeline(
+                from: dailyRangeRecords.filter {
+                    $0.appKey == appKey && $0.category != .proxyTransport
+                }
+            )
         }
     }
 
@@ -1181,7 +1331,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
     }
 
-    private func makeTimeline(from records: [UsageBucketRecord]) -> [UsageTimelinePoint] {
+    private func makeTimeline(from records: [UsageTimelineRecord]) -> [UsageTimelinePoint] {
         var totals: [Date: UsageTotals] = [:]
         for record in records {
             let existing = totals[record.bucketStart] ?? UsageTotals(downloadBytes: 0, uploadBytes: 0)

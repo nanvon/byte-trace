@@ -31,10 +31,20 @@ struct MainWindowView: View {
             ByteTraceAppDelegate.installOpenMainWindowAction { openWindow(id: "main") }
             ByteTraceAppDelegate.prepareMainWindow()
             NSApplication.shared.activate(ignoringOtherApps: true)
-            model.beginObservingUsage()
+            if selection == .overview {
+                model.beginObservingUsage(.mainOverview)
+            }
         }
         .onDisappear {
-            model.endObservingUsage()
+            model.endObservingUsage(.mainOverview)
+        }
+        .onChange(of: selection) { oldPage, newPage in
+            if oldPage == .overview {
+                model.endObservingUsage(.mainOverview)
+            }
+            if newPage == .overview {
+                model.beginObservingUsage(.mainOverview)
+            }
         }
         .onChange(of: model.requestedMainWindowPage) { _, page in
             selection = page
@@ -305,6 +315,7 @@ private struct UsageTimelineChart: View {
 
     @State private var hoverPoint: UsageTimelinePoint?
     @State private var hoverLocation: CGPoint?
+    @State private var chartData: ChartData
 
     private struct Slice: Identifiable {
         let id: Int
@@ -319,6 +330,11 @@ private struct UsageTimelineChart: View {
         let range: [Color]
     }
 
+    init(points: [UsageTimelinePoint]) {
+        self.points = points
+        _chartData = State(initialValue: Self.makeChartData(from: points))
+    }
+
     /// 一次遍历同时产出绘图数据与配色标度。
     ///
     /// 原实现有两个问题：`colorScale` 对每个点做 `Array.contains` 线性查找（O(n²)），
@@ -327,7 +343,7 @@ private struct UsageTimelineChart: View {
     ///
     /// domain 的追加顺序与原实现一致（每遇到新 segment 先 download 后 upload），
     /// 配色结果不变。
-    private var chartData: ChartData {
+    private static func makeChartData(from points: [UsageTimelinePoint]) -> ChartData {
         var slices: [Slice] = []
         slices.reserveCapacity(points.count * 2)
         var domain: [String] = []
@@ -371,8 +387,7 @@ private struct UsageTimelineChart: View {
     }
 
     var body: some View {
-        let data = chartData
-        Chart(data.slices) { slice in
+        Chart(chartData.slices) { slice in
             AreaMark(
                 x: .value("时间", slice.start),
                 y: .value("字节", slice.bytes)
@@ -389,7 +404,7 @@ private struct UsageTimelineChart: View {
             .lineStyle(StrokeStyle(lineWidth: 1.6))
             .interpolationMethod(.monotone)
         }
-        .chartForegroundStyleScale(domain: data.domain, range: data.range)
+        .chartForegroundStyleScale(domain: chartData.domain, range: chartData.range)
         .chartLegend(.hidden)
         .chartYAxis {
             AxisMarks(position: .leading) { value in
@@ -430,6 +445,11 @@ private struct UsageTimelineChart: View {
             }
         }
         .frame(height: 220)
+        .onChange(of: points) { _, newPoints in
+            chartData = Self.makeChartData(from: newPoints)
+            hoverPoint = nil
+            hoverLocation = nil
+        }
     }
 
     private func updateHover(at location: CGPoint, proxy: ChartProxy, geometry: GeometryProxy) {
@@ -437,10 +457,33 @@ private struct UsageTimelineChart: View {
         let plotFrame = geometry[plotFrameAnchor]
         let relativeX = location.x - plotFrame.origin.x
         guard let date = proxy.value(atX: relativeX, as: Date.self) else { return }
-        hoverPoint = points.min {
-            abs($0.start.timeIntervalSince(date)) < abs($1.start.timeIntervalSince(date))
-        }
+        let nearest = nearestPoint(to: date)
+        if nearest != hoverPoint { hoverPoint = nearest }
         hoverLocation = location
+    }
+
+    /// `points` is sorted by time by ByteTraceViewModel. Binary search avoids
+    /// scanning the whole day (up to 1,440 points) for every mouse movement.
+    private func nearestPoint(to date: Date) -> UsageTimelinePoint? {
+        guard !points.isEmpty else { return nil }
+        var lower = 0
+        var upper = points.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if points[middle].start < date {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        if lower == 0 { return points[0] }
+        if lower == points.count { return points[points.count - 1] }
+
+        let before = points[lower - 1]
+        let after = points[lower]
+        return date.timeIntervalSince(before.start) <= after.start.timeIntervalSince(date)
+            ? before
+            : after
     }
 
     private func hoverBubble(for point: UsageTimelinePoint) -> some View {
@@ -502,6 +545,12 @@ private struct AppDetailView: View {
             .padding(24)
         }
         .navigationTitle(record?.displayName ?? "应用详情")
+        .onAppear {
+            model.beginObservingAppDetail(appKey)
+        }
+        .onDisappear {
+            model.endObservingAppDetail(appKey)
+        }
     }
 
     private func appHeader(_ record: DailyUsageRecord) -> some View {

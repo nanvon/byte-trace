@@ -28,8 +28,8 @@ struct MenuBarView: View {
         }
         .frame(width: 390, height: 672)
         // 面板收起后就没人看数据了，停掉周期性 UI 刷新；重新展开时立即补一次。
-        .onAppear { model.beginObservingUsage() }
-        .onDisappear { model.endObservingUsage() }
+        .onAppear { model.beginObservingUsage(.menuBar) }
+        .onDisappear { model.endObservingUsage(.menuBar) }
     }
 
     private var header: some View {
