@@ -27,6 +27,16 @@ jobs:
       - name: Check tag and app version
         run: python3 Scripts/check-release-version.py "${GITHUB_REF_NAME}"
 
+      - name: Check release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="release-notes/${GITHUB_REF_NAME}.md"
+          if [[ ! -s "$notes_path" ]] || ! grep -q '[^[:space:]]' "$notes_path"; then
+            echo "缺少 ${notes_path}；请在创建发布 tag 前补充面向用户的更新说明。" >&2
+            exit 1
+          fi
+
   package:
     name: ${{ matrix.name }}
     needs: prepare
@@ -95,6 +105,23 @@ jobs:
       GH_TOKEN: ${{ github.token }}
 
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Compose release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="release-notes/${GITHUB_REF_NAME}.md"
+          if [[ ! -s "$notes_path" ]]; then
+            echo "缺少 ${notes_path}" >&2
+            exit 1
+          fi
+          # Release 正文 = 手写的本版更新说明 + 每版重复的固定尾注
+          {
+            cat "$notes_path"
+            printf '\n---\n\nmacOS 产物使用 ad-hoc 签名且未经过 Apple 公证，首次打开可能需要在系统设置中手动放行。\n'
+          } > "${RUNNER_TEMP}/release-notes.md"
+
       - name: Download signed packages
         uses: actions/download-artifact@v4
         with:
@@ -124,8 +151,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             --title "ByteTrace ${GITHUB_REF_NAME}" \
-            --notes "macOS 产物使用 ad-hoc 签名且未经过 Apple 公证，首次打开可能需要在系统设置中手动放行。" \
-            --generate-notes
+            --notes-file "${RUNNER_TEMP}/release-notes.md"
 
           release_assets=()
           while IFS= read -r -d '' file; do

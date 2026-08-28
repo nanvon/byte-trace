@@ -115,11 +115,34 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 ## 发布
 
-版本号真值在 `Packaging/Info.plist` 的 `CFBundleShortVersionString`。发布时 git tag 必须是 `v<版本号>`，由 `Scripts/check-release-version.py` 在 CI 与 release 流程中强制校验；README 顶部的 version badge 需手动同步。
+版本号真值在 `Packaging/Info.plist` 的 `CFBundleShortVersionString`。发布时 git tag 必须是 `v<版本号>`，由 `Scripts/check-release-version.py` 在 CI 与 release 流程中强制校验；README 的 release badge 自动跟随最新 Release，不用手改。
 
 - `ci.yml`：push main / PR 时在 Apple Silicon + Intel runner 上跑 `swift build`、`swift test`、plist 校验与 ad-hoc 打包校验。
-- `release.yml`：推 `v*` tag 触发，先校验版本再构建双架构产物、生成 DMG / ZIP / SHA-256 并建 Release。
+- `release.yml`：推 `v*` tag 触发，先校验版本和更新说明，再构建双架构产物、生成 DMG / ZIP / SHA-256 并建 Release。
 - 全程 ad-hoc 签名，不使用 Developer ID 证书、不公证。
+
+### 更新说明
+
+每个版本的 Release 正文来自手写的 `release-notes/v<版本号>.md`，格式与撰写规则见 [release-notes/README.md](release-notes/README.md)。CI 会校验该文件存在且非空，缺失就直接失败、不创建 Release；正文原样使用，末尾由 workflow 自动追加 ad-hoc 签名放行说明，不用手写。这不是聚合 `CHANGELOG.md`，每个版本只留一份面向用户的说明。
+
+### 标准发布流程（用户说「发版」时）
+
+「发版」是预先授权的固定发布指令，出现这句话（或「发布一下」「发个新版本」等同义表述）时按下面四步顺序执行，**不用逐步等确认**：
+
+1. **提交代码**：把工作区未提交的改动按仓库惯例的 commit message 风格提交；无关改动分开提交，不要混在一起。
+2. **编写用户更新说明**：对比上一个 `v*` tag 与当前代码、提交和文档，只提炼真实、用户可感知的新增功能、问题修复、体验优化和必要注意事项；不要罗列 commit、文件、重构、CI 或版本号。创建 `release-notes/vX.Y.Z.md`。
+3. **版本号 +1**：改 `Packaging/Info.plist` 的 `CFBundleShortVersionString`，patch 位 +1（如 `0.1.9` → `0.1.10`），除非用户明确要求升 minor/major。版本号和 `release-notes/vX.Y.Z.md` 一起单独提交，message 形如 `chore: 发布 vX.Y.Z`。
+4. **触发远程构建发布**：推送分支 + 打带 `v` 前缀的 tag 触发 `release.yml`：
+
+   ```bash
+   git push origin main
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+- tag 必须和已提交的 `CFBundleShortVersionString` 一致，tag 本身不改版本号，只是给已提交好的版本打标记；打错可撤销：`git tag -d vX.Y.Z && git push origin :vX.Y.Z`。
+- `git push origin vX.Y.Z` 成功即代表本地发版操作完成；只汇报版本号、提交和 Actions / Release 链接，**不得主动查询、等待或轮询** CI、Release 或产物状态。只有用户明确要求「看进度」「确认发布成功」或「检查产物」时，才查询远端状态。
+- 用户只说「打个正式版」而工作区本来就干净时，照样按这四步走，第 1 步无改动则跳过。
 
 ## 边缘目录
 
