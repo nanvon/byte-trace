@@ -15,6 +15,8 @@ public final class UsageStore: @unchecked Sendable {
     /// 用可重入锁：`dailyUsage(for:)` 会转调 `dailyUsage(from:through:)`。
     private let lock = NSRecursiveLock()
     private static let legacyCCBarAppKey = "proxy:ccbar"
+    /// 单批清理的行数上限。够大以摊薄事务开销，够小以保证单批事务只持锁几十毫秒。
+    private static let bucketPurgeBatchSize: Int64 = 5_000
 
     private struct StoredApp {
         let bundleID: String?
@@ -545,14 +547,33 @@ public final class UsageStore: @unchecked Sendable {
         )
     }
 
+    /// 分批清理过期分钟桶。
+    ///
+    /// cutoff 由调用方在任务开始时固定，每批一个独立的短事务：保留策略在后台队列执行，
+    /// 但与主线程落库共用同一把 `lock`。首次启用 7/30/90 天策略可能要删几百万行，
+    /// 单事务删完会让主线程的 flush 一直阻塞在锁上；切成短事务后落库最多等一批。
+    /// 每批提交即生效，中断后下次清理从剩余数据继续，`daily_usage` 与 `apps` 不受影响。
     public func purgeBuckets(before date: Date) throws -> Int64 {
+        var totalDeleted: Int64 = 0
+        while true {
+            let deleted = try purgeBucketBatch(before: date)
+            totalDeleted = Self.saturatingAdd(totalDeleted, deleted)
+            guard deleted >= Self.bucketPurgeBatchSize else { return totalDeleted }
+            // NSRecursiveLock 不保证公平：批次之间立刻重新加锁，可能让主线程的 flush
+            // 长时间抢不到。让出几毫秒换取落库不被连续批次拖住。
+            Thread.sleep(forTimeInterval: 0.002)
+        }
+    }
+
+    private func purgeBucketBatch(before date: Date) throws -> Int64 {
         lock.lock()
         defer { lock.unlock() }
         try database.execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
             let usageDeleted = try deleteBuckets(
                 from: "usage_buckets",
-                before: date
+                before: date,
+                limit: Self.bucketPurgeBatchSize
             )
             try database.execute("COMMIT;")
             return usageDeleted
@@ -1036,13 +1057,21 @@ public final class UsageStore: @unchecked Sendable {
         try database.reset(statement)
     }
 
-    private func deleteBuckets(from table: String, before date: Date) throws -> Int64 {
+    /// 子查询取 rowid 再删：`DELETE ... LIMIT` 需要 SQLite 开启
+    /// `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`，系统自带的 libsqlite3 并不保证编译了它。
+    private func deleteBuckets(from table: String, before date: Date, limit: Int64) throws -> Int64 {
         let statement = try database.prepare(
-            "DELETE FROM \(table) WHERE bucket_start < ?;"
+            """
+            DELETE FROM \(table)
+            WHERE rowid IN (
+                SELECT rowid FROM \(table) WHERE bucket_start < ? LIMIT ?
+            );
+            """
         )
         defer { sqlite3_finalize(statement) }
 
         try database.bind(Self.epochSeconds(date), at: 1, in: statement)
+        try database.bind(limit, at: 2, in: statement)
         try database.stepDone(statement)
         return database.changes()
     }

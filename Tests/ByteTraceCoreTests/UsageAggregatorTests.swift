@@ -107,6 +107,45 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(dailyAfterPurge[0].sampleCount, 2)
     }
 
+    /// 分批清理：一次 purge 跨越多个批次时返回值必须是各批累计删除行数，
+    /// cutoff 之后的分钟桶和 daily_usage 都不受影响。
+    func testPurgeBucketsAccumulatesAcrossBatches() throws {
+        let calendar = utcCalendar()
+        let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let aggregator = UsageAggregator(store: store, calendar: calendar)
+        let start = calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 1, hour: 0, minute: 0, second: 1)
+        )!
+        // 单批上限 5000，取 6000 保证至少跨两批。
+        let bucketCount = 6_000
+        let keptCount = 500
+
+        for index in 0..<bucketCount {
+            try aggregator.ingest(
+                makeDelta(
+                    at: start.addingTimeInterval(Double(index) * 60),
+                    download: 10,
+                    upload: 1
+                )
+            )
+        }
+        try aggregator.flush()
+        XCTAssertEqual(try store.bucketStats().bucketCount, Int64(bucketCount))
+
+        let cutoff = calendar.dateInterval(
+            of: .minute,
+            for: start.addingTimeInterval(Double(bucketCount - keptCount) * 60)
+        )!.start
+
+        XCTAssertEqual(try store.purgeBuckets(before: cutoff), Int64(bucketCount - keptCount))
+        XCTAssertEqual(try store.bucketStats().bucketCount, Int64(keptCount))
+        XCTAssertEqual(try store.purgeBuckets(before: cutoff), 0)
+
+        let dailyDownload = try store.dailyUsage(from: "2026-08-01", through: "2026-08-06")
+            .reduce(Int64(0)) { $0 + $1.downloadBytes }
+        XCTAssertEqual(dailyDownload, Int64(bucketCount) * 10)
+    }
+
     func testBatchedApplyKeepsLatestAppMetadataAcrossBuckets() throws {
         let calendar = utcCalendar()
         let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
