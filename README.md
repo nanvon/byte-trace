@@ -10,13 +10,10 @@
 </p>
 
 <p align="center">
-  <img alt="Platform" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
-  <img alt="Swift" src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white">
   <a href="https://github.com/nanvon/byte-trace/releases/latest"><img alt="Latest Release" src="https://img.shields.io/github/v/release/nanvon/byte-trace?color=brightgreen"></a>
   <img alt="Total Downloads" src="https://img.shields.io/github/downloads/nanvon/byte-trace/total?color=blue">
   <a href="https://github.com/nanvon/byte-trace/releases/latest"><img alt="Latest Downloads" src="https://img.shields.io/github/downloads/nanvon/byte-trace/latest/total?label=latest%20downloads&color=blue"></a>
   <a href="https://github.com/nanvon/byte-trace/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/nanvon/byte-trace/ci.yml?branch=main"></a>
-  <img alt="License" src="https://img.shields.io/badge/license-MIT-orange">
 </p>
 
 <p align="center">
