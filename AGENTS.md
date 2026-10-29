@@ -29,8 +29,8 @@ swift run ByteTraceProbe --duration 15 # 应用级采集
 
 `ByteTrace.xcodeproj` 只用于在 Xcode 里一键运行、查看完整 `.app` 形态（读取 `Packaging/Info.plist` 和菜单栏图标等资源，`swift run` 拿不到这些）：打开工程，选 `ByteTrace` scheme 和 My Mac，⌘R。运行前先退出已安装的 ByteTrace，两者共用同一个 bundle ID、偏好设置和 SQLite 数据库。
 
-- 应用 target 用 Xcode 同步文件夹引用 `Sources/ByteTraceApp/`，`ByteTraceCore` 通过本地 Swift Package 依赖仓库根目录的 `Package.swift`。新增源文件直接放进对应 `Sources/` 目录即可，不要手改 `project.pbxproj`。
-- 命令行构建、测试、CI 和打包仍然只用 `swift build` / `swift test` / `package_app.sh`，不依赖这个工程。版本号只在 `Packaging/Info.plist` 维护。
+- 应用 target 用 Xcode 同步文件夹引用 `Sources/ByteTraceApp/`，`ByteTraceCore` 通过本地 Swift Package 引用，Sparkle 通过远程 Swift Package 引用。新增源文件直接放进对应 `Sources/` 目录即可，不要手改 `project.pbxproj`。
+- 共享 scheme 未配置测试 target；命令行构建、测试、CI 和打包仍使用 `swift build` / `swift test` / `package_app.sh`，不依赖这个工程。发布版本真值是 `Packaging/Info.plist` 的 `CFBundleShortVersionString`；直接用 Xcode 运行时，应同时保持 `CFBundleVersion` 一致。
 
 ## 架构：按接口拆分的双通道采集管线
 
@@ -118,7 +118,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 - **所有面向用户的文案、错误消息、`displayName` 兜底值都是中文**（如 `"未知进程"`、`"无法识别/其他"`）。
 - **字节累加一律饱和处理**：`addingReportingOverflow` 溢出时取 `Int64.max`，仓库里有多处同名 `saturatingAdd` 私有辅助方法，沿用就近的那个而不是新造。
 - `ByteTraceCore` 的 public 类型显式书写 `public init`，模型一律 `Equatable, Sendable`。
-- 不引入第三方依赖（`Package.swift` 当前零依赖）。
+- 应用更新已使用 Sparkle 2.10.0；采集与存储不依赖第三方库。不要额外引入第三方依赖。
 
 ## 发布
 
@@ -140,7 +140,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 1. **提交代码**：把工作区未提交的改动按仓库惯例的 commit message 风格提交；无关改动分开提交，不要混在一起。
 2. **编写用户更新说明**：对比上一个 `v*` tag 与当前代码、提交和文档，只提炼真实、用户可感知的新增功能、问题修复、体验优化和必要注意事项；不要罗列 commit、文件、重构、CI 或版本号。创建 `release-notes/vX.Y.Z.md`。
-3. **版本号 +1**：改 `Packaging/Info.plist` 的 `CFBundleShortVersionString`，patch 位 +1（如 `0.1.9` → `0.1.10`），除非用户明确要求升 minor/major。版本号和 `release-notes/vX.Y.Z.md` 一起单独提交，message 形如 `chore: 发布 vX.Y.Z`。
+3. **版本号 +1**：改 `Packaging/Info.plist` 的 `CFBundleShortVersionString`，patch 位 +1（如 `0.1.9` → `0.1.10`），除非用户明确要求升 minor/major；同时将 `CFBundleVersion` 更新为相同版本，供 Xcode 本地运行使用。版本号和 `release-notes/vX.Y.Z.md` 一起单独提交，message 形如 `chore: 发布 vX.Y.Z`。
 4. **触发远程构建发布**：推送分支 + 打带 `v` 前缀的 tag 触发 `release.yml`：
 
    ```bash

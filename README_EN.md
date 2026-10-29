@@ -78,7 +78,7 @@
 2. Open the DMG image and drag `ByteTrace.app` into your `Applications` directory;
 3. Launch the application. A ⇅ icon will appear in the macOS menu bar (the app does not appear in the Dock); click the icon to begin monitoring.
 
-Check for updates from the menu bar panel, app menu, or Settings → About ByteTrace. A separate window displays release notes and download progress, then installs and restarts after confirmation. Automatic checks are optional. Versions without the updater require one manual upgrade first.
+Check for updates from the app menu or beside the current version in Settings → About ByteTrace. When an update is available, the bottom of the menu bar panel shows its version and a Download button that opens the update window. The window displays release notes and download progress, then installs and restarts after confirmation. Automatic checks are optional. Versions without the updater require one manual upgrade first.
 
 > [!NOTE]
 > **First-Launch Gatekeeper Prompt**
@@ -128,7 +128,13 @@ ByteTrace adheres to **Local-first and Zero Telemetry** principles. All analysis
 * Xcode 27.1 (with the macOS 27.0 SDK, matching CI and release builds)
 * Swift Package Manager (Sparkle 2.10.0 for updates; collection and storage have no third-party dependencies)
 
-### Local Development & Debugging
+### Run in Xcode
+
+Open `ByteTrace.xcodeproj`, select the `ByteTrace` scheme and My Mac, then press ⌘R. The project uses `Packaging/Info.plist` and the icon resources to run a full `.app`. Quit any installed copy of ByteTrace first: both use the same bundle ID, preferences, and SQLite database.
+
+The project references `ByteTraceCore` through the local Swift package and uses Sparkle for updates. `Sources/ByteTraceApp/` is a synchronized folder, so new source files do not require manual project-file changes. The scheme has no test target; use `swift test` below. CI and release packaging also continue to use Swift Package Manager and the packaging script.
+
+### Command-Line Development & Debugging
 ```bash
 # Clone repository
 git clone https://github.com/nanvon/byte-trace.git
@@ -145,7 +151,7 @@ swift run ByteTraceApp
 ```
 
 > [!WARNING]
-> `swift run ByteTraceApp` executes the raw binary without reading `Packaging/Info.plist`. Consequently, menu-bar-only persistence (`LSUIElement`) and application icon behaviors will not take effect. To validate the complete menu bar experience, use the packaging script to produce an `.app` bundle.
+> `swift run ByteTraceApp` runs a raw binary without `Packaging/Info.plist` or the app bundle's icon resources; in-app updates are unavailable. Use the Xcode project or the packaging script below when a full `.app` is needed.
 
 In-app updating also requires an `.app` bundle. See [app update configuration](docs/APP_UPDATES.md) for signing and release setup.
 

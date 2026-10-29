@@ -78,7 +78,7 @@
 2. 打开 DMG 镜像，将 `ByteTrace.app` 拖入 `Applications` 应用程序目录；
 3. 启动应用后，macOS 菜单栏将常驻 ⇅ 图标（无 Dock 栏图标），点击图标即自动开始监控。
 
-后续可在菜单栏面板、应用菜单或「设置 → 关于 ByteTrace」中检查更新，在独立窗口查看更新日志、下载并安装。支持自动检查，安装前仍需确认。早期未内置更新功能的版本需先手动安装一次新版。
+后续可在应用菜单或「设置 → 关于 ByteTrace」的当前版本旁检查更新；发现新版本后，菜单栏面板底部会显示版本号与「下载」按钮，点击打开独立更新窗口，查看更新日志、下载并安装。支持自动检查，安装前仍需确认。早期未内置更新功能的版本需先手动安装一次新版。
 
 > [!NOTE]
 > **首次启动安全放行提示 (Gatekeeper)**
@@ -128,7 +128,13 @@ ByteTrace 遵循**本地优先（Local-first）与零遥测（Zero Telemetry）*
 * Xcode 27.1（包含 macOS 27.0 SDK，与 CI 和发布工具链一致）
 * Swift Package Manager（应用更新依赖 Sparkle 2.10.0，采集与存储无第三方依赖）
 
-### 本地日常开发调试
+### 使用 Xcode 运行
+
+打开 `ByteTrace.xcodeproj`，选择 `ByteTrace` scheme 和 My Mac，按 ⌘R 运行。工程使用 `Packaging/Info.plist` 和图标资源，便于调试完整的 `.app`。运行前请退出已安装的 ByteTrace：两者共用同一个 bundle ID、偏好设置和 SQLite 数据库。
+
+工程通过本地 Swift Package 引用 `ByteTraceCore`，并使用 Sparkle 处理更新。`Sources/ByteTraceApp/` 是同步文件夹，新增源文件无需手动修改工程文件。该 scheme 未配置测试 target，测试请使用下面的 `swift test`；CI 和正式打包也继续使用 Swift Package 和打包脚本。
+
+### 命令行开发与调试
 ```bash
 # 克隆仓库
 git clone https://github.com/nanvon/byte-trace.git
@@ -145,7 +151,7 @@ swift run ByteTraceApp
 ```
 
 > [!WARNING]
-> `swift run ByteTraceApp` 直接运行编译产出的裸二进制文件，无法读取 `Packaging/Info.plist`，因此菜单栏常驻策略（`LSUIElement`）与应用图标将不会生效。如需完整体验真实菜单栏交互，请使用打包脚本生成 `.app`。
+> `swift run ByteTraceApp` 运行裸二进制，无法读取 `Packaging/Info.plist` 和应用包图标资源，也无法使用应用内更新。需要完整 `.app` 时，请使用 Xcode 工程或下方的打包脚本。
 
 应用内更新同样需要完整 `.app`。更新源、密钥和发布配置见 [应用更新](docs/APP_UPDATES.md)。
 

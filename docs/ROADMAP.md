@@ -3,7 +3,7 @@
 > 更新：2026-09-30
 > 代码基线：v0.1.29（HEAD `add24fb`）
 > 本文档取代 `docs/NEXT_MAJOR_VERSION_PLAN.md` 与 `docs/PERFORMANCE_AND_POWER_OPTIMIZATION_PLAN.md`，两份原文档保留为历史存档、不再维护。
-> 硬约束：无 Apple 付费开发者身份；不加 root；不启用 Network Extension；不引入第三方依赖；ad-hoc 签名分发。
+> 当时的约束：无 Apple 付费开发者身份；不加 root；不启用 Network Extension；不引入第三方依赖；ad-hoc 签名分发。后续应用更新已引入 Sparkle，详见 [应用更新](APP_UPDATES.md)。
 
 ## 0. 判断依据
 
