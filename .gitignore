@@ -3,6 +3,7 @@
 dist/
 DerivedData/
 *.xcuserstate
+xcuserdata/
 __pycache__/
 *.py[cod]
 *.sqlite3

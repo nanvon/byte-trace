@@ -25,6 +25,13 @@ swift run ByteTraceProbe --duration 15 # 应用级采集
 
 `package_app.sh` 环境变量：`BYTE_TRACE_SIGNING_IDENTITY`（默认 `-`，ad-hoc）、`BYTE_TRACE_SWIFT_TRIPLE`（交叉构建目标）。
 
+### Xcode 本地运行
+
+`ByteTrace.xcodeproj` 只用于在 Xcode 里一键运行、查看完整 `.app` 形态（读取 `Packaging/Info.plist` 和菜单栏图标等资源，`swift run` 拿不到这些）：打开工程，选 `ByteTrace` scheme 和 My Mac，⌘R。运行前先退出已安装的 ByteTrace，两者共用同一个 bundle ID、偏好设置和 SQLite 数据库。
+
+- 应用 target 用 Xcode 同步文件夹引用 `Sources/ByteTraceApp/`，`ByteTraceCore` 通过本地 Swift Package 依赖仓库根目录的 `Package.swift`。新增源文件直接放进对应 `Sources/` 目录即可，不要手改 `project.pbxproj`。
+- 命令行构建、测试、CI 和打包仍然只用 `swift build` / `swift test` / `package_app.sh`，不依赖这个工程。版本号只在 `Packaging/Info.plist` 维护。
+
 ## 架构：按接口拆分的双通道采集管线
 
 ByteTrace 按 nettop 接口类型拆分成两个常驻通道，避免高功耗的全接口连接级采集：外部通道按进程汇总已定义的非回环接口；补充通道只读取 `loopback` 与 `undefined` 连接，用于补齐系统代理入口和 utun/TUN 应用侧流量。
