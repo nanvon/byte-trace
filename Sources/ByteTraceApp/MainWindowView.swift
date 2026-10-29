@@ -13,27 +13,21 @@ struct MainWindowView: View {
         NavigationSplitView {
             List(selection: $selection) {
                 Section("统计") {
-                    Label("概览", systemImage: "chart.bar")
-                        .tag(MainWindowPage.overview)
-                    Label("应用", systemImage: "app")
+                    sidebarLabel("概览", systemImage: "chart.xyaxis.line", page: .overview)
+                    sidebarLabel("应用", systemImage: "macwindow", page: .applications)
                         .badge(count(of: .applications))
-                        .tag(MainWindowPage.applications)
-                    Label("代理传输", systemImage: "arrow.up.arrow.down")
+                    sidebarLabel("代理传输", systemImage: "arrow.triangle.branch", page: .proxy)
                         .badge(count(of: .proxy))
-                        .tag(MainWindowPage.proxy)
                     if model.showsSystemProcesses {
-                        Label("系统进程", systemImage: "cpu")
+                        sidebarLabel("系统进程", systemImage: "terminal", page: .system)
                             .badge(count(of: .system))
-                            .tag(MainWindowPage.system)
                     }
                 }
                 Section {
-                    Label("设置", systemImage: "slider.horizontal.3")
-                        .tag(MainWindowPage.settings)
+                    sidebarLabel("设置", systemImage: "gearshape", page: .settings)
                 }
             }
             .listStyle(.sidebar)
-            .labelStyle(MainSidebarLabelStyle())
             .focused($isSidebarFocused)
             .defaultFocus($isSidebarFocused, true)
             .safeAreaInset(edge: .bottom) { statusBox }
@@ -77,6 +71,12 @@ struct MainWindowView: View {
         .background(MainWindowRegistration())
     }
 
+    private func sidebarLabel(_ title: String, systemImage: String, page: MainWindowPage) -> some View {
+        Label(title, systemImage: systemImage)
+            .labelStyle(MainSidebarLabelStyle(isSelected: selection == page))
+            .tag(page)
+    }
+
     private func count(of page: MainWindowPage) -> Int {
         model.rangeRecords.filter(page.includes).count
     }
@@ -104,15 +104,20 @@ struct MainWindowView: View {
 }
 
 private struct MainSidebarLabelStyle: LabelStyle {
+    let isSelected: Bool
+
     func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             configuration.icon
-                .font(.system(size: 16, weight: .regular))
+                .font(.system(size: 12, weight: .regular))
                 .imageScale(.medium)
                 .symbolVariant(.none)
                 .symbolRenderingMode(.monochrome)
-                .frame(width: 22, height: 22)
+                .frame(width: 14, height: 14)
+                .foregroundStyle(isSelected ? Color.white : Color.secondary)
             configuration.title
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
         }
     }
 }
