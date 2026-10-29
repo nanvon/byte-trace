@@ -124,10 +124,13 @@ struct SettingsView: View {
                 }
 
                 Section("关于 ByteTrace") {
-                    LabeledContent("当前版本", value: updater.currentVersion)
-                    LabeledContent("应用更新") {
-                        Button(updater.hasUpdate || updater.isWorking ? "查看更新…" : "检查更新…") {
-                            updater.checkForUpdates()
+                    LabeledContent("当前版本") {
+                        HStack(spacing: 10) {
+                            Text(updater.currentVersion)
+                                .textSelection(.enabled)
+                            Button("检查更新…") {
+                                updater.checkForUpdates()
+                            }
                         }
                     }
                     Toggle("自动检查更新", isOn: Binding(

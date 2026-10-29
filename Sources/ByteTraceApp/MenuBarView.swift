@@ -42,6 +42,25 @@ struct MenuBarView: View {
             .scrollBounceBehavior(.basedOnSize)
             // 面板高度跟随内容，超过屏幕可用高度才滚动。
             .frame(height: min(contentHeight, maxScrollHeight))
+
+            if let version = updater.availableVersion {
+                HStack(spacing: 8) {
+                    Spacer()
+                    Text(version)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                    Button("下载") {
+                        updater.showUpdateWindow()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .pointingHandCursor()
+                }
+                .font(.caption)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
         }
         .frame(width: 390)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -57,7 +76,8 @@ struct MenuBarView: View {
     /// 屏幕可用高度减去顶部栏与上下留白。
     private var maxScrollHeight: CGFloat {
         let visibleHeight = NSScreen.main?.visibleFrame.height ?? 800
-        return max(320, visibleHeight - 54 - 40)
+        let updateFooterHeight: CGFloat = updater.hasUpdate ? 40 : 0
+        return max(320, visibleHeight - 54 - 40 - updateFooterHeight)
     }
 
     // MARK: - 顶部
@@ -84,12 +104,6 @@ struct MenuBarView: View {
             }
             headerButton(symbolName: "gearshape", label: "设置") {
                 openMainWindow(page: .settings)
-            }
-            headerButton(
-                symbolName: updater.hasUpdate ? "arrow.down.circle.fill" : "arrow.down.circle",
-                label: updater.hasUpdate || updater.isWorking ? "查看更新" : "检查更新"
-            ) {
-                updater.checkForUpdates()
             }
             headerButton(symbolName: "power", label: "退出 ByteTrace") {
                 model.shutdown()
