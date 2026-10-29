@@ -130,11 +130,10 @@ ditto "$APP_DIR" "$DMG_STAGING_DIR/ByteTrace.app"
 ln -s /Applications "$DMG_STAGING_DIR/Applications"
 
 rm -f "$DMG_PATH"
-hdiutil create \
-    -volname "ByteTrace" \
-    -srcfolder "$DMG_STAGING_DIR" \
-    -ov \
-    -format UDZO \
+diskutil image create from \
+    --volumeName "ByteTrace" \
+    --format UDZO \
+    "$DMG_STAGING_DIR" \
     "$DMG_PATH"
 
 echo "[package] dmg=$DMG_PATH"

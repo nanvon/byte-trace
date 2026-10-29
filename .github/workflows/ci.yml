@@ -54,4 +54,4 @@ jobs:
         run: |
           test -s dist/ByteTrace.zip
           test -s dist/ByteTrace.dmg
-          hdiutil imageinfo dist/ByteTrace.dmg >/dev/null
+          diskutil image info dist/ByteTrace.dmg >/dev/null
