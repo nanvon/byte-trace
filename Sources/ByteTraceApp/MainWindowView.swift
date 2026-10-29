@@ -13,26 +13,27 @@ struct MainWindowView: View {
         NavigationSplitView {
             List(selection: $selection) {
                 Section("统计") {
-                    Label("概览", systemImage: "rectangle.3.group")
+                    Label("概览", systemImage: "chart.bar")
                         .tag(MainWindowPage.overview)
-                    Label("应用", systemImage: "square.grid.2x2")
+                    Label("应用", systemImage: "app")
                         .badge(count(of: .applications))
                         .tag(MainWindowPage.applications)
-                    Label("代理传输", systemImage: "arrow.triangle.2.circlepath")
+                    Label("代理传输", systemImage: "arrow.up.arrow.down")
                         .badge(count(of: .proxy))
                         .tag(MainWindowPage.proxy)
                     if model.showsSystemProcesses {
-                        Label("系统进程", systemImage: "desktopcomputer")
+                        Label("系统进程", systemImage: "cpu")
                             .badge(count(of: .system))
                             .tag(MainWindowPage.system)
                     }
                 }
                 Section {
-                    Label("设置", systemImage: "gearshape")
+                    Label("设置", systemImage: "slider.horizontal.3")
                         .tag(MainWindowPage.settings)
                 }
             }
             .listStyle(.sidebar)
+            .labelStyle(MainSidebarLabelStyle())
             .focused($isSidebarFocused)
             .defaultFocus($isSidebarFocused, true)
             .safeAreaInset(edge: .bottom) { statusBox }
@@ -99,6 +100,20 @@ struct MainWindowView: View {
         .padding(10)
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .padding(10)
+    }
+}
+
+private struct MainSidebarLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 10) {
+            configuration.icon
+                .font(.system(size: 16, weight: .regular))
+                .imageScale(.medium)
+                .symbolVariant(.none)
+                .symbolRenderingMode(.monochrome)
+                .frame(width: 22, height: 22)
+            configuration.title
+        }
     }
 }
 
