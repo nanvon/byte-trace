@@ -1,6 +1,6 @@
 name: CI
 
-# CI 只负责编译、测试和本地 ad-hoc 包结构检查；不导入证书、不公证、不创建 Release。
+# CI 使用发布工具链检查 Apple Silicon 产物；不创建 Release。
 on:
   push:
     branches: [main]
@@ -16,32 +16,28 @@ permissions:
 
 jobs:
   check:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS Apple Silicon
-            runner: macos-15
-            triple: arm64-apple-macosx14.0
-          - name: macOS Intel
-            runner: macos-15-intel
-            triple: x86_64-apple-macosx14.0
+    name: macOS Apple Silicon
+    runs-on: xcode-27
+    env:
+      # 与本地 Xcode 保持一致，避免 runner 默认工具链变化影响系统界面样式。
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      BYTE_TRACE_SWIFT_TRIPLE: arm64-apple-macosx26.0
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Toolchain information
+      - name: Verify Xcode 27.1 and macOS 27.0 SDK
         run: |
           xcodebuild -version
           swift --version
+          test "$(xcodebuild -version)" = $'Xcode 27.1\nBuild version 27A9275'
+          test "$(xcrun --sdk macosx --show-sdk-version)" = "27.0"
 
       - name: Swift build
-        run: swift build
+        run: swift build --triple "$BYTE_TRACE_SWIFT_TRIPLE"
 
       - name: Swift tests
-        run: swift test
+        run: swift test --triple "$BYTE_TRACE_SWIFT_TRIPLE"
 
       - name: Validate packaging inputs
         run: |
@@ -52,7 +48,6 @@ jobs:
       - name: Build local ad-hoc app bundle
         env:
           BYTE_TRACE_SIGNING_IDENTITY: "-"
-          BYTE_TRACE_SWIFT_TRIPLE: ${{ matrix.triple }}
         run: ./Scripts/package_app.sh
 
       - name: Validate generated packages

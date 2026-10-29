@@ -22,9 +22,6 @@ SWIFT_BUILD_ARGS=(
     --product ByteTraceApp
     --package-path "$ROOT_DIR"
 )
-if [[ -n "$SWIFT_TRIPLE" ]]; then
-    SWIFT_BUILD_ARGS+=(--triple "$SWIFT_TRIPLE")
-fi
 
 if [[ ! -f "$PLIST_SOURCE" ]]; then
     echo "missing packaging plist: $PLIST_SOURCE" >&2
@@ -42,6 +39,25 @@ for menubar_scale in "" "@2x" "@3x"; do
     fi
 done
 
+MACOS_MINIMUM_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST_SOURCE")"
+SWIFT_TRIPLE="${SWIFT_TRIPLE:-arm64-apple-macosx${MACOS_MINIMUM_VERSION}}"
+if [[ "$SWIFT_TRIPLE" != "arm64-apple-macosx${MACOS_MINIMUM_VERSION}" ]]; then
+    echo "打包失败：仅支持 arm64-apple-macosx${MACOS_MINIMUM_VERSION} 目标" >&2
+    exit 1
+fi
+MACOS_SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+MACOS_SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+# Swift 6.4 默认构建系统可能把 SDK 错记为部署版本，影响 AppKit / SwiftUI 的系统外观。
+# 显式传入实际 SDK 与最低系统版本，二者不能混用。
+SWIFT_BUILD_ARGS+=(
+    --triple "$SWIFT_TRIPLE"
+    --sdk "$MACOS_SDK_PATH"
+    -Xlinker -platform_version
+    -Xlinker macos
+    -Xlinker "$MACOS_MINIMUM_VERSION"
+    -Xlinker "$MACOS_SDK_VERSION"
+)
+
 echo "[package] building ByteTraceApp in release mode"
 swift build "${SWIFT_BUILD_ARGS[@]}"
 BIN_DIR="$(swift build --show-bin-path "${SWIFT_BUILD_ARGS[@]}")"
@@ -51,6 +67,21 @@ if [[ ! -x "$EXECUTABLE" ]]; then
     echo "missing release executable: $EXECUTABLE" >&2
     exit 1
 fi
+
+MACOS_BUILD_INFO="$(xcrun vtool -show-build "$EXECUTABLE")"
+BUILT_MINIMUM_MACOS_VERSION="$(awk '$1 == "minos" { print $2 }' <<< "$MACOS_BUILD_INFO")"
+BUILT_MACOS_SDK_VERSION="$(awk '$1 == "sdk" { print $2 }' <<< "$MACOS_BUILD_INFO")"
+if [[ "$BUILT_MINIMUM_MACOS_VERSION" != "$MACOS_MINIMUM_VERSION" ||
+      "$BUILT_MACOS_SDK_VERSION" != "$MACOS_SDK_VERSION" ]]; then
+    echo "打包失败：二进制的最低系统或 SDK 版本与构建配置不一致" >&2
+    printf '%s\n' "$MACOS_BUILD_INFO" >&2
+    exit 1
+fi
+if [[ "$(lipo -archs "$EXECUTABLE")" != "arm64" ]]; then
+    echo "打包失败：二进制必须仅包含 arm64 架构" >&2
+    exit 1
+fi
+echo "[package] minimum macOS=$BUILT_MINIMUM_MACOS_VERSION, SDK=$BUILT_MACOS_SDK_VERSION"
 
 mkdir -p "$DIST_DIR"
 if [[ -e "$APP_DIR" ]]; then

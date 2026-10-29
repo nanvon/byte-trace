@@ -38,37 +38,35 @@ jobs:
           fi
 
   package:
-    name: ${{ matrix.name }}
+    name: macOS Apple Silicon
     needs: prepare
-    runs-on: ${{ matrix.runner }}
+    runs-on: xcode-27
+    env:
+      # 使用本地验收的工具链，只生成 Apple Silicon 产物。
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      BYTE_TRACE_SWIFT_TRIPLE: arm64-apple-macosx26.0
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS Apple Silicon
-            runner: macos-15
-            triple: arm64-apple-macosx14.0
-            asset_suffix: macOS-Apple-Silicon
-          - name: macOS Intel
-            runner: macos-15-intel
-            triple: x86_64-apple-macosx14.0
-            asset_suffix: macOS-Intel
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify Xcode 27.1 and macOS 27.0 SDK
+        run: |
+          xcodebuild -version
+          swift --version
+          test "$(xcodebuild -version)" = $'Xcode 27.1\nBuild version 27A9275'
+          test "$(xcrun --sdk macosx --show-sdk-version)" = "27.0"
+
       - name: Build and sign ad-hoc app bundle
         env:
           BYTE_TRACE_SIGNING_IDENTITY: "-"
-          BYTE_TRACE_SWIFT_TRIPLE: ${{ matrix.triple }}
         run: ./Scripts/package_app.sh
 
       - name: Name release archives
         id: archive
         env:
-          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          ASSET_SUFFIX: macOS-Apple-Silicon
         run: |
           version="${GITHUB_REF_NAME#v}"
           zip_asset="dist/ByteTrace_${version}_${ASSET_SUFFIX}.zip"
@@ -87,7 +85,7 @@ jobs:
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: byte-trace-${{ matrix.asset_suffix }}
+          name: byte-trace-macOS-Apple-Silicon
           path: |
             ${{ steps.archive.outputs.zip_asset }}
             ${{ steps.archive.outputs.zip_checksum }}

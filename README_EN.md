@@ -64,15 +64,14 @@
 
 ## 📦 Installation
 
-> **System Requirements**: macOS 14 (Sonoma) or later; native support for Apple Silicon (M-series) and Intel architectures.<br>
+> **System Requirements**: macOS 26 or later; Apple Silicon (M-series) only.<br>
 > **Privilege Notice**: **Zero elevated privileges**. Requires no Network Extension, no kernel extensions (kext), and no root / sudo access.
 
-1. Download the release package for your hardware architecture from the [Releases page](https://github.com/nanvon/byte-trace/releases/latest):
+1. Download the Apple Silicon package from the [Releases page](https://github.com/nanvon/byte-trace/releases/latest):
 
    | Hardware Architecture | Recommended Package | Details |
    | :--- | :--- | :--- |
    | **Apple Silicon (M-series chips)** | `ByteTrace_<version>_macOS-Apple-Silicon.dmg` | Native arm64 architecture |
-   | **Intel Processor** | `ByteTrace_<version>_macOS-Intel.dmg` | Native x86_64 architecture |
 
    *(Note: Standalone `.zip` archives are also provided with identical contents for mounting-free extraction.)*
 
@@ -122,8 +121,8 @@ ByteTrace adheres to **Local-first and Zero Telemetry** principles. All analysis
 ## 🔧 Building from Source
 
 ### Prerequisites
-* macOS 14.0 or later
-* Xcode 16.0+ (with Swift 6.0 toolchain)
+* macOS 26.6 or later on Apple Silicon (M-series)
+* Xcode 27.1 (with the macOS 27.0 SDK, matching CI and release builds)
 * Swift Package Manager (zero third-party dependencies)
 
 ### Local Development & Debugging

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目定位
 
-ByteTrace 是常驻 macOS 菜单栏的应用级流量统计工具（Swift 6 / SPM / macOS 14+）。唯一数据源是系统只读命令 `/usr/bin/nettop`，数据写入本机 SQLite。不使用 Network Extension、不需要 root、不解析报文内容。
+ByteTrace 是常驻 macOS 菜单栏的应用级流量统计工具（Swift 6 / SPM / macOS 26+，仅支持 Apple Silicon）。唯一数据源是系统只读命令 `/usr/bin/nettop`，数据写入本机 SQLite。不使用 Network Extension、不需要 root、不解析报文内容。
 
 ## 常用命令
 
@@ -23,7 +23,7 @@ swift run ByteTraceApp                       # 开发模式运行菜单栏应用
 swift run ByteTraceProbe --duration 15 # 应用级采集
 ```
 
-`package_app.sh` 环境变量：`BYTE_TRACE_SIGNING_IDENTITY`（默认 `-`，ad-hoc）、`BYTE_TRACE_SWIFT_TRIPLE`（交叉构建目标）。
+`package_app.sh` 环境变量：`BYTE_TRACE_SIGNING_IDENTITY`（默认 `-`，ad-hoc）、`BYTE_TRACE_SWIFT_TRIPLE`（仅接受 `arm64` 目标，默认跟随 `Info.plist` 的最低系统版本）。
 
 ### Xcode 本地运行
 
@@ -124,8 +124,10 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 版本号真值在 `Packaging/Info.plist` 的 `CFBundleShortVersionString`。发布时 git tag 必须是 `v<版本号>`，由 `Scripts/check-release-version.py` 在 CI 与 release 流程中强制校验；README 的 release badge 自动跟随最新 Release，不用手改。
 
-- `ci.yml`：push main / PR 时在 Apple Silicon + Intel runner 上跑 `swift build`、`swift test`、plist 校验与 ad-hoc 打包校验。
-- `release.yml`：推 `v*` tag 触发，先校验版本和更新说明，再构建双架构产物、生成 DMG / ZIP / SHA-256 并建 Release。
+- CI 与发布固定使用 Xcode 27.1（27A9275）和 macOS 27.0 SDK，运行要求为 macOS 26+、Apple Silicon。
+- `ci.yml`：push main / PR 时在 `xcode-27` Apple Silicon runner 上跑 `swift build`、`swift test`、plist 校验与 ad-hoc 打包校验。
+- `release.yml`：推 `v*` tag 触发，先校验版本和更新说明，再构建 Apple Silicon 产物、生成 DMG / ZIP / SHA-256 并建 Release。
+- `package_app.sh` 显式传入链接 SDK 与最低系统版本，并在打包前校验 Mach-O 的 `sdk`、`minos` 和 `arm64` 架构，防止 SwiftPM 错写 SDK 标记造成界面外观差异。
 - 全程 ad-hoc 签名，不使用 Developer ID 证书、不公证。
 
 ### 更新说明

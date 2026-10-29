@@ -64,15 +64,14 @@
 
 ## 📦 快速安装
 
-> **运行环境**：macOS 14 (Sonoma) 或更高版本，原生支持 Apple Silicon (M 系列芯片) 与 Intel 架构。<br>
+> **运行环境**：macOS 26 或更高版本，仅支持 Apple Silicon (M 系列芯片)。<br>
 > **前置要求**：**零特权依赖**。无需安装 Network Extension、无需内核扩展 (kext)、无需 root / sudo 提权。
 
-1. 前往 [Releases 页面](https://github.com/nanvon/byte-trace/releases/latest) 下载对应架构的安装包：
+1. 前往 [Releases 页面](https://github.com/nanvon/byte-trace/releases/latest) 下载 Apple Silicon 安装包：
 
    | 硬件芯片架构 | 推荐下载安装包 | 说明 |
    | :--- | :--- | :--- |
    | **Apple Silicon (M 系列芯片)** | `ByteTrace_<版本>_macOS-Apple-Silicon.dmg` | 原生 arm64 架构 |
-   | **Intel 处理器** | `ByteTrace_<版本>_macOS-Intel.dmg` | 原生 x86_64 架构 |
 
    *(注：亦可下载免挂载的 `.zip` 压缩包，解压后内容完全一致。)*
 
@@ -122,8 +121,8 @@ ByteTrace 遵循**本地优先（Local-first）与零遥测（Zero Telemetry）*
 ## 🔧 从源码构建
 
 ### 环境要求
-* macOS 14.0 或更高版本
-* Xcode 16.0+（包含 Swift 6.0 工具链）
+* macOS 26.6 或更高版本，Apple Silicon (M 系列芯片)
+* Xcode 27.1（包含 macOS 27.0 SDK，与 CI 和发布工具链一致）
 * Swift Package Manager (SPM，零第三方依赖)
 
 ### 本地日常开发调试
