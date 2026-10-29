@@ -1,0 +1,128 @@
+{
+  "brief": "ByteTrace：macOS 菜单栏应用级网络流量统计工具；轻量、本地记录、持续观察。生成六张独立候选，不修改现有图标。",
+  "provider": "OpenAI 内置 image_gen 工具；运行时未暴露具体模型标识",
+  "constraint_delivery": "main-prompt constraints",
+  "source": "https://github.com/s1dashu/ip-as-logo-skill/blob/main/SKILL.md",
+  "variants": [
+    {
+      "label": "A1",
+      "direction": "小鲸鱼",
+      "rationale": "网络流量与持续传输",
+      "corner": "lower-left",
+      "colors": {
+        "body": "#3E8DDD",
+        "secondary": "#163B68",
+        "background": "#EBCDB6"
+      },
+      "subject": "whale with a huge rounded head-body and one short thick tail ending in two broad rounded lobes; show both lobes. Omit water, spouts and fin details. A continuous deep blue belly patch and the eyes use the same deep blue",
+      "description": "sky blue #3E8DDD for the main body and deep blue #163B68 for one broad belly patch and simple eyes",
+      "background": "muted light apricot #EBCDB6",
+      "filename": "A1-whale-lower-left.png",
+      "prompt": "Create a single square image, approximately 1536 by 1536 pixels, with ordinary square outer corners.\nOne extremely simple, lovable baby-like whale with a huge rounded head-body and one short thick tail ending in two broad rounded lobes; show both lobes. Omit water, spouts and fin details. A continuous deep blue belly patch and the eyes use the same deep blue.\nUse only sky blue #3E8DDD for the main body and deep blue #163B68 for one broad belly patch and simple eyes. These are the two character colors; reuse them for the face. The third and only other semantic color is the uniform solid muted light apricot #EBCDB6 background, visible throughout the open space.\nBuild the character from about four to seven large basic shapes, with one continuous chunky outer silhouette and at most two broad interior color masses. Use two simple widely spaced eyes, and no mouth unless essential. The silhouette must stay recognizable at 32 by 32 pixels.\nPlace the character upright, emerging from the lower-left corner and occupying about 85 to 95 percent of the square. Let the character occupy that corner, with natural cropping along the bottom or assigned side. Keep both members of any paired defining feature visible. Keep the composition off center.\nUse broad rounded forms, compact proportions, soft cheeks and blunt ends. Make the treatment exceptionally clean, graphic and gentle.\nAdd an extremely, extremely subtle, almost imperceptible sense of depth through a barely-there neo-skeuomorphic treatment.\nConstraints: one character only. No letters, numbers, watermark, border, frame, card, rounded-square presentation mask, scenery, props, decorative marks, outlines, thin lines, sharp points, elaborate anatomy, surface texture, photorealism, gloss, dramatic bevel, strong 3D rendering or external cast shadow. Keep the background a single uniform color without gradient, halo, vignette or lighting variation.",
+      "output_path": "/Users/nanvon/Code/byte-trace/designs/app-icon-candidates/2026-10-29/A1-whale-lower-left.png",
+      "original_path": "/Users/nanvon/.codex/generated_images/01a1870c-fd92-7a32-8059-35f5481ca35e/exec-4a0d95b7-77f5-467c-ac7a-a64c884a0e8b.png",
+      "dimensions": { "width": 1254, "height": 1254 },
+      "format": "PNG"
+    },
+    {
+      "label": "A2",
+      "direction": "小鲸鱼",
+      "rationale": "网络流量与持续传输",
+      "corner": "lower-right",
+      "colors": {
+        "body": "#356CC4",
+        "secondary": "#B6E2DC",
+        "background": "#EBCDB6"
+      },
+      "subject": "whale with a broad round head-body and one stubby tail ending in two soft rounded lobes; show both lobes. Omit water, spouts and fin details. Give it one continuous pale mint face-to-belly bib with two cobalt dot eyes inside that bib",
+      "description": "cobalt blue #356CC4 for the main body and eyes, and pale mint #B6E2DC for one continuous broad face-to-belly bib",
+      "background": "muted light apricot #EBCDB6",
+      "filename": "A2-whale-lower-right.png",
+      "prompt": "Create a single square image, approximately 1536 by 1536 pixels, with ordinary square outer corners.\nOne extremely simple, lovable baby-like whale with a broad round head-body and one stubby tail ending in two soft rounded lobes; show both lobes. Omit water, spouts and fin details. Give it one continuous pale mint face-to-belly bib with two cobalt dot eyes inside that bib.\nUse only cobalt blue #356CC4 for the main body and eyes, and pale mint #B6E2DC for one continuous broad face-to-belly bib. These are the two character colors; reuse them for the face. The third and only other semantic color is the uniform solid muted light apricot #EBCDB6 background, visible throughout the open space.\nBuild the character from about four to seven large basic shapes, with one continuous chunky outer silhouette and at most two broad interior color masses. Use two simple widely spaced eyes, and no mouth unless essential. The silhouette must stay recognizable at 32 by 32 pixels.\nPlace the character upright, emerging from the lower-right corner and occupying about 85 to 95 percent of the square. Let the character occupy that corner, with natural cropping along the bottom or assigned side. Keep both members of any paired defining feature visible. Keep the composition off center.\nUse broad rounded forms, compact proportions, soft cheeks and blunt ends. Make the treatment exceptionally clean, graphic and gentle.\nAdd an extremely, extremely subtle, almost imperceptible sense of depth through a barely-there neo-skeuomorphic treatment.\nConstraints: one character only. No letters, numbers, watermark, border, frame, card, rounded-square presentation mask, scenery, props, decorative marks, outlines, thin lines, sharp points, elaborate anatomy, surface texture, photorealism, gloss, dramatic bevel, strong 3D rendering or external cast shadow. Keep the background a single uniform color without gradient, halo, vignette or lighting variation.",
+      "output_path": "/Users/nanvon/Code/byte-trace/designs/app-icon-candidates/2026-10-29/A2-whale-lower-right.png",
+      "original_path": "/Users/nanvon/.codex/generated_images/01a1870c-fd92-7a32-8059-35f5481ca35e/exec-de0d3c1b-7931-45d5-a0df-32cb3d28a1a1.png",
+      "dimensions": { "width": 1254, "height": 1254 },
+      "format": "PNG"
+    },
+    {
+      "label": "B1",
+      "direction": "猫头鹰",
+      "rationale": "持续观察各应用用量",
+      "corner": "lower-left",
+      "colors": {
+        "body": "#36356E",
+        "secondary": "#D9CDEB",
+        "background": "#B9CFB0"
+      },
+      "subject": "owl with a compact rounded head-body, a very broad face disk formed by two joined rounded lobes, and two dark indigo dot eyes on that disk. Show both sides of the disk. Use a smooth rounded head without ear tufts; omit feathers, talons and beak detail",
+      "description": "deep indigo #36356E for the head-body and dot eyes, and pale lilac #D9CDEB for one continuous broad two-lobed face disk",
+      "background": "muted light sage green #B9CFB0",
+      "filename": "B1-owl-lower-left.png",
+      "prompt": "Create a single square image, approximately 1536 by 1536 pixels, with ordinary square outer corners.\nOne extremely simple, lovable baby-like owl with a compact rounded head-body, a very broad face disk formed by two joined rounded lobes, and two dark indigo dot eyes on that disk. Show both sides of the disk. Use a smooth rounded head without ear tufts; omit feathers, talons and beak detail.\nUse only deep indigo #36356E for the head-body and dot eyes, and pale lilac #D9CDEB for one continuous broad two-lobed face disk. These are the two character colors; reuse them for the face. The third and only other semantic color is the uniform solid muted light sage green #B9CFB0 background, visible throughout the open space.\nBuild the character from about four to seven large basic shapes, with one continuous chunky outer silhouette and at most two broad interior color masses. Use two simple widely spaced eyes, and no mouth unless essential. The silhouette must stay recognizable at 32 by 32 pixels.\nPlace the character upright, emerging from the lower-left corner and occupying about 85 to 95 percent of the square. Let the character occupy that corner, with natural cropping along the bottom or assigned side. Keep both members of any paired defining feature visible. Keep the composition off center.\nUse broad rounded forms, compact proportions, soft cheeks and blunt ends. Make the treatment exceptionally clean, graphic and gentle.\nAdd an extremely, extremely subtle, almost imperceptible sense of depth through a barely-there neo-skeuomorphic treatment.\nConstraints: one character only. No letters, numbers, watermark, border, frame, card, rounded-square presentation mask, scenery, props, decorative marks, outlines, thin lines, sharp points, elaborate anatomy, surface texture, photorealism, gloss, dramatic bevel, strong 3D rendering or external cast shadow. Keep the background a single uniform color without gradient, halo, vignette or lighting variation.",
+      "output_path": "/Users/nanvon/Code/byte-trace/designs/app-icon-candidates/2026-10-29/B1-owl-lower-left.png",
+      "original_path": "/Users/nanvon/.codex/generated_images/01a1870d-1be4-7333-bb6f-70481d9ffe03/exec-f8583ecf-545e-4e2b-954f-0b1fa7d5d130.png",
+      "dimensions": { "width": 1254, "height": 1254 },
+      "format": "PNG"
+    },
+    {
+      "label": "B2",
+      "direction": "猫头鹰",
+      "rationale": "持续观察各应用用量",
+      "corner": "lower-right",
+      "colors": {
+        "body": "#8188DB",
+        "secondary": "#30316C",
+        "background": "#B9CFB0"
+      },
+      "subject": "owl with an oversized round head flowing into a short rounded body, and one broad joined two-lobed face disk. Show both sides of the disk and two simple periwinkle eyes inside it. Keep the head smooth with no ear tufts; omit feathers, talons and beak detail",
+      "description": "periwinkle blue #8188DB for the head-body and simple eyes, and deep indigo #30316C for one continuous wide face disk",
+      "background": "muted light sage green #B9CFB0",
+      "filename": "B2-owl-lower-right.png",
+      "prompt": "Create a single square image, approximately 1536 by 1536 pixels, with ordinary square outer corners.\nOne extremely simple, lovable baby-like owl with an oversized round head flowing into a short rounded body, and one broad joined two-lobed face disk. Show both sides of the disk and two simple periwinkle eyes inside it. Keep the head smooth with no ear tufts; omit feathers, talons and beak detail.\nUse only periwinkle blue #8188DB for the head-body and simple eyes, and deep indigo #30316C for one continuous wide face disk. These are the two character colors; reuse them for the face. The third and only other semantic color is the uniform solid muted light sage green #B9CFB0 background, visible throughout the open space.\nBuild the character from about four to seven large basic shapes, with one continuous chunky outer silhouette and at most two broad interior color masses. Use two simple widely spaced eyes, and no mouth unless essential. The silhouette must stay recognizable at 32 by 32 pixels.\nPlace the character upright, emerging from the lower-right corner and occupying about 85 to 95 percent of the square. Let the character occupy that corner, with natural cropping along the bottom or assigned side. Keep both members of any paired defining feature visible. Keep the composition off center.\nUse broad rounded forms, compact proportions, soft cheeks and blunt ends. Make the treatment exceptionally clean, graphic and gentle.\nAdd an extremely, extremely subtle, almost imperceptible sense of depth through a barely-there neo-skeuomorphic treatment.\nConstraints: one character only. No letters, numbers, watermark, border, frame, card, rounded-square presentation mask, scenery, props, decorative marks, outlines, thin lines, sharp points, elaborate anatomy, surface texture, photorealism, gloss, dramatic bevel, strong 3D rendering or external cast shadow. Keep the background a single uniform color without gradient, halo, vignette or lighting variation.",
+      "output_path": "/Users/nanvon/Code/byte-trace/designs/app-icon-candidates/2026-10-29/B2-owl-lower-right.png",
+      "original_path": "/Users/nanvon/.codex/generated_images/01a1870d-1be4-7333-bb6f-70481d9ffe03/exec-a8f04476-693b-48b8-8146-3dd10c0c83b2.png",
+      "dimensions": { "width": 1254, "height": 1254 },
+      "format": "PNG"
+    },
+    {
+      "label": "C1",
+      "direction": "小机器人",
+      "rationale": "字节计量与应用归属",
+      "corner": "lower-left",
+      "colors": {
+        "body": "#EF8A38",
+        "secondary": "#753831",
+        "background": "#BAD4E3"
+      },
+      "subject": "robot with one oversized heavily rounded square head merging into compact broad shoulders, and a single broad horizontal visor. Put two simple orange eyes inside the visor. Its only defining feature is the wide visor; omit antennas, ears, buttons, joints, screws, hands and machinery details",
+      "description": "tangerine orange #EF8A38 for the head-body and eyes, and dark warm rust #753831 for a single broad visor",
+      "background": "muted light blue #BAD4E3",
+      "filename": "C1-robot-lower-left.png",
+      "prompt": "Create a single square image, approximately 1536 by 1536 pixels, with ordinary square outer corners.\nOne extremely simple, lovable baby-like robot with one oversized heavily rounded square head merging into compact broad shoulders, and a single broad horizontal visor. Put two simple orange eyes inside the visor. Its only defining feature is the wide visor; omit antennas, ears, buttons, joints, screws, hands and machinery details.\nUse only tangerine orange #EF8A38 for the head-body and eyes, and dark warm rust #753831 for a single broad visor. These are the two character colors; reuse them for the face. The third and only other semantic color is the uniform solid muted light blue #BAD4E3 background, visible throughout the open space.\nBuild the character from about four to seven large basic shapes, with one continuous chunky outer silhouette and at most two broad interior color masses. Use two simple widely spaced eyes, and no mouth unless essential. The silhouette must stay recognizable at 32 by 32 pixels.\nPlace the character upright, emerging from the lower-left corner and occupying about 85 to 95 percent of the square. Let the character occupy that corner, with natural cropping along the bottom or assigned side. Keep both members of any paired defining feature visible. Keep the composition off center.\nUse broad rounded forms, compact proportions, soft cheeks and blunt ends. Make the treatment exceptionally clean, graphic and gentle.\nAdd an extremely, extremely subtle, almost imperceptible sense of depth through a barely-there neo-skeuomorphic treatment.\nConstraints: one character only. No letters, numbers, watermark, border, frame, card, rounded-square presentation mask, scenery, props, decorative marks, outlines, thin lines, sharp points, elaborate anatomy, surface texture, photorealism, gloss, dramatic bevel, strong 3D rendering or external cast shadow. Keep the background a single uniform color without gradient, halo, vignette or lighting variation.",
+      "output_path": "/Users/nanvon/Code/byte-trace/designs/app-icon-candidates/2026-10-29/C1-robot-lower-left.png",
+      "original_path": "/Users/nanvon/.codex/generated_images/01a1870d-3630-73f3-bca9-0d5e20fcb830/exec-eae833f2-86e1-432b-b0aa-2b633e436b71.png",
+      "dimensions": { "width": 1254, "height": 1254 },
+      "format": "PNG"
+    },
+    {
+      "label": "C2",
+      "direction": "小机器人",
+      "rationale": "字节计量与应用归属",
+      "corner": "lower-right",
+      "colors": {
+        "body": "#E87E38",
+        "secondary": "#FFF0D2",
+        "background": "#BAD4E3"
+      },
+      "subject": "robot with an extra broad rounded square head, tiny chunky shoulders and a single large horizontal pill-shaped visor. Put two simple orange dot eyes within the visor. Its only defining feature is the wide visor; omit antennas, ears, buttons, joints, screws, hands and machinery details",
+      "description": "warm orange #E87E38 for the head-body and dot eyes, and soft ivory #FFF0D2 for one broad visor",
+      "background": "muted light blue #BAD4E3",
+      "filename": "C2-robot-lower-right.png",
+      "prompt": "Create a single square image, approximately 1536 by 1536 pixels, with ordinary square outer corners.\nOne extremely simple, lovable baby-like robot with an extra broad rounded square head, tiny chunky shoulders and a single large horizontal pill-shaped visor. Put two simple orange dot eyes within the visor. Its only defining feature is the wide visor; omit antennas, ears, buttons, joints, screws, hands and machinery details.\nUse only warm orange #E87E38 for the head-body and dot eyes, and soft ivory #FFF0D2 for one broad visor. These are the two character colors; reuse them for the face. The third and only other semantic color is the uniform solid muted light blue #BAD4E3 background, visible throughout the open space.\nBuild the character from about four to seven large basic shapes, with one continuous chunky outer silhouette and at most two broad interior color masses. Use two simple widely spaced eyes, and no mouth unless essential. The silhouette must stay recognizable at 32 by 32 pixels.\nPlace the character upright, emerging from the lower-right corner and occupying about 85 to 95 percent of the square. Let the character occupy that corner, with natural cropping along the bottom or assigned side. Keep both members of any paired defining feature visible. Keep the composition off center.\nUse broad rounded forms, compact proportions, soft cheeks and blunt ends. Make the treatment exceptionally clean, graphic and gentle.\nAdd an extremely, extremely subtle, almost imperceptible sense of depth through a barely-there neo-skeuomorphic treatment.\nConstraints: one character only. No letters, numbers, watermark, border, frame, card, rounded-square presentation mask, scenery, props, decorative marks, outlines, thin lines, sharp points, elaborate anatomy, surface texture, photorealism, gloss, dramatic bevel, strong 3D rendering or external cast shadow. Keep the background a single uniform color without gradient, halo, vignette or lighting variation.",
+      "output_path": "/Users/nanvon/Code/byte-trace/designs/app-icon-candidates/2026-10-29/C2-robot-lower-right.png",
+      "original_path": "/Users/nanvon/.codex/generated_images/01a1870d-3630-73f3-bca9-0d5e20fcb830/exec-c95a3743-6196-4c67-9e77-2d373e7c75ef.png",
+      "dimensions": { "width": 1254, "height": 1254 },
+      "format": "PNG"
+    }
+  ]
+}
