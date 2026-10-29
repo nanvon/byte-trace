@@ -319,6 +319,123 @@ final class UsageAggregatorTests: XCTestCase {
         )
     }
 
+    func testBucketTimelineByAppMergesMinutesIntoSlotsPerApp() throws {
+        let calendar = utcCalendar()
+        let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let aggregator = UsageAggregator(store: store, calendar: calendar)
+        let firstSlot = calendar.date(
+            from: DateComponents(year: 2026, month: 8, day: 1, hour: 10)
+        )!
+        let secondSlot = firstSlot.addingTimeInterval(600)
+        let end = secondSlot.addingTimeInterval(600)
+
+        try aggregator.ingest(makeDelta(at: firstSlot, download: 100, upload: 10))
+        try aggregator.ingest(makeDelta(at: firstSlot.addingTimeInterval(60), download: 20, upload: 2))
+        // 10:09 仍属于 10:00 时间段，10:10 进入下一段。
+        try aggregator.ingest(makeDelta(at: firstSlot.addingTimeInterval(540), download: 5, upload: 1))
+        try aggregator.ingest(makeDelta(at: secondSlot, download: 9, upload: 0))
+        try aggregator.ingest(
+            makeDelta(
+                at: firstSlot.addingTimeInterval(300),
+                appKey: "bundle:com.example.second",
+                displayName: "Second",
+                download: 7,
+                upload: 4
+            )
+        )
+        try aggregator.ingest(
+            makeDelta(
+                at: firstSlot,
+                appKey: "proxy:test",
+                displayName: "Proxy",
+                category: .proxyTransport,
+                download: 1_000,
+                upload: 2_000
+            )
+        )
+        try aggregator.flush()
+
+        XCTAssertEqual(
+            try store.bucketTimelineByApp(from: firstSlot, to: end, slotSeconds: 600),
+            [
+                UsageAppTimelineRecord(
+                    slotStart: firstSlot,
+                    appKey: "bundle:com.example.app",
+                    downloadBytes: 125,
+                    uploadBytes: 13
+                ),
+                UsageAppTimelineRecord(
+                    slotStart: firstSlot,
+                    appKey: "bundle:com.example.second",
+                    downloadBytes: 7,
+                    uploadBytes: 4
+                ),
+                UsageAppTimelineRecord(
+                    slotStart: secondSlot,
+                    appKey: "bundle:com.example.app",
+                    downloadBytes: 9,
+                    uploadBytes: 0
+                )
+            ]
+        )
+
+        let withProxy = try store.bucketTimelineByApp(
+            from: firstSlot,
+            to: end,
+            slotSeconds: 600,
+            excludingProxyTransport: false
+        )
+        XCTAssertEqual(withProxy.first?.appKey, "proxy:test")
+        XCTAssertEqual(withProxy.count, 4)
+
+        // 查询区间按分钟桶起点截断：只取第二段时不应混入第一段的数据。
+        XCTAssertEqual(
+            try store.bucketTimelineByApp(from: secondSlot, to: end, slotSeconds: 600),
+            [
+                UsageAppTimelineRecord(
+                    slotStart: secondSlot,
+                    appKey: "bundle:com.example.app",
+                    downloadBytes: 9,
+                    uploadBytes: 0
+                )
+            ]
+        )
+    }
+
+    func testBucketTimelineByAppSaturatesOnOverflow() throws {
+        let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))
+        let slotStart = Date(timeIntervalSince1970: 1_786_000_200)
+        let end = slotStart.addingTimeInterval(600)
+
+        try store.apply(
+            [],
+            bucketAggregates: [
+                makeBucketAggregate(
+                    at: slotStart,
+                    appKey: "bundle:com.example.first",
+                    download: Int64.max
+                ),
+                makeBucketAggregate(
+                    at: slotStart.addingTimeInterval(60),
+                    appKey: "bundle:com.example.first",
+                    download: 1
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            try store.bucketTimelineByApp(from: slotStart, to: end, slotSeconds: 600),
+            [
+                UsageAppTimelineRecord(
+                    slotStart: slotStart,
+                    appKey: "bundle:com.example.first",
+                    downloadBytes: Int64.max,
+                    uploadBytes: 0
+                )
+            ]
+        )
+    }
+
     func testSamplesAcrossMidnightUseDifferentLocalDays() throws {
         let calendar = utcCalendar()
         let store = try UsageStore(databaseURL: URL(fileURLWithPath: ":memory:"))

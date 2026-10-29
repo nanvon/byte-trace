@@ -27,6 +27,9 @@ struct UsageTotals: Equatable {
 
 enum MainWindowPage: String, Hashable, Identifiable {
     case overview
+    case applications
+    case proxy
+    case system
     case settings
 
     var id: Self { self }
@@ -34,13 +37,15 @@ enum MainWindowPage: String, Hashable, Identifiable {
     var title: String {
         switch self {
         case .overview: return "概览"
+        case .applications: return "应用"
+        case .proxy: return "代理传输"
+        case .system: return "系统进程"
         case .settings: return "设置"
         }
     }
 }
 
 enum UsageTimeRange: String, CaseIterable, Identifiable {
-    case last10Minutes
     case lastHour
     case today
     case thisWeek
@@ -50,7 +55,6 @@ enum UsageTimeRange: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .last10Minutes: return "最近 10 分钟"
         case .lastHour: return "最近 1 小时"
         case .today: return "今天"
         case .thisWeek: return "本周"
@@ -60,22 +64,20 @@ enum UsageTimeRange: String, CaseIterable, Identifiable {
 
     var usesBucketSummary: Bool {
         switch self {
-        case .last10Minutes, .lastHour: return true
+        case .lastHour: return true
         case .today, .thisWeek, .thisMonth: return false
         }
     }
 
     var usesFineGrainedTimeline: Bool {
         switch self {
-        case .last10Minutes, .lastHour, .today: return true
+        case .lastHour, .today: return true
         case .thisWeek, .thisMonth: return false
         }
     }
 
     func startDate(relativeTo now: Date, calendar: Calendar) -> Date {
         switch self {
-        case .last10Minutes:
-            return now.addingTimeInterval(-10 * 60)
         case .lastHour:
             return now.addingTimeInterval(-60 * 60)
         case .today:
@@ -86,6 +88,37 @@ enum UsageTimeRange: String, CaseIterable, Identifiable {
         case .thisMonth:
             return calendar.dateInterval(of: .month, for: now)?.start
                 ?? calendar.startOfDay(for: now)
+        }
+    }
+
+    /// 主窗口趋势图横轴的终点：今天、本周、本月画满整个周期，未来时段留空。
+    func chartEndDate(relativeTo now: Date, calendar: Calendar) -> Date {
+        switch self {
+        case .lastHour:
+            return now
+        case .today:
+            return calendar.dateInterval(of: .day, for: now)?.end ?? now
+        case .thisWeek:
+            return calendar.dateInterval(of: .weekOfYear, for: now)?.end ?? now
+        case .thisMonth:
+            return calendar.dateInterval(of: .month, for: now)?.end ?? now
+        }
+    }
+
+    /// 主窗口趋势图每根柱子的时长。
+    var chartUnit: Calendar.Component {
+        switch self {
+        case .lastHour: return .minute
+        case .today: return .hour
+        case .thisWeek, .thisMonth: return .day
+        }
+    }
+
+    var chartUnitTitle: String {
+        switch self {
+        case .lastHour: return "每分钟"
+        case .today: return "每小时"
+        case .thisWeek, .thisMonth: return "每天"
         }
     }
 }
@@ -132,6 +165,23 @@ struct UsageTimelinePoint: Identifiable, Equatable {
     }
 }
 
+/// 主窗口趋势图的一根柱子；`topApp*` 是该时段流量最大的应用，用于悬停浮层。
+struct UsageChartBar: Identifiable, Equatable {
+    let start: Date
+    let end: Date
+    let downloadBytes: Int64
+    let uploadBytes: Int64
+    let topAppName: String?
+    let topAppBytes: Int64
+
+    var id: Date { start }
+
+    var totalBytes: Int64 {
+        let result = downloadBytes.addingReportingOverflow(uploadBytes)
+        return result.overflow ? Int64.max : result.partialValue
+    }
+}
+
 enum UsageObservationSurface: Hashable {
     case menuBar
     case mainOverview
@@ -155,8 +205,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             }
         }
     }
+    /// 菜单栏面板的最近 1 小时分钟趋势（不含代理传输）。
+    @Published private(set) var menuBarHourTimeline: [UsageTimelinePoint] = []
     @Published private(set) var rangeRecords: [DailyUsageRecord] = []
-    @Published private(set) var rangeTimeline: [UsageTimelinePoint] = []
+    @Published private(set) var rangeBars: [UsageChartBar] = []
     @Published private(set) var detailTimeline: [UsageTimelinePoint] = []
     @Published private(set) var bucketStats: UsageBucketStats?
     private var dailyRangeRecords: [DailyUsageRecord] = []
@@ -296,8 +348,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         totals(from: records.filter { $0.category != .proxyTransport })
     }
 
+    var proxyTotals: UsageTotals {
+        totals(from: proxyRecords)
+    }
+
     var selectedRangeTotals: UsageTotals {
         totals(from: rangeRecords.filter { $0.category != .proxyTransport })
+    }
+
+    var selectedRangeProxyTotals: UsageTotals {
+        totals(from: rangeRecords.filter { $0.category == .proxyTransport })
     }
 
     var dayKey: String {
@@ -426,8 +486,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     func refresh() {
         guard let store else {
             records = []
+            menuBarHourTimeline = []
             rangeRecords = []
-            rangeTimeline = []
+            rangeBars = []
             detailTimeline = []
             bucketStats = nil
             return
@@ -435,6 +496,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
         do {
             let today = try loadToday(from: store)
+            try loadMenuBarHourTimeline(from: store)
             try loadRange(
                 from: store,
                 cachedToday: selectedRange == .today ? today : nil
@@ -451,10 +513,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     func refreshToday() {
         guard let store else {
             records = []
+            menuBarHourTimeline = []
             return
         }
         do {
             _ = try loadToday(from: store)
+            try loadMenuBarHourTimeline(from: store)
             lastTodayRefreshDate = Date()
         } catch {
             lastError = "读取今日统计失败：\(error.localizedDescription)"
@@ -465,7 +529,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     func refreshOverview() {
         guard let store else {
             rangeRecords = []
-            rangeTimeline = []
+            rangeBars = []
             detailTimeline = []
             return
         }
@@ -510,8 +574,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             try store.clearAll()
             aggregator.discardPending()
             records = []
+            menuBarHourTimeline = []
             rangeRecords = []
-            rangeTimeline = []
+            rangeBars = []
             bucketStats = UsageBucketStats(
                 bucketCount: 0,
                 earliestBucket: nil,
@@ -1097,6 +1162,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 today = try loadToday(from: store)
                 lastTodayRefreshDate = now
             }
+            if todayDue {
+                try loadMenuBarHourTimeline(from: store)
+            }
             if rangeDue {
                 try loadRange(
                     from: store,
@@ -1170,6 +1238,36 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         return newRecords
     }
 
+    /// 菜单栏面板的 60 分钟小图只需要分钟总量，一次分钟桶查询即可。
+    private func loadMenuBarHourTimeline(from store: UsageStore) throws {
+        let end = Date()
+        let start = UsageTimeRange.lastHour.startDate(
+            relativeTo: end,
+            calendar: Calendar.autoupdatingCurrent
+        )
+        let newTimeline = makeTimeline(from: try store.bucketTimeline(from: start, to: end))
+        if newTimeline != menuBarHourTimeline { menuBarHourTimeline = newTimeline }
+    }
+
+    private static func dailyRecords(
+        from summaries: [UsageBucketSummaryRecord]
+    ) -> [DailyUsageRecord] {
+        summaries.map {
+            DailyUsageRecord(
+                day: dayKey(for: $0.firstBucketStart),
+                appKey: $0.appKey,
+                displayName: $0.displayName,
+                category: $0.category,
+                bundleID: $0.bundleID,
+                bundlePath: $0.bundlePath,
+                executablePath: $0.executablePath,
+                downloadBytes: $0.downloadBytes,
+                uploadBytes: $0.uploadBytes,
+                sampleCount: $0.sampleCount
+            )
+        }
+    }
+
     private func loadRange(
         from store: UsageStore,
         cachedToday: [DailyUsageRecord]? = nil
@@ -1181,27 +1279,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         if selectedRange.usesBucketSummary {
             let summaries = try store.bucketUsageSummary(from: start, to: end)
             dailyRangeRecords = []
-            setRangeRecords(
-                summaries.map {
-                    DailyUsageRecord(
-                        day: Self.dayKey(for: $0.firstBucketStart),
-                        appKey: $0.appKey,
-                        displayName: $0.displayName,
-                        category: $0.category,
-                        bundleID: $0.bundleID,
-                        bundlePath: $0.bundlePath,
-                        executablePath: $0.executablePath,
-                        downloadBytes: $0.downloadBytes,
-                        uploadBytes: $0.uploadBytes,
-                        sampleCount: $0.sampleCount
-                    )
-                }
-            )
-            setRangeTimeline(
-                makeTimeline(
-                    from: try store.bucketTimeline(from: start, to: end)
-                )
-            )
+            setRangeRecords(Self.dailyRecords(from: summaries))
+            try loadBucketRangeBars(from: store, start: start, end: end, calendar: calendar)
             try loadActiveDetailTimeline(from: store, start: start, end: end)
             return
         }
@@ -1218,15 +1297,106 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         dailyRangeRecords = daily
         setRangeRecords(aggregateRecords(daily))
         if selectedRange == .today {
-            setRangeTimeline(
-                makeTimeline(
-                    from: try store.bucketTimeline(from: start, to: end)
+            try loadBucketRangeBars(from: store, start: start, end: end, calendar: calendar)
+        } else {
+            let usage = daily.filter { $0.category != .proxyTransport }
+            setRangeBars(
+                makeBars(
+                    totals: usage.compactMap { record in
+                        Self.date(from: record.day).map {
+                            ($0, record.downloadBytes, record.uploadBytes)
+                        }
+                    },
+                    appBytes: usage.compactMap { record in
+                        Self.date(from: record.day).map {
+                            ($0, record.appKey, totalBytes(for: record))
+                        }
+                    },
+                    calendar: calendar
                 )
             )
-        } else {
-            setRangeTimeline(makeTimeline(from: daily.filter { $0.category != .proxyTransport }))
         }
         try loadActiveDetailTimeline(from: store, start: start, end: end)
+    }
+
+    /// 「最近 1 小时」与「今天」的柱子来自分钟桶。头部应用按 15 分钟槽查询再并入
+    /// 本地小时：槽按 Unix 纪元对齐，15 分钟是所有时区偏移的公约数，并入后不会跨小时；
+    /// 直接按分钟逐应用读取一整天会返回数万行。
+    private func loadBucketRangeBars(
+        from store: UsageStore,
+        start: Date,
+        end: Date,
+        calendar: Calendar
+    ) throws {
+        let slotSeconds: Int64 = selectedRange == .lastHour ? 60 : 15 * 60
+        let timeline = try store.bucketTimeline(from: start, to: end)
+        let appSlots = try store.bucketTimelineByApp(
+            from: start,
+            to: end,
+            slotSeconds: slotSeconds
+        )
+        setRangeBars(
+            makeBars(
+                totals: timeline.map { ($0.bucketStart, $0.downloadBytes, $0.uploadBytes) },
+                appBytes: appSlots.map {
+                    ($0.slotStart, $0.appKey, saturatingAdd($0.downloadBytes, $0.uploadBytes))
+                },
+                calendar: calendar
+            )
+        )
+    }
+
+    /// 按 `selectedRange.chartUnit` 把总量与逐应用流量并入柱子；只产出有数据的时段。
+    private func makeBars(
+        totals: [(start: Date, download: Int64, upload: Int64)],
+        appBytes: [(start: Date, appKey: String, bytes: Int64)],
+        calendar: Calendar
+    ) -> [UsageChartBar] {
+        let unit = selectedRange.chartUnit
+        func slot(for date: Date) -> DateInterval {
+            calendar.dateInterval(of: unit, for: date) ?? DateInterval(start: date, duration: 60)
+        }
+
+        var slots: [Date: DateInterval] = [:]
+        var slotTotals: [Date: UsageTotals] = [:]
+        for item in totals {
+            let interval = slot(for: item.start)
+            slots[interval.start] = interval
+            let existing = slotTotals[interval.start] ?? UsageTotals(downloadBytes: 0, uploadBytes: 0)
+            slotTotals[interval.start] = UsageTotals(
+                downloadBytes: saturatingAdd(existing.downloadBytes, item.download),
+                uploadBytes: saturatingAdd(existing.uploadBytes, item.upload)
+            )
+        }
+
+        var slotApps: [Date: [String: Int64]] = [:]
+        for item in appBytes {
+            let start = slot(for: item.start).start
+            slotApps[start, default: [:]][item.appKey, default: 0] = saturatingAdd(
+                slotApps[start]?[item.appKey] ?? 0,
+                item.bytes
+            )
+        }
+
+        var names: [String: String] = [:]
+        for record in rangeRecords {
+            names[record.appKey] = record.displayName
+        }
+
+        return slotTotals.keys.sorted().compactMap { start in
+            guard let interval = slots[start], let value = slotTotals[start] else { return nil }
+            let top = slotApps[start]?.max {
+                $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key
+            }
+            return UsageChartBar(
+                start: interval.start,
+                end: interval.end,
+                downloadBytes: value.downloadBytes,
+                uploadBytes: value.uploadBytes,
+                topAppName: top.flatMap { names[$0.key] },
+                topAppBytes: top?.value ?? 0
+            )
+        }
     }
 
     private func refreshDetailTimeline(for appKey: String) {
@@ -1294,9 +1464,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         rangeRecords = newValue
     }
 
-    private func setRangeTimeline(_ newValue: [UsageTimelinePoint]) {
-        guard newValue != rangeTimeline else { return }
-        rangeTimeline = newValue
+    private func setRangeBars(_ newValue: [UsageChartBar]) {
+        guard newValue != rangeBars else { return }
+        rangeBars = newValue
     }
 
     private func aggregateRecords(_ records: [DailyUsageRecord]) -> [DailyUsageRecord] {

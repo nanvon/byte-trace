@@ -438,6 +438,138 @@ public final class UsageStore: @unchecked Sendable {
         return records
     }
 
+    /// Per-app traffic merged into fixed slots of `slotSeconds`, aligned to the
+    /// Unix epoch. Rows are ordered by slot, then by total bytes descending.
+    /// Reading minute rows directly would return tens of thousands of rows for a
+    /// full day; grouping in SQL keeps a 10-minute daily chart in the low thousands.
+    public func bucketTimelineByApp(
+        from start: Date,
+        to end: Date,
+        slotSeconds: Int64,
+        excludingProxyTransport: Bool = true
+    ) throws -> [UsageAppTimelineRecord] {
+        precondition(slotSeconds > 0, "slotSeconds must be positive")
+        lock.lock()
+        defer { lock.unlock() }
+        do {
+            return try queryBucketTimelineByApp(
+                from: start,
+                to: end,
+                slotSeconds: slotSeconds,
+                excludingProxyTransport: excludingProxyTransport
+            )
+        } catch where Self.isSQLiteIntegerOverflow(error) {
+            return try saturatedBucketTimelineByApp(
+                from: start,
+                to: end,
+                slotSeconds: slotSeconds,
+                excludingProxyTransport: excludingProxyTransport
+            )
+        }
+    }
+
+    private func queryBucketTimelineByApp(
+        from start: Date,
+        to end: Date,
+        slotSeconds: Int64,
+        excludingProxyTransport: Bool
+    ) throws -> [UsageAppTimelineRecord] {
+        var conditions = [
+            "b.accounting_version = ?",
+            "b.bucket_start >= ?",
+            "b.bucket_start < ?"
+        ]
+        if excludingProxyTransport {
+            conditions.append("a.category != ?")
+        }
+
+        let statement = try database.prepare(
+            """
+            SELECT (b.bucket_start / ?) * ? AS slot_start, b.app_key,
+                   SUM(b.download_bytes), SUM(b.upload_bytes)
+            FROM usage_buckets AS b
+            JOIN apps AS a ON a.app_key = b.app_key
+            WHERE \(conditions.joined(separator: " AND "))
+            GROUP BY slot_start, b.app_key
+            ORDER BY slot_start ASC,
+                     (SUM(b.download_bytes) + SUM(b.upload_bytes)) DESC,
+                     b.app_key ASC;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(slotSeconds, at: 1, in: statement)
+        try database.bind(slotSeconds, at: 2, in: statement)
+        try database.bind(Self.accountingVersion, at: 3, in: statement)
+        try database.bind(Self.epochSeconds(start), at: 4, in: statement)
+        try database.bind(Self.epochSeconds(end), at: 5, in: statement)
+        if excludingProxyTransport {
+            try database.bind(AppCategory.proxyTransport.rawValue, at: 6, in: statement)
+        }
+
+        var records: [UsageAppTimelineRecord] = []
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            records.append(
+                UsageAppTimelineRecord(
+                    slotStart: Date(
+                        timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 0))
+                    ),
+                    appKey: database.columnString(statement, at: 1) ?? "",
+                    downloadBytes: sqlite3_column_int64(statement, 2),
+                    uploadBytes: sqlite3_column_int64(statement, 3)
+                )
+            )
+        }
+        return records
+    }
+
+    private func saturatedBucketTimelineByApp(
+        from start: Date,
+        to end: Date,
+        slotSeconds: Int64,
+        excludingProxyTransport: Bool
+    ) throws -> [UsageAppTimelineRecord] {
+        struct SlotKey: Hashable {
+            let slotStart: Int64
+            let appKey: String
+        }
+        var totals: [SlotKey: (download: Int64, upload: Int64)] = [:]
+        for record in try bucketUsage(from: start, to: end) {
+            if excludingProxyTransport, record.category == .proxyTransport { continue }
+            let seconds = Self.epochSeconds(record.bucketStart)
+            let key = SlotKey(
+                slotStart: (seconds / slotSeconds) * slotSeconds,
+                appKey: record.appKey
+            )
+            let existing = totals[key] ?? (0, 0)
+            totals[key] = (
+                Self.saturatingAdd(existing.download, record.downloadBytes),
+                Self.saturatingAdd(existing.upload, record.uploadBytes)
+            )
+        }
+        return totals
+            .map { key, value in
+                UsageAppTimelineRecord(
+                    slotStart: Date(timeIntervalSince1970: TimeInterval(key.slotStart)),
+                    appKey: key.appKey,
+                    downloadBytes: value.download,
+                    uploadBytes: value.upload
+                )
+            }
+            .sorted {
+                if $0.slotStart != $1.slotStart { return $0.slotStart < $1.slotStart }
+                let left = Self.saturatingAdd($0.downloadBytes, $0.uploadBytes)
+                let right = Self.saturatingAdd($1.downloadBytes, $1.uploadBytes)
+                if left != right { return left > right }
+                return $0.appKey < $1.appKey
+            }
+    }
+
     private func saturatedBucketUsageSummary(
         from start: Date,
         to end: Date

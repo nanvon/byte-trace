@@ -6,32 +6,56 @@ import SwiftUI
 struct MainWindowView: View {
     @ObservedObject var model: ByteTraceViewModel
     @State private var selection: MainWindowPage = .overview
+    /// 窗口打开时把键盘焦点交给侧边栏，否则 AppKit 会落到工具栏的折叠按钮上并画出蓝色焦点底。
+    @FocusState private var isSidebarFocused: Bool
     @Environment(\.openWindow) private var openWindow
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
-                Label("概览", systemImage: "chart.bar.xaxis")
-                    .tag(MainWindowPage.overview)
-                Label("设置", systemImage: "gearshape")
-                    .tag(MainWindowPage.settings)
+                Section("统计") {
+                    Label("概览", systemImage: "rectangle.3.group")
+                        .tag(MainWindowPage.overview)
+                    Label("应用", systemImage: "square.grid.2x2")
+                        .badge(count(of: .applications))
+                        .tag(MainWindowPage.applications)
+                    Label("代理传输", systemImage: "arrow.triangle.2.circlepath")
+                        .badge(count(of: .proxy))
+                        .tag(MainWindowPage.proxy)
+                    if model.showsSystemProcesses {
+                        Label("系统进程", systemImage: "desktopcomputer")
+                            .badge(count(of: .system))
+                            .tag(MainWindowPage.system)
+                    }
+                }
+                Section {
+                    Label("设置", systemImage: "gearshape")
+                        .tag(MainWindowPage.settings)
+                }
             }
             .listStyle(.sidebar)
+            .focused($isSidebarFocused)
+            .defaultFocus($isSidebarFocused, true)
+            .safeAreaInset(edge: .bottom) { statusBox }
+            .navigationSplitViewColumnWidth(min: 190, ideal: 212)
             .navigationTitle("ByteTrace")
         } detail: {
             switch selection {
-            case .overview:
-                MainOverviewView(model: model)
             case .settings:
                 SettingsView(model: model)
+            default:
+                MainUsagePage(model: model, page: selection) {
+                    selection = .applications
+                }
+                .id(selection)
             }
         }
-        .frame(minWidth: 900, idealWidth: 1080, minHeight: 620, idealHeight: 720)
+        .frame(minWidth: 900, idealWidth: 1100, minHeight: 620, idealHeight: 780)
         .onAppear {
             selection = model.requestedMainWindowPage
             ByteTraceAppDelegate.installOpenMainWindowAction { openWindow(id: "main") }
             ByteTraceAppDelegate.prepareMainWindow()
             NSApplication.shared.activate(ignoringOtherApps: true)
-            if selection == .overview {
+            if selection.showsUsage {
                 model.beginObservingUsage(.mainOverview)
             }
         }
@@ -39,10 +63,10 @@ struct MainWindowView: View {
             model.endObservingUsage(.mainOverview)
         }
         .onChange(of: selection) { oldPage, newPage in
-            if oldPage == .overview {
+            if oldPage.showsUsage, !newPage.showsUsage {
                 model.endObservingUsage(.mainOverview)
             }
-            if newPage == .overview {
+            if newPage.showsUsage {
                 model.beginObservingUsage(.mainOverview)
             }
         }
@@ -51,78 +75,105 @@ struct MainWindowView: View {
         }
         .background(MainWindowRegistration())
     }
+
+    private func count(of page: MainWindowPage) -> Int {
+        model.rangeRecords.filter(page.includes).count
+    }
+
+    private var statusBox: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(model.status.tint)
+                    .frame(width: 7, height: 7)
+                Text(model.status.title)
+                    .font(.subheadline.weight(.medium))
+            }
+            Text(model.lastError ?? model.status.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .padding(10)
+    }
 }
 
-private struct MainOverviewView: View {
+private extension MainWindowPage {
+    var showsUsage: Bool {
+        self != .settings
+    }
+
+    /// 各统计页展示的记录分类；概览页的表格只列应用。
+    func includes(_ record: DailyUsageRecord) -> Bool {
+        switch self {
+        case .overview, .applications:
+            return record.category == .userApp || record.category == .unclassified
+        case .proxy:
+            return record.category == .proxyTransport
+        case .system:
+            return record.category == .systemProcess
+        case .settings:
+            return false
+        }
+    }
+}
+
+private struct MainUsagePage: View {
     @ObservedObject var model: ByteTraceViewModel
+    let page: MainWindowPage
+    let onShowAllApplications: () -> Void
+
     @State private var searchText = ""
-    @State private var isProxyExpanded = true
-    @State private var isSystemExpanded = true
-    @State private var showsAllApplications = false
-    @State private var showsAllProxy = false
-    @State private var showsAllSystem = false
     @State private var path = NavigationPath()
+    @State private var exportError: String?
 
-    private let collapsedRowLimit = 10
+    private let overviewRowLimit = 10
 
-    private var applicationRecords: [DailyUsageRecord] {
-        filtered(model.rangeRecords.filter { $0.category == .userApp || $0.category == .unclassified })
-    }
-
-    private var proxyRecords: [DailyUsageRecord] {
-        filtered(model.rangeRecords.filter { $0.category == .proxyTransport })
-    }
-
-    private var systemRecords: [DailyUsageRecord] {
-        filtered(model.rangeRecords.filter { $0.category == .systemProcess })
-    }
-
-    private func filtered(_ records: [DailyUsageRecord]) -> [DailyUsageRecord] {
+    private var pageRecords: [DailyUsageRecord] {
+        let records = model.rangeRecords.filter(page.includes)
         guard !searchText.isEmpty else { return records }
         return records.filter { $0.displayName.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    /// 占比的分母：代理传输页用代理总量，其余用不含代理的总量。
+    private var shareBase: Int64 {
+        page == .proxy
+            ? model.selectedRangeProxyTotals.totalBytes
+            : model.selectedRangeTotals.totalBytes
     }
 
     var body: some View {
         NavigationStack(path: $path) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    rangePicker
-                    summary
-                    timeline
-                    applicationSection
-                    if !proxyRecords.isEmpty {
-                        CollapsibleUsageSection(
-                            title: "代理运输流量",
-                            count: proxyRecords.count,
-                            symbolName: "arrow.triangle.2.circlepath",
-                            tint: .purple,
-                            isExpanded: $isProxyExpanded
-                        ) {
-                            usageRows(proxyRecords, showsAll: $showsAllProxy)
-                        }
+                VStack(alignment: .leading, spacing: 16) {
+                    if page == .overview {
+                        summaryCards
+                        TrendChartCard(
+                            bars: model.rangeBars,
+                            range: model.selectedRange
+                        )
                     }
-                    if model.showsSystemProcesses, !systemRecords.isEmpty {
-                        CollapsibleUsageSection(
-                            title: "系统与后台进程",
-                            count: systemRecords.count,
-                            symbolName: "gearshape.2",
-                            tint: .secondary,
-                            isExpanded: $isSystemExpanded
-                        ) {
-                            usageRows(systemRecords, showsAll: $showsAllSystem)
-                        }
-                    }
+                    tableSection
                 }
-                .padding(24)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 20)
             }
-            .navigationTitle("概览")
+            .background(Color(nsColor: .windowBackgroundColor))
+            .navigationTitle(page.title)
+            .searchable(text: $searchText, placement: .toolbar, prompt: "按名称搜索")
             .toolbar {
-                ToolbarItem {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    rangePicker
                     Button {
-                        model.refresh()
+                        exportCurrentRange()
                     } label: {
-                        Label("刷新", systemImage: "arrow.clockwise")
+                        Label("导出", systemImage: "square.and.arrow.up")
                     }
+                    .help("导出当前范围 JSON")
                 }
             }
             .navigationDestination(for: String.self) { appKey in
@@ -139,6 +190,17 @@ private struct MainOverviewView: View {
                     model.pendingAppDetailKey = nil
                 }
             }
+            .alert(
+                "导出失败",
+                isPresented: Binding(
+                    get: { exportError != nil },
+                    set: { if !$0 { exportError = nil } }
+                )
+            ) {
+                Button("好") { exportError = nil }
+            } message: {
+                Text(exportError ?? "")
+            }
         }
     }
 
@@ -149,52 +211,167 @@ private struct MainOverviewView: View {
             }
         }
         .pickerStyle(.segmented)
-        .frame(maxWidth: 620)
+        .labelsHidden()
+        .fixedSize()
     }
 
-    private var summary: some View {
-        HStack(spacing: 12) {
-            TrafficStatCard(
+    private var summaryCards: some View {
+        let totals = model.selectedRangeTotals
+        return LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
+            spacing: 12
+        ) {
+            SummaryCard(
                 title: "总量",
-                value: model.selectedRangeTotals.totalBytes,
-                symbolName: "arrow.up.arrow.down",
-                tint: .accentColor
+                swatch: nil,
+                value: totals.totalBytes,
+                caption: "不含代理传输"
             )
-            TrafficStatCard(
-                title: "下载",
-                value: model.selectedRangeTotals.downloadBytes,
-                symbolName: "arrow.down",
-                tint: .blue
+            SummaryCard(
+                title: "下行",
+                swatch: TrafficColor.download,
+                value: totals.downloadBytes,
+                caption: shareCaption(totals.downloadBytes, of: totals.totalBytes)
             )
-            TrafficStatCard(
-                title: "上传",
-                value: model.selectedRangeTotals.uploadBytes,
-                symbolName: "arrow.up",
-                tint: .orange
+            SummaryCard(
+                title: "上行",
+                swatch: TrafficColor.upload,
+                value: totals.uploadBytes,
+                caption: shareCaption(totals.uploadBytes, of: totals.totalBytes)
+            )
+            SummaryCard(
+                title: "代理传输",
+                swatch: TrafficColor.proxy,
+                value: model.selectedRangeProxyTotals.totalBytes,
+                caption: "单独展示，不计入总量"
             )
         }
     }
 
-    private var timeline: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("流量趋势")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                HStack(spacing: 14) {
-                    legendDot(color: .blue, label: "下载")
-                    legendDot(color: .orange, label: "上传")
+    private func shareCaption(_ value: Int64, of total: Int64) -> String {
+        guard total > 0 else { return "占 0%" }
+        let fraction = Double(value) / Double(total)
+        return "占 \(fraction.formatted(.percent.precision(.fractionLength(1))))"
+    }
+
+    @ViewBuilder
+    private var tableSection: some View {
+        let records = pageRecords
+        let isTruncated = page == .overview && searchText.isEmpty && records.count > overviewRowLimit
+        let visible = isTruncated ? Array(records.prefix(overviewRowLimit)) : records
+
+        if records.isEmpty {
+            Text(emptyMessage)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .cardSurface()
+        } else {
+            VStack(spacing: 0) {
+                UsageTable(records: visible, shareBase: shareBase)
+                if isTruncated {
+                    Divider()
+                    Button("查看全部 \(records.count) 个应用", action: onShowAllApplications)
+                        .buttonStyle(.link)
+                        .font(.callout)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .pointingHandCursor()
                 }
+            }
+            .cardSurface()
+        }
+    }
+
+    private var emptyMessage: String {
+        if !searchText.isEmpty {
+            return "没有匹配“\(searchText)”的项目"
+        }
+        switch page {
+        case .proxy: return "当前时间范围内暂无代理传输流量"
+        case .system: return "当前时间范围内暂无系统进程流量"
+        default: return "当前时间范围内暂无应用流量"
+        }
+    }
+
+    private func exportCurrentRange() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "ByteTrace-\(model.selectedRange.rawValue).json"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try model.exportCurrentRange(to: url)
+            } catch {
+                exportError = error.localizedDescription
+            }
+        }
+    }
+}
+
+private struct SummaryCard: View {
+    let title: String
+    let swatch: Color?
+    let value: Int64
+    let caption: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                if let swatch {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(swatch)
+                        .frame(width: 8, height: 8)
+                }
+                Text(title)
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+
+            Text(ByteTraceViewModel.formatBytes(value))
+                .font(.system(size: 26, weight: .semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .contentTransition(.numericText())
+                .animation(.smooth, value: value)
+
+            Text(caption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                Text(model.selectedRange.title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .cardSurface()
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct TrendChartCard: View {
+    let bars: [UsageChartBar]
+    let range: UsageTimeRange
+
+    @State private var hoveredBar: UsageChartBar?
+    @State private var hoverX: CGFloat = 0
+
+    private var calendar: Calendar { Calendar.autoupdatingCurrent }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 16) {
+                Text("流量趋势 · \(range.chartUnitTitle)")
+                    .font(.headline)
+                Spacer()
+                legend(color: TrafficColor.download, title: "下行")
+                legend(color: TrafficColor.upload, title: "上行")
             }
 
-            if model.rangeTimeline.isEmpty {
+            if bars.isEmpty {
                 VStack(spacing: 8) {
-                    Image(systemName: "chart.xyaxis.line")
+                    Image(systemName: "chart.bar.xaxis")
                         .font(.title2)
                         .foregroundStyle(.secondary)
                     Text("暂无时间粒度数据")
@@ -204,208 +381,58 @@ private struct MainOverviewView: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 42)
+                .frame(height: 180)
             } else {
-                UsageTimelineChart(points: model.rangeTimeline)
+                chart
             }
         }
-        .padding(16)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.horizontal, 18)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+        .cardSurface()
+        .onChange(of: bars) { _, newBars in
+            if let hoveredBar, !newBars.contains(where: { $0.start == hoveredBar.start }) {
+                self.hoveredBar = nil
+            }
+        }
     }
 
-    private func legendDot(color: Color, label: String) -> some View {
+    private func legend(color: Color, title: String) -> some View {
         HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 6, height: 6)
-            Text(label)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(color)
+                .frame(width: 8, height: 8)
+            Text(title)
         }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
-    private var applicationSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("应用流量")
-                    .font(.title3.weight(.semibold))
-                Text("\(applicationRecords.count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                    TextField("按名称搜索", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .frame(width: 160)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-
-            if applicationRecords.isEmpty {
-                Text(searchText.isEmpty ? "当前时间范围内暂无应用流量" : "没有匹配“\(searchText)”的应用")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 18)
-            } else {
-                usageRows(applicationRecords, showsAll: $showsAllApplications)
-            }
-        }
-    }
-
-    private func usageRows(_ records: [DailyUsageRecord], showsAll: Binding<Bool>) -> some View {
-        let isTruncatable = searchText.isEmpty && records.count > collapsedRowLimit
-        let visible = (isTruncatable && !showsAll.wrappedValue) ? Array(records.prefix(collapsedRowLimit)) : records
-        let duplicateNames = ByteTraceViewModel.duplicateDisplayNames(in: records)
-        return VStack(spacing: 0) {
-            LazyVStack(spacing: 0) {
-                ForEach(visible, id: \.appKey) { record in
-                    NavigationLink(value: record.appKey) {
-                        MainUsageRow(
-                            record: record,
-                            showsPathHint: duplicateNames.contains(record.displayName)
-                        )
-                    }
-                    .buttonStyle(ByteTraceActionButtonStyle())
-                    .pointingHandCursor()
-                    if record.appKey != visible.last?.appKey {
-                        Divider()
-                            .padding(.leading, 44)
-                    }
-                }
-            }
-            if isTruncatable {
-                Divider()
-                Button {
-                    withAnimation(.smooth(duration: 0.22)) {
-                        showsAll.wrappedValue.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: showsAll.wrappedValue ? "chevron.up" : "chevron.down")
-                            .font(.caption2.weight(.semibold))
-                        Text(showsAll.wrappedValue ? "收起" : "显示全部 \(records.count) 个")
-                    }
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .interactiveHoverHighlight()
-                .pointingHandCursor()
-            }
-        }
-        .padding(.horizontal, 12)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        // 只在行集合本身变化（展开/收起、排名变动、增删应用）时做布局动画。
-        // 原本绑定整个 [DailyUsageRecord]，任何一行字节数变化都会触发整个容器重新布局。
-        .animation(.smooth, value: visible.map(\.appKey))
-    }
-
-    private func totalBytes(for record: DailyUsageRecord) -> Int64 {
-        let result = record.downloadBytes.addingReportingOverflow(record.uploadBytes)
-        return result.overflow ? Int64.max : result.partialValue
-    }
-}
-
-private struct UsageTimelineChart: View {
-    let points: [UsageTimelinePoint]
-
-    @State private var hoverPoint: UsageTimelinePoint?
-    @State private var hoverLocation: CGPoint?
-    @State private var chartData: ChartData
-
-    private struct Slice: Identifiable {
-        let id: Int
-        let start: Date
-        let seriesKey: String
-        let bytes: Int64
-    }
-
-    private struct ChartData {
-        let slices: [Slice]
-        let domain: [String]
-        let range: [Color]
-    }
-
-    init(points: [UsageTimelinePoint]) {
-        self.points = points
-        _chartData = State(initialValue: Self.makeChartData(from: points))
-    }
-
-    /// 一次遍历同时产出绘图数据与配色标度。
-    ///
-    /// 原实现有两个问题：`colorScale` 对每个点做 `Array.contains` 线性查找（O(n²)），
-    /// `slices` 又单独遍历一遍并为每个切片做字符串插值构造 id。「今天」范围下
-    /// 分钟桶聚合出的点数可达上千，这些都发生在每次 body 求值时。
-    ///
-    /// domain 的追加顺序与原实现一致（每遇到新 segment 先 download 后 upload），
-    /// 配色结果不变。
-    private static func makeChartData(from points: [UsageTimelinePoint]) -> ChartData {
-        var slices: [Slice] = []
-        slices.reserveCapacity(points.count * 2)
-        var domain: [String] = []
-        var range: [Color] = []
-        var keysBySegment: [Int: (download: String, upload: String)] = [:]
-
-        for point in points {
-            let keys: (download: String, upload: String)
-            if let cached = keysBySegment[point.segmentID] {
-                keys = cached
-            } else {
-                keys = (
-                    download: "download#\(point.segmentID)",
-                    upload: "upload#\(point.segmentID)"
-                )
-                keysBySegment[point.segmentID] = keys
-                domain.append(keys.download)
-                range.append(.blue)
-                domain.append(keys.upload)
-                range.append(.orange)
-            }
-
-            slices.append(
-                Slice(
-                    id: slices.count,
-                    start: point.start,
-                    seriesKey: keys.download,
-                    bytes: point.downloadBytes
-                )
+    private var chart: some View {
+        let now = Date()
+        let domainStart = range.startDate(relativeTo: now, calendar: calendar)
+        let domainEnd = max(range.chartEndDate(relativeTo: now, calendar: calendar), domainStart.addingTimeInterval(60))
+        let unit = range.chartUnit
+        return Chart(bars) { bar in
+            BarMark(
+                x: .value("时间", bar.start, unit: unit),
+                y: .value("字节", bar.downloadBytes)
             )
-            slices.append(
-                Slice(
-                    id: slices.count,
-                    start: point.start,
-                    seriesKey: keys.upload,
-                    bytes: point.uploadBytes
-                )
-            )
-        }
-        return ChartData(slices: slices, domain: domain, range: range)
-    }
+            .foregroundStyle(TrafficColor.download.opacity(opacity(for: bar)))
 
-    var body: some View {
-        Chart(chartData.slices) { slice in
-            AreaMark(
-                x: .value("时间", slice.start),
-                y: .value("字节", slice.bytes)
+            BarMark(
+                x: .value("时间", bar.start, unit: unit),
+                y: .value("字节", bar.uploadBytes)
             )
-            .foregroundStyle(by: .value("系列", slice.seriesKey))
-            .opacity(0.18)
-            .interpolationMethod(.monotone)
-
-            LineMark(
-                x: .value("时间", slice.start),
-                y: .value("字节", slice.bytes)
-            )
-            .foregroundStyle(by: .value("系列", slice.seriesKey))
-            .lineStyle(StrokeStyle(lineWidth: 1.6))
-            .interpolationMethod(.monotone)
+            .foregroundStyle(TrafficColor.upload.opacity(opacity(for: bar)))
         }
-        .chartForegroundStyleScale(domain: chartData.domain, range: chartData.range)
-        .chartLegend(.hidden)
+        .chartXScale(domain: domainStart...domainEnd)
+        .chartXAxis {
+            AxisMarks(values: .stride(by: axisStride.component, count: axisStride.count)) { _ in
+                AxisGridLine()
+                AxisValueLabel(format: axisFormat)
+            }
+        }
         .chartYAxis {
             AxisMarks(position: .leading) { value in
                 AxisGridLine()
@@ -424,31 +451,49 @@ private struct UsageTimelineChart: View {
                         case .active(let location):
                             updateHover(at: location, proxy: proxy, geometry: geometry)
                         case .ended:
-                            hoverPoint = nil
-                            hoverLocation = nil
+                            hoveredBar = nil
                         }
                     }
             }
         }
         .overlay {
             GeometryReader { geometry in
-                if let hoverPoint, let hoverLocation {
-                    let bubbleWidth: CGFloat = 150
+                if let hoveredBar {
+                    let bubbleWidth: CGFloat = 180
                     let clampedX = min(
-                        max(hoverLocation.x, bubbleWidth / 2 + 4),
+                        max(hoverX, bubbleWidth / 2 + 4),
                         geometry.size.width - bubbleWidth / 2 - 4
                     )
-                    hoverBubble(for: hoverPoint)
+                    hoverBubble(for: hoveredBar)
                         .frame(width: bubbleWidth, alignment: .leading)
-                        .position(x: clampedX, y: 24)
+                        .position(x: clampedX, y: 34)
+                        .allowsHitTesting(false)
                 }
             }
         }
-        .frame(height: 220)
-        .onChange(of: points) { _, newPoints in
-            chartData = Self.makeChartData(from: newPoints)
-            hoverPoint = nil
-            hoverLocation = nil
+        .frame(height: 200)
+    }
+
+    private func opacity(for bar: UsageChartBar) -> Double {
+        guard let hoveredBar else { return 1 }
+        return hoveredBar.start == bar.start ? 1 : 0.4
+    }
+
+    private var axisStride: (component: Calendar.Component, count: Int) {
+        switch range {
+        case .lastHour: return (.minute, 15)
+        case .today: return (.hour, 6)
+        case .thisWeek: return (.day, 1)
+        case .thisMonth: return (.day, 7)
+        }
+    }
+
+    private var axisFormat: Date.FormatStyle {
+        switch range {
+        case .lastHour: return .dateTime.hour().minute()
+        case .today: return .dateTime.hour()
+        case .thisWeek: return .dateTime.weekday(.abbreviated)
+        case .thisMonth: return .dateTime.month(.defaultDigits).day()
         }
     }
 
@@ -457,50 +502,171 @@ private struct UsageTimelineChart: View {
         let plotFrame = geometry[plotFrameAnchor]
         let relativeX = location.x - plotFrame.origin.x
         guard let date = proxy.value(atX: relativeX, as: Date.self) else { return }
-        let nearest = nearestPoint(to: date)
-        if nearest != hoverPoint { hoverPoint = nearest }
-        hoverLocation = location
+        let bar = bars.first { $0.start <= date && date < $0.end }
+        if bar != hoveredBar { hoveredBar = bar }
+        if let bar {
+            let middle = bar.start.addingTimeInterval(bar.end.timeIntervalSince(bar.start) / 2)
+            hoverX = (proxy.position(forX: middle) ?? relativeX) + plotFrame.origin.x
+        }
     }
 
-    /// `points` is sorted by time by ByteTraceViewModel. Binary search avoids
-    /// scanning the whole day (up to 1,440 points) for every mouse movement.
-    private func nearestPoint(to date: Date) -> UsageTimelinePoint? {
-        guard !points.isEmpty else { return nil }
-        var lower = 0
-        var upper = points.count
-        while lower < upper {
-            let middle = lower + (upper - lower) / 2
-            if points[middle].start < date {
-                lower = middle + 1
-            } else {
-                upper = middle
+    private func hoverBubble(for bar: UsageChartBar) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(timeTitle(for: bar))
+                .font(.caption.weight(.semibold))
+            Text("↓ \(ByteTraceViewModel.formatBytes(bar.downloadBytes))　↑ \(ByteTraceViewModel.formatBytes(bar.uploadBytes))")
+                .font(.caption)
+            if let name = bar.topAppName, bar.totalBytes > 0, bar.topAppBytes > 0 {
+                let share = min(1, Double(bar.topAppBytes) / Double(bar.totalBytes))
+                Text("\(name) 占 \(share.formatted(.percent.precision(.fractionLength(0))))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
-        if lower == 0 { return points[0] }
-        if lower == points.count { return points[points.count - 1] }
-
-        let before = points[lower - 1]
-        let after = points[lower]
-        return date.timeIntervalSince(before.start) <= after.start.timeIntervalSince(date)
-            ? before
-            : after
-    }
-
-    private func hoverBubble(for point: UsageTimelinePoint) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(point.start.formatted(date: .omitted, time: .shortened))
-                .font(.caption2.weight(.semibold))
-            HStack(spacing: 10) {
-                Label(ByteTraceViewModel.formatBytes(point.downloadBytes), systemImage: "arrow.down")
-                    .foregroundStyle(.blue)
-                Label(ByteTraceViewModel.formatBytes(point.uploadBytes), systemImage: "arrow.up")
-                    .foregroundStyle(.orange)
-            }
-            .font(.caption2.monospacedDigit())
-        }
-        .padding(8)
+        .monospacedDigit()
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 7, y: 3)
+    }
+
+    private func timeTitle(for bar: UsageChartBar) -> String {
+        switch range.chartUnit {
+        case .minute:
+            return bar.start.formatted(date: .omitted, time: .shortened)
+        case .hour:
+            let start = bar.start.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute())
+            let end = bar.end.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute())
+            return "\(start) – \(end)"
+        default:
+            return bar.start.formatted(.dateTime.month(.defaultDigits).day().weekday(.abbreviated))
+        }
+    }
+}
+
+/// 应用、代理传输、系统进程共用的表格：应用 | 下行 | 上行 | 合计 | 占比。
+private struct UsageTable: View {
+    let records: [DailyUsageRecord]
+    let shareBase: Int64
+
+    private static let numberColumnWidth: CGFloat = 90
+    private static let shareColumnWidth: CGFloat = 150
+
+    var body: some View {
+        let duplicateNames = ByteTraceViewModel.duplicateDisplayNames(in: records)
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text("名称")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("下行")
+                    .frame(width: Self.numberColumnWidth, alignment: .trailing)
+                Text("上行")
+                    .frame(width: Self.numberColumnWidth, alignment: .trailing)
+                Text("合计")
+                    .frame(width: Self.numberColumnWidth, alignment: .trailing)
+                Text("占比")
+                    .frame(width: Self.shareColumnWidth, alignment: .leading)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 9)
+
+            Divider()
+
+            LazyVStack(spacing: 0) {
+                ForEach(records, id: \.appKey) { record in
+                    NavigationLink(value: record.appKey) {
+                        UsageTableRow(
+                            record: record,
+                            share: share(of: record),
+                            numberColumnWidth: Self.numberColumnWidth,
+                            shareColumnWidth: Self.shareColumnWidth,
+                            showsPathHint: duplicateNames.contains(record.displayName)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .interactiveHoverHighlight(cornerRadius: 0, opacity: 0.04)
+                    .pointingHandCursor()
+                    if record.appKey != records.last?.appKey {
+                        Divider()
+                            .padding(.leading, 18)
+                    }
+                }
+            }
+        }
+        // 只在行集合本身变化（排名变动、增删应用）时做布局动画，字节数变化不触发。
+        .animation(.smooth, value: records.map(\.appKey))
+    }
+
+    private func share(of record: DailyUsageRecord) -> Double {
+        guard shareBase > 0 else { return 0 }
+        return min(1, Double(UsageTableRow.totalBytes(of: record)) / Double(shareBase))
+    }
+}
+
+private struct UsageTableRow: View {
+    let record: DailyUsageRecord
+    let share: Double
+    let numberColumnWidth: CGFloat
+    let shareColumnWidth: CGFloat
+    var showsPathHint: Bool = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 10) {
+                AppIconView(record: record, size: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(record.displayName)
+                        .lineLimit(1)
+                    if showsPathHint, let path = record.bundlePath ?? record.executablePath {
+                        Text(ByteTraceViewModel.abbreviatedPath(path))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // 这里刻意不加 .contentTransition(.numericText())：列表每 10 秒刷新一次且
+            // 数值必然变化，逐行数字滚动动画会让整个可见列表持续重绘，是渲染开销的主要来源。
+            // 顶部统计卡数量固定，仍保留动画作为视觉焦点。
+            Text(ByteTraceViewModel.formatBytes(record.downloadBytes))
+                .foregroundStyle(.secondary)
+                .frame(width: numberColumnWidth, alignment: .trailing)
+            Text(ByteTraceViewModel.formatBytes(record.uploadBytes))
+                .foregroundStyle(.secondary)
+                .frame(width: numberColumnWidth, alignment: .trailing)
+            Text(ByteTraceViewModel.formatBytes(Self.totalBytes(of: record)))
+                .fontWeight(.semibold)
+                .frame(width: numberColumnWidth, alignment: .trailing)
+
+            HStack(spacing: 8) {
+                UsageShareBar(fraction: share, height: 5)
+                Text(share.formatted(.percent.precision(.fractionLength(1))))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+            .frame(width: shareColumnWidth)
+        }
+        .monospacedDigit()
+        .padding(.horizontal, 18)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    static func totalBytes(of record: DailyUsageRecord) -> Int64 {
+        let result = record.downloadBytes.addingReportingOverflow(record.uploadBytes)
+        return result.overflow ? Int64.max : result.partialValue
     }
 }
 
@@ -531,7 +697,7 @@ private struct AppDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 16) {
                 if let record {
                     appHeader(record)
                     appStats(record)
@@ -542,8 +708,10 @@ private struct AppDetailView: View {
                         .padding(.top, 24)
                 }
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle(record?.displayName ?? "应用详情")
         .onAppear {
             model.beginObservingAppDetail(appKey)
@@ -568,32 +736,39 @@ private struct AppDetailView: View {
     }
 
     private func appStats(_ record: DailyUsageRecord) -> some View {
-        HStack(spacing: 12) {
-            TrafficStatCard(
-                title: "总量",
-                value: totalBytes(for: record),
-                symbolName: "arrow.up.arrow.down",
-                tint: .accentColor
+        let total = totalBytes(for: record)
+        return HStack(spacing: 12) {
+            SummaryCard(
+                title: "合计",
+                swatch: nil,
+                value: total,
+                caption: model.selectedRange.title
             )
-            TrafficStatCard(
-                title: "下载",
+            SummaryCard(
+                title: "下行",
+                swatch: TrafficColor.download,
                 value: record.downloadBytes,
-                symbolName: "arrow.down",
-                tint: .blue
+                caption: shareCaption(record.downloadBytes, of: total)
             )
-            TrafficStatCard(
-                title: "上传",
+            SummaryCard(
+                title: "上行",
+                swatch: TrafficColor.upload,
                 value: record.uploadBytes,
-                symbolName: "arrow.up",
-                tint: .orange
+                caption: shareCaption(record.uploadBytes, of: total)
             )
         }
+    }
+
+    private func shareCaption(_ value: Int64, of total: Int64) -> String {
+        guard total > 0 else { return "占 0%" }
+        let fraction = Double(value) / Double(total)
+        return "占 \(fraction.formatted(.percent.precision(.fractionLength(1))))"
     }
 
     private var appTimeline: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("应用趋势")
-                .font(.title3.weight(.semibold))
+                .font(.headline)
 
             let points = model.timeline(for: appKey)
             if points.isEmpty {
@@ -607,7 +782,7 @@ private struct AppDetailView: View {
                         x: .value("时间", point.start),
                         y: .value("总量", point.totalBytes)
                     )
-                    .foregroundStyle(.blue.gradient)
+                    .foregroundStyle(TrafficColor.download)
                 }
                 .chartYAxis {
                     AxisMarks(position: .leading) { value in
@@ -620,103 +795,13 @@ private struct AppDetailView: View {
                 .frame(height: 240)
             }
         }
-        .padding(16)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .cardSurface()
     }
 
     private func totalBytes(for record: DailyUsageRecord) -> Int64 {
         let result = record.downloadBytes.addingReportingOverflow(record.uploadBytes)
         return result.overflow ? Int64.max : result.partialValue
-    }
-}
-
-private struct TrafficStatCard: View {
-    let title: String
-    let value: Int64
-    let symbolName: String
-    let tint: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Image(systemName: symbolName)
-                .foregroundStyle(tint)
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(ByteTraceViewModel.formatBytes(value))
-                .font(.title3.weight(.semibold))
-                .monospacedDigit()
-                .contentTransition(.numericText())
-                .animation(.smooth, value: value)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-}
-
-private struct MainUsageRow: View {
-    let record: DailyUsageRecord
-    var showsPathHint: Bool = false
-
-    var body: some View {
-        HStack(spacing: 12) {
-            AppIconView(record: record, size: 32)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(record.displayName)
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
-                HStack(spacing: 10) {
-                    Text("↓ \(ByteTraceViewModel.formatBytes(record.downloadBytes))")
-                    Text("↑ \(ByteTraceViewModel.formatBytes(record.uploadBytes))")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                if showsPathHint, let path = record.bundlePath ?? record.executablePath {
-                    Text(ByteTraceViewModel.abbreviatedPath(path))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
-            }
-
-            Spacer(minLength: 8)
-
-            // 这里刻意不加 .contentTransition(.numericText())：列表每 10 秒刷新一次且
-            // 数值必然变化，逐行数字滚动动画会让整个可见列表持续重绘，是渲染开销的主要来源。
-            // 顶部三张统计卡数量固定，仍保留动画作为视觉焦点。
-            Text(ByteTraceViewModel.formatBytes(totalBytes))
-                .font(.callout.weight(.medium))
-                .monospacedDigit()
-        }
-        .padding(.vertical, 10)
-        .contentShape(Rectangle())
-    }
-
-    private var totalBytes: Int64 {
-        let result = record.downloadBytes.addingReportingOverflow(record.uploadBytes)
-        return result.overflow ? Int64.max : result.partialValue
-    }
-}
-
-private struct AppIconView: View {
-    let record: DailyUsageRecord
-    let size: CGFloat
-
-    var body: some View {
-        if let path = record.bundlePath ?? record.executablePath {
-            Image(nsImage: AppIconCache.icon(forPath: path))
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: size, height: size)
-        } else {
-            Image(systemName: "app.dashed")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .frame(width: size, height: size)
-        }
     }
 }

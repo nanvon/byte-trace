@@ -246,6 +246,21 @@ public struct UsageTimelineRecord: Equatable, Sendable {
     }
 }
 
+/// One app's traffic within one fixed-length time slot, used by stacked per-app charts.
+public struct UsageAppTimelineRecord: Equatable, Sendable {
+    public let slotStart: Date
+    public let appKey: String
+    public let downloadBytes: Int64
+    public let uploadBytes: Int64
+
+    public init(slotStart: Date, appKey: String, downloadBytes: Int64, uploadBytes: Int64) {
+        self.slotStart = slotStart
+        self.appKey = appKey
+        self.downloadBytes = downloadBytes
+        self.uploadBytes = uploadBytes
+    }
+}
+
 public struct UsageBucketStats: Equatable, Sendable {
     public let bucketCount: Int64
     public let earliestBucket: Date?
