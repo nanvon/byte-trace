@@ -44,6 +44,7 @@ jobs:
           python3 Scripts/check-release-version.py
           bash -n Scripts/package_app.sh
           plutil -lint Packaging/Info.plist
+          python3 -m py_compile Scripts/generate-update-feed.py
 
       - name: Build local ad-hoc app bundle
         env:
@@ -54,4 +55,5 @@ jobs:
         run: |
           test -s dist/ByteTrace.zip
           test -s dist/ByteTrace.dmg
+          test -d dist/ByteTrace.app/Contents/Frameworks/Sparkle.framework
           diskutil image info dist/ByteTrace.dmg >/dev/null

@@ -12,6 +12,9 @@ let package = Package(
         .executable(name: "ByteTraceProbe", targets: ["ByteTraceProbe"]),
         .executable(name: "ByteTraceApp", targets: ["ByteTraceApp"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")
+    ],
     targets: [
         .target(
             name: "ByteTraceCore",
@@ -19,7 +22,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "ByteTraceApp",
-            dependencies: ["ByteTraceCore"]
+            dependencies: [
+                "ByteTraceCore",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         .executableTarget(
             name: "ByteTraceProbe",

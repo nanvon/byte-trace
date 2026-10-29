@@ -78,6 +78,8 @@
 2. Open the DMG image and drag `ByteTrace.app` into your `Applications` directory;
 3. Launch the application. A ⇅ icon will appear in the macOS menu bar (the app does not appear in the Dock); click the icon to begin monitoring.
 
+Check for updates from the menu bar panel, app menu, or Settings → About ByteTrace. A separate window displays release notes and download progress, then installs and restarts after confirmation. Automatic checks are optional. Versions without the updater require one manual upgrade first.
+
 > [!NOTE]
 > **First-Launch Gatekeeper Prompt**
 >
@@ -106,10 +108,11 @@ ByteTrace adheres to **Local-first and Zero Telemetry** principles. All analysis
 | **System Traffic Source** | `/usr/bin/nettop` | **Strictly Read-Only** | Native macOS diagnostic tool executed as a subprocess with standard user privileges; zero root elevation; reads byte counters only. |
 | **Proxy State Monitor** | `SCDynamicStore` (SystemConfiguration) | **Strictly Read-Only** | Dynamically listens for active local proxy ports for loopback filtering; endpoints are kept in memory only and never written to disk or exposed. |
 | **Local Metrics Store** | `~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3` | **Local Read/Write** | Embedded SQLite3 (WAL mode) database without encryption; entirely owned by the user and inspectable/clearable via any SQLite client. |
-| **App Preferences** | `UserDefaults` (`com.nanvon.ByteTrace`) | **Local Read/Write** | Stores launch-at-login state, system process visibility preference, and data retention policies only. |
+| **App Preferences** | `UserDefaults` (`com.nanvon.ByteTrace`) | **Local Read/Write** | Stores launch-at-login, process visibility, retention, and automatic update check preferences. |
+| **App Updates** | GitHub Releases / Sparkle | **Network Read** | Fetches signed update feeds, notes, and archives. EdDSA verification is required; traffic statistics and system profiles are never uploaded. |
 
 ### Security & Privacy Commitments
-- **Zero Telemetry**: Contains zero tracking analytics, crash reporting SDKs, or external network requests; no data ever leaves your device.
+- **Zero Telemetry**: No analytics or crash reporting SDKs, and no statistics are uploaded. Update checks access GitHub and its download services; automatic checks can be disabled in Settings.
 - **No Packet Inspection**: Does not capture network payloads, decrypt HTTPS/TLS streams, or inspect request bodies, headers, cookies, or URL paths; only records OS kernel-level process byte totals.
 - **Minimal Permissions**: Requests no Accessibility, Screen Recording, or Full Disk Access permissions.
 
@@ -123,7 +126,7 @@ ByteTrace adheres to **Local-first and Zero Telemetry** principles. All analysis
 ### Prerequisites
 * macOS 26.6 or later on Apple Silicon (M-series)
 * Xcode 27.1 (with the macOS 27.0 SDK, matching CI and release builds)
-* Swift Package Manager (zero third-party dependencies)
+* Swift Package Manager (Sparkle 2.10.0 for updates; collection and storage have no third-party dependencies)
 
 ### Local Development & Debugging
 ```bash
@@ -143,6 +146,8 @@ swift run ByteTraceApp
 
 > [!WARNING]
 > `swift run ByteTraceApp` executes the raw binary without reading `Packaging/Info.plist`. Consequently, menu-bar-only persistence (`LSUIElement`) and application icon behaviors will not take effect. To validate the complete menu bar experience, use the packaging script to produce an `.app` bundle.
+
+In-app updating also requires an `.app` bundle. See [app update configuration](docs/APP_UPDATES.md) for signing and release setup.
 
 ### Packaging a Release Bundle
 Execute the bundled packaging script to compile and ad-hoc sign the production bundle:

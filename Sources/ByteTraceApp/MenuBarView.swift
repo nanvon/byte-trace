@@ -4,6 +4,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     @ObservedObject var model: ByteTraceViewModel
+    private let updater = AppUpdater.shared
 
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -83,6 +84,12 @@ struct MenuBarView: View {
             }
             headerButton(symbolName: "gearshape", label: "设置") {
                 openMainWindow(page: .settings)
+            }
+            headerButton(
+                symbolName: updater.hasUpdate ? "arrow.down.circle.fill" : "arrow.down.circle",
+                label: updater.hasUpdate || updater.isWorking ? "查看更新" : "检查更新"
+            ) {
+                updater.checkForUpdates()
             }
             headerButton(symbolName: "power", label: "退出 ByteTrace") {
                 model.shutdown()

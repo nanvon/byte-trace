@@ -455,6 +455,19 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         recordCollectorEvent(kind: "collector_stopped")
     }
 
+    /// 更新退出前确认最终采样已保存；失败时交由更新窗口提供重试。
+    func prepareForUpdate() throws {
+        let wasCollecting = isCollecting
+        stop()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        do {
+            _ = try aggregator?.flush()
+        } catch {
+            if wasCollecting { start() }
+            throw error
+        }
+    }
+
     func shutdown() {
         wantsCollection = false
         isSleeping = false

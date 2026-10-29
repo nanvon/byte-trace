@@ -10,6 +10,7 @@ final class ByteTraceAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
+        AppUpdater.shared.start()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleMainWindowWillClose(_:)),
@@ -20,6 +21,18 @@ final class ByteTraceAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         Self.model?.shutdown()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if AppUpdater.shared.phase == .installing {
+            do {
+                try Self.model?.prepareForUpdate()
+            } catch {
+                AppUpdater.shared.terminationPreparationFailed(error)
+                return .terminateCancel
+            }
+        }
+        return .terminateNow
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -94,6 +107,11 @@ struct ByteTraceApp: App {
             MainWindowView(model: model)
         }
         .defaultSize(width: 1080, height: 720)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("检查更新…") { AppUpdater.shared.checkForUpdates() }
+            }
+        }
     }
 }
 

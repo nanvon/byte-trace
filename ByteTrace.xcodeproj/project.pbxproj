@@ -7,12 +7,26 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C14B6D290C3344CFACBE0001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = C14B6D290C3344CFACBE0002 /* Sparkle */; };
+		C14B6D290C3344CFACBE0003 /* Sparkle in Embed Frameworks */ = {isa = PBXBuildFile; productRef = C14B6D290C3344CFACBE0002 /* Sparkle */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		0359E48B2B081E0E590AB2AC /* MenuBarIcon@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = B675AA2047D14A0B6B571B52 /* MenuBarIcon@2x.png */; };
 		0A7456E5AC2042827C3EE29E /* ByteTraceCore in Frameworks */ = {isa = PBXBuildFile; productRef = B7520C0486815ACB991C357A /* ByteTraceCore */; };
 		4FBC2C5DCEDE37B7CED73C93 /* ByteTrace.icns in Resources */ = {isa = PBXBuildFile; fileRef = 94EC3F7EC66176733E645EAC /* ByteTrace.icns */; };
 		5C03B91D18E678A429AA0E13 /* MenuBarIcon.png in Resources */ = {isa = PBXBuildFile; fileRef = AE8AE84E05E6C4B0A8A5696B /* MenuBarIcon.png */; };
 		8C645464E66CFBB3BC2DFFD8 /* MenuBarIcon@3x.png in Resources */ = {isa = PBXBuildFile; fileRef = 1F6D9F72A4AFBF623A336271 /* MenuBarIcon@3x.png */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C14B6D290C3344CFACBE0004 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (C14B6D290C3344CFACBE0003 /* Sparkle in Embed Frameworks */, );
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		1F6D9F72A4AFBF623A336271 /* MenuBarIcon@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "MenuBarIcon@3x.png"; sourceTree = "<group>"; };
@@ -37,6 +51,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0A7456E5AC2042827C3EE29E /* ByteTraceCore in Frameworks */,
+				C14B6D290C3344CFACBE0001 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -114,6 +129,7 @@
 				948F10A328CB51F15BB4925F /* Sources */,
 				692E4D49D48A897D3EF70D7C /* Resources */,
 				256D056876CD93D27D9477A2 /* Frameworks */,
+				C14B6D290C3344CFACBE0004 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -125,6 +141,7 @@
 			name = ByteTrace;
 			packageProductDependencies = (
 				B7520C0486815ACB991C357A /* ByteTraceCore */,
+				C14B6D290C3344CFACBE0002 /* Sparkle */,
 			);
 			productName = ByteTrace;
 			productReference = 3DE1E9AAE838B5D36964EEAE /* ByteTraceApp.app */;
@@ -156,6 +173,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				6483E6EA9CFE9E30E4CEE800 /* XCLocalSwiftPackageReference "." */,
+				C14B6D290C3344CFACBE0005 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AEBD7675A01B82AE9B3D924D /* Products */;
@@ -196,6 +214,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				CODE_SIGN_ENTITLEMENTS = Packaging/ByteTrace.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = NO;
@@ -338,6 +357,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				CODE_SIGN_ENTITLEMENTS = Packaging/ByteTrace.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = NO;
@@ -388,11 +408,24 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		C14B6D290C3344CFACBE0002 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C14B6D290C3344CFACBE0005 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
 		B7520C0486815ACB991C357A /* ByteTraceCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = ByteTraceCore;
 		};
 /* End XCSwiftPackageProductDependency section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		C14B6D290C3344CFACBE0005 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {kind = exactVersion; version = 2.10.0; };
+		};
+/* End XCRemoteSwiftPackageReference section */
 	};
 	rootObject = B97DC7BC63CA883D52A41020 /* Project object */;
 }

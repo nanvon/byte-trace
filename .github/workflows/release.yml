@@ -37,6 +37,16 @@ jobs:
             exit 1
           fi
 
+      - name: Check update signing configuration
+        env:
+          SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_PUBLIC_ED_KEY" || -z "$SPARKLE_PRIVATE_ED_KEY" ]]; then
+            echo "发布前必须配置 SPARKLE_PUBLIC_ED_KEY variable 和 SPARKLE_PRIVATE_ED_KEY secret。" >&2
+            exit 1
+          fi
+
   package:
     name: macOS Apple Silicon
     needs: prepare
@@ -61,6 +71,7 @@ jobs:
       - name: Build and sign ad-hoc app bundle
         env:
           BYTE_TRACE_SIGNING_IDENTITY: "-"
+          SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
         run: ./Scripts/package_app.sh
 
       - name: Name release archives
@@ -82,6 +93,21 @@ jobs:
           echo "zip_checksum=$zip_checksum" >> "$GITHUB_OUTPUT"
           echo "dmg_checksum=$dmg_checksum" >> "$GITHUB_OUTPUT"
 
+      - name: Sign update archive, release notes and appcast
+        env:
+          TAG: ${{ github.ref_name }}
+          UPDATE_ARCHIVE: ${{ steps.archive.outputs.zip_asset }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          python3 Scripts/generate-update-feed.py \
+            --tag "$TAG" \
+            --repository "$GITHUB_REPOSITORY" \
+            --app dist/ByteTrace.app \
+            --dist dist \
+            --archive "$UPDATE_ARCHIVE" \
+            --sign-update .build/artifacts/sparkle/Sparkle/bin/sign_update
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
@@ -91,6 +117,8 @@ jobs:
             ${{ steps.archive.outputs.zip_checksum }}
             ${{ steps.archive.outputs.dmg_asset }}
             ${{ steps.archive.outputs.dmg_checksum }}
+            dist/appcast.xml
+            dist/release-notes.md
           if-no-files-found: error
 
   publish:
@@ -148,13 +176,14 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
+            --draft \
             --title "ByteTrace ${GITHUB_REF_NAME}" \
             --notes-file "${RUNNER_TEMP}/release-notes.md"
 
           release_assets=()
           while IFS= read -r -d '' file; do
             release_assets+=("$file")
-          done < <(find . -type f \( -name '*.zip' -o -name '*.dmg' -o -name '*.sha256' \) -print0 | sort -z)
+          done < <(find . -type f \( -name '*.zip' -o -name '*.dmg' -o -name '*.sha256' -o -name 'appcast.xml' -o -name 'release-notes.md' \) -print0 | sort -z)
           if (( ${#release_assets[@]} == 0 )); then
             echo "no release assets found under $(pwd)" >&2
             find . -type f -print >&2
@@ -163,3 +192,6 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" "${release_assets[@]}" SHA256SUMS.txt \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
+
+          # 全部附件上传后才开放 latest/appcast，避免客户端看到尚未上传的 ZIP。
+          gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest

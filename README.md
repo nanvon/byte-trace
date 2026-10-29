@@ -78,6 +78,8 @@
 2. 打开 DMG 镜像，将 `ByteTrace.app` 拖入 `Applications` 应用程序目录；
 3. 启动应用后，macOS 菜单栏将常驻 ⇅ 图标（无 Dock 栏图标），点击图标即自动开始监控。
 
+后续可在菜单栏面板、应用菜单或「设置 → 关于 ByteTrace」中检查更新，在独立窗口查看更新日志、下载并安装。支持自动检查，安装前仍需确认。早期未内置更新功能的版本需先手动安装一次新版。
+
 > [!NOTE]
 > **首次启动安全放行提示 (Gatekeeper)**
 >
@@ -106,10 +108,11 @@ ByteTrace 遵循**本地优先（Local-first）与零遥测（Zero Telemetry）*
 | **系统流量数据源** | `/usr/bin/nettop` | **严格只读** | 系统内置网络诊断工具，普通用户权限启动子进程，零 root 提权，仅读取进程进出字节计数。 |
 | **代理配置监听** | `SCDynamicStore` (SystemConfiguration) | **严格只读** | 动态监听系统网络代理配置（用于回环端口过滤），端点仅留存内存，绝不持久化、绝不外显。 |
 | **本地用量数据库** | `~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3` | **本地读写** | 原生 SQLite3（WAL 模式），无密码加密，数据完全归用户所有，可使用任意 SQLite 工具查阅或删除。 |
-| **应用偏好配置** | `UserDefaults` (`com.nanvon.ByteTrace`) | **本地读写** | 仅存储开机自启开关、系统进程显示偏好与数据保留天数。 |
+| **应用偏好配置** | `UserDefaults` (`com.nanvon.ByteTrace`) | **本地读写** | 存储开机自启、系统进程显示、数据保留与自动检查更新偏好。 |
+| **应用更新** | GitHub Release / Sparkle | **网络读取** | 读取更新源、日志并下载更新包，使用 EdDSA 签名验证，不上传流量统计或系统画像。 |
 
 ### 安全与隐私承诺
-- **零外部遥测 (Zero Telemetry)**：项目无任何第三方数据分析 SDK、错误上报或外部网络请求逻辑，绝不向外部网络回传任何统计数据；
+- **零外部遥测 (Zero Telemetry)**：无数据分析或错误上报 SDK，不上传统计数据；应用更新会访问 GitHub 及其下载服务，可在设置中关闭自动检查；
 - **零报文解析**：不捕获网络数据载荷，不解密 HTTPS/TLS 通信，不读取任何请求体、标头、Cookie 或访问网址，仅汇总内核层进程网络字节量；
 - **无敏感权限索取**：不申请辅助功能权限、屏幕录制权限或完整磁盘访问权限。
 
@@ -123,7 +126,7 @@ ByteTrace 遵循**本地优先（Local-first）与零遥测（Zero Telemetry）*
 ### 环境要求
 * macOS 26.6 或更高版本，Apple Silicon (M 系列芯片)
 * Xcode 27.1（包含 macOS 27.0 SDK，与 CI 和发布工具链一致）
-* Swift Package Manager (SPM，零第三方依赖)
+* Swift Package Manager（应用更新依赖 Sparkle 2.10.0，采集与存储无第三方依赖）
 
 ### 本地日常开发调试
 ```bash
@@ -143,6 +146,8 @@ swift run ByteTraceApp
 
 > [!WARNING]
 > `swift run ByteTraceApp` 直接运行编译产出的裸二进制文件，无法读取 `Packaging/Info.plist`，因此菜单栏常驻策略（`LSUIElement`）与应用图标将不会生效。如需完整体验真实菜单栏交互，请使用打包脚本生成 `.app`。
+
+应用内更新同样需要完整 `.app`。更新源、密钥和发布配置见 [应用更新](docs/APP_UPDATES.md)。
 
 ### 导出正式打包产物
 使用仓库内置的打包脚本完成打包与 ad-hoc 签名：

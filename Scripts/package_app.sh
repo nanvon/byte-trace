@@ -11,6 +11,7 @@ DMG_PATH="$DIST_DIR/ByteTrace.dmg"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 PLIST_SOURCE="$ROOT_DIR/Packaging/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Packaging/Resources/ByteTrace.icns"
 MENUBAR_ICON_DIR="$ROOT_DIR/Packaging/Resources/MenuBar"
@@ -68,6 +69,12 @@ if [[ ! -x "$EXECUTABLE" ]]; then
     exit 1
 fi
 
+SPARKLE_FRAMEWORK="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
+    echo "打包失败：找不到 Sparkle.framework" >&2
+    exit 1
+fi
+
 MACOS_BUILD_INFO="$(xcrun vtool -show-build "$EXECUTABLE")"
 BUILT_MINIMUM_MACOS_VERSION="$(awk '$1 == "minos" { print $2 }' <<< "$MACOS_BUILD_INFO")"
 BUILT_MACOS_SDK_VERSION="$(awk '$1 == "sdk" { print $2 }' <<< "$MACOS_BUILD_INFO")"
@@ -87,10 +94,21 @@ mkdir -p "$DIST_DIR"
 if [[ -e "$APP_DIR" ]]; then
     rm -rf "$APP_DIR"
 fi
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
 
 cp "$EXECUTABLE" "$MACOS_DIR/ByteTraceApp"
 cp "$PLIST_SOURCE" "$CONTENTS_DIR/Info.plist"
+# CFBundleShortVersionString 是版本真值，Sparkle 的构建版本同步为相同版本。
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST_SOURCE")"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" "$CONTENTS_DIR/Info.plist"
+if [[ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]]; then
+    BUILTIN_PUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$PLIST_SOURCE")"
+    if [[ "$BUILTIN_PUBLIC_KEY" != "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+        echo "打包失败：项目公钥与 SPARKLE_PUBLIC_ED_KEY 不一致" >&2
+        exit 1
+    fi
+fi
+ditto "$SPARKLE_FRAMEWORK" "$FRAMEWORKS_DIR/Sparkle.framework"
 cp "$ICON_SOURCE" "$RESOURCES_DIR/ByteTrace.icns"
 # 菜单栏图标按 1x/2x/3x 三档打包：url(forResource:) 不做 @2x 变体匹配，
 # 由 ByteTraceMenuBarIcon 显式组装成多 representation 的 NSImage。
@@ -114,7 +132,20 @@ if [[ "$SIGNING_IDENTITY" == "-" ]]; then
 else
     CODE_SIGN_ARGS+=(--timestamp)
 fi
-codesign "${CODE_SIGN_ARGS[@]}" "$APP_DIR"
+# 保留 XPC 服务各自的 entitlement，由内向外签名，不能用 --deep 代替。
+SPARKLE_CONTENTS="$FRAMEWORKS_DIR/Sparkle.framework/Versions/B"
+if [[ ! -x "$SPARKLE_CONTENTS/Autoupdate" || ! -d "$SPARKLE_CONTENTS/Updater.app" ]]; then
+    echo "打包失败：Sparkle 安装助手缺失" >&2
+    exit 1
+fi
+for service in "$SPARKLE_CONTENTS"/XPCServices/*.xpc; do
+    [[ -d "$service" ]] || continue
+    codesign "${CODE_SIGN_ARGS[@]}" --preserve-metadata=entitlements "$service"
+done
+codesign "${CODE_SIGN_ARGS[@]}" "$SPARKLE_CONTENTS/Autoupdate"
+codesign "${CODE_SIGN_ARGS[@]}" "$SPARKLE_CONTENTS/Updater.app"
+codesign "${CODE_SIGN_ARGS[@]}" "$FRAMEWORKS_DIR/Sparkle.framework"
+codesign "${CODE_SIGN_ARGS[@]}" --entitlements "$ROOT_DIR/Packaging/ByteTrace.entitlements" "$APP_DIR"
 
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 

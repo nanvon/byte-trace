@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var pendingRetentionPolicy: UsageRetentionPolicy?
     @State private var exportMessage: String?
     @State private var exportedFileURL: URL?
+    private let updater = AppUpdater.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -123,6 +124,22 @@ struct SettingsView: View {
                 }
 
                 Section("关于 ByteTrace") {
+                    LabeledContent("当前版本", value: updater.currentVersion)
+                    LabeledContent("应用更新") {
+                        Button(updater.hasUpdate || updater.isWorking ? "查看更新…" : "检查更新…") {
+                            updater.checkForUpdates()
+                        }
+                    }
+                    Toggle("自动检查更新", isOn: Binding(
+                        get: { updater.automaticChecks },
+                        set: { updater.automaticChecks = $0 }
+                    ))
+                    Text("仅自动检查新版本，下载与安装由你确认。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let date = updater.lastCheckedAt {
+                        LabeledContent("上次检查", value: date.formatted(date: .abbreviated, time: .shortened))
+                    }
                     LabeledContent("数据源", value: "系统 nettop")
                     LabeledContent("统计口径", value: "应用逻辑流量")
                     Text("代理运输流量会单独显示，不计入今日应用总量。所有数据仅保存在本机。")
