@@ -28,7 +28,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/menubar-panel.png" width="380" alt="ByteTrace Menu Bar Panel">
+  <img src="docs/images/menubar-panel.png" width="360" alt="ByteTrace Menu Bar Panel - Light Appearance">
+  <img src="docs/images/menubar-panel-dark.png" width="360" alt="ByteTrace Menu Bar Panel - Dark Appearance"><br>
+  <sub>Menu bar panel (light on the left, dark on the right)</sub>
 </p>
 
 ---

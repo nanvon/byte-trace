@@ -28,7 +28,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/menubar-panel.png" width="380" alt="ByteTrace 菜单栏面板">
+  <img src="docs/images/menubar-panel.png" width="360" alt="ByteTrace 菜单栏面板，浅色外观">
+  <img src="docs/images/menubar-panel-dark.png" width="360" alt="ByteTrace 菜单栏面板，深色外观"><br>
+  <sub>菜单栏面板（左为浅色，右为深色）</sub>
 </p>
 
 ---
