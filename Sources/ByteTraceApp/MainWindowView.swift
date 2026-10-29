@@ -14,17 +14,22 @@ struct MainWindowView: View {
             List(selection: $selection) {
                 Section("统计") {
                     sidebarLabel("概览", systemImage: "chart.xyaxis.line", page: .overview)
+                        .tag(MainWindowPage.overview)
                     sidebarLabel("应用", systemImage: "macwindow", page: .applications)
                         .badge(count(of: .applications))
+                        .tag(MainWindowPage.applications)
                     sidebarLabel("代理传输", systemImage: "arrow.triangle.branch", page: .proxy)
                         .badge(count(of: .proxy))
+                        .tag(MainWindowPage.proxy)
                     if model.showsSystemProcesses {
                         sidebarLabel("系统进程", systemImage: "terminal", page: .system)
                             .badge(count(of: .system))
+                            .tag(MainWindowPage.system)
                     }
                 }
                 Section {
                     sidebarLabel("设置", systemImage: "gearshape", page: .settings)
+                        .tag(MainWindowPage.settings)
                 }
             }
             .listStyle(.sidebar)
@@ -74,7 +79,6 @@ struct MainWindowView: View {
     private func sidebarLabel(_ title: String, systemImage: String, page: MainWindowPage) -> some View {
         Label(title, systemImage: systemImage)
             .labelStyle(MainSidebarLabelStyle(isSelected: selection == page))
-            .tag(page)
     }
 
     private func count(of page: MainWindowPage) -> Int {
