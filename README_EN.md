@@ -47,6 +47,8 @@
 - **Zero-Configuration Proxy Detection** — Dynamically listens to macOS `SystemConfiguration` proxy state, eliminating the need to hard-code or poll local ports such as 7890.
 - **External & Loopback Dual Pipeline** — An external channel (5s interval) aggregates physical interface traffic; a supplemental channel (1s interval) captures `lo0` proxy loopback and `utun*` tunnel flows.
 - **De-duplication & Mirror Traffic Rejection** — Filters out local IPC communications, broadcast/multicast packets, and proxy mirror traffic on TUN interfaces to eliminate inflated and duplicate byte counts.
+- **Direct vs. Proxied Breakdown** — Splits each app's traffic into direct and proxied; when a local mihomo connection table is readable, proxied traffic is further split into proxy nodes and rule-based DIRECT (can be turned off in Settings).
+- **Readable System Processes** — Common macOS daemons show a short description of what they do, and command-line tools show which app or tool launched them.
 
 ### 📊 Historical Analytics & Data Ownership
 - **Five Granular Time Windows** — Supports Last 10 Minutes, Last Hour, Today, This Week, and This Month, with drill-down views into individual application timelines.
@@ -109,6 +111,7 @@ ByteTrace adheres to **Local-first and Zero Telemetry** principles. All analysis
 | :--- | :--- | :---: | :--- |
 | **System Traffic Source** | `/usr/bin/nettop` | **Strictly Read-Only** | Native macOS diagnostic tool executed as a subprocess with standard user privileges; zero root elevation; reads byte counters only. |
 | **Proxy State Monitor** | `SCDynamicStore` (SystemConfiguration) | **Strictly Read-Only** | Dynamically listens for active local proxy ports for loopback filtering; endpoints are kept in memory only and never written to disk or exposed. |
+| **mihomo Connection Table (optional)** | Local mihomo controller (`127.0.0.1` or unix socket) | **Strictly Read-Only** | Reads `/connections` every 2 seconds only while proxy traffic is present, using just each connection's local port and outbound chain to tell proxy nodes from rule-based DIRECT. Reads the proxy core's launch arguments and config file to find the controller address and secret. Connection data stays in memory; domains and destinations are never stored. Can be turned off in Settings. |
 | **Local Metrics Store** | `~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3` | **Local Read/Write** | Embedded SQLite3 (WAL mode) database without encryption; entirely owned by the user and inspectable/clearable via any SQLite client. |
 | **App Preferences** | `UserDefaults` (`com.nanvon.ByteTrace`) | **Local Read/Write** | Stores launch-at-login, process visibility, retention, and automatic update check preferences. |
 | **App Updates** | GitHub Releases / Sparkle | **Network Read** | Fetches signed update feeds, notes, and archives. EdDSA verification is required; traffic statistics and system profiles are never uploaded. |
