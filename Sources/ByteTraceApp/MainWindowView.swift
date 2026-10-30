@@ -179,6 +179,7 @@ private struct MainUsagePage: View {
                             range: model.selectedRange
                         )
                     }
+                    routeSection
                     tableSection
                 }
                 .padding(.horizontal, 24)
@@ -276,6 +277,24 @@ private struct MainUsagePage: View {
         return "占 \(fraction.formatted(.percent.precision(.fractionLength(1))))"
     }
 
+    /// 概览按全部非代理流量、应用页与系统页按本页记录拆分直连与经代理。
+    @ViewBuilder
+    private var routeSection: some View {
+        if page != .proxy, searchText.isEmpty {
+            let records = page == .overview
+                ? model.rangeRecords
+                : model.rangeRecords.filter(page.includes)
+            let breakdown = model.routeBreakdown(for: records)
+            if breakdown.hasKnownRoute {
+                RouteBreakdownCard(
+                    title: "流量路径",
+                    breakdown: breakdown,
+                    footnote: RouteBreakdownCard.footnote(usesToday: model.routeBreakdownUsesToday)
+                )
+            }
+        }
+    }
+
     @ViewBuilder
     private var tableSection: some View {
         let records = pageRecords
@@ -290,7 +309,16 @@ private struct MainUsagePage: View {
                 .cardSurface()
         } else {
             VStack(spacing: 0) {
-                UsageTable(records: visible, shareBase: shareBase)
+                UsageTable(
+                    records: visible,
+                    shareBase: shareBase,
+                    proxiedShare: { record in
+                        guard page != .proxy, !model.routeBreakdownUsesToday else { return nil }
+                        let breakdown = model.routeBreakdown(for: [record])
+                        guard breakdown.hasKnownRoute else { return nil }
+                        return breakdown.fraction(of: breakdown.proxiedBytes)
+                    }
+                )
                 if isTruncated {
                     Divider()
                     Button("查看全部 \(records.count) 个应用", action: onShowAllApplications)
@@ -575,6 +603,7 @@ private struct TrendChartCard: View {
 private struct UsageTable: View {
     let records: [DailyUsageRecord]
     let shareBase: Int64
+    var proxiedShare: (DailyUsageRecord) -> Double? = { _ in nil }
 
     private static let numberColumnWidth: CGFloat = 90
     private static let shareColumnWidth: CGFloat = 150
@@ -609,7 +638,8 @@ private struct UsageTable: View {
                             share: share(of: record),
                             numberColumnWidth: Self.numberColumnWidth,
                             shareColumnWidth: Self.shareColumnWidth,
-                            showsPathHint: duplicateNames.contains(record.displayName)
+                            showsPathHint: duplicateNames.contains(record.displayName),
+                            proxiedShare: proxiedShare(record)
                         )
                     }
                     .buttonStyle(.plain)
@@ -638,14 +668,31 @@ private struct UsageTableRow: View {
     let numberColumnWidth: CGFloat
     let shareColumnWidth: CGFloat
     var showsPathHint: Bool = false
+    /// 经代理流量占该行的比例；无路径数据或占比不足 1% 时为 nil，不显示标签。
+    var proxiedShare: Double?
 
     var body: some View {
         HStack(spacing: 12) {
             HStack(spacing: 10) {
                 AppIconView(record: record, size: 24)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(record.displayName)
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(record.displayName)
+                            .lineLimit(1)
+                        if let proxiedShare, proxiedShare >= 0.01 {
+                            Text(proxiedShare >= 0.995
+                                 ? "经代理"
+                                 : "经代理 \(proxiedShare.formatted(.percent.precision(.fractionLength(0))))")
+                                .font(.caption2)
+                                .foregroundStyle(RouteColor.color(for: .proxied))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(
+                                    Capsule().fill(RouteColor.color(for: .proxied).opacity(0.12))
+                                )
+                                .fixedSize()
+                        }
+                    }
                     if showsPathHint, let path = record.bundlePath ?? record.executablePath {
                         Text(ByteTraceViewModel.abbreviatedPath(path))
                             .font(.caption)
@@ -706,6 +753,18 @@ private struct AppDetailView: View {
                 if let record {
                     appHeader(record)
                     appStats(record)
+                    if record.category != .proxyTransport {
+                        let breakdown = model.routeBreakdown(for: [record])
+                        if breakdown.hasKnownRoute {
+                            RouteBreakdownCard(
+                                title: "流量路径",
+                                breakdown: breakdown,
+                                footnote: RouteBreakdownCard.footnote(
+                                    usesToday: model.routeBreakdownUsesToday
+                                )
+                            )
+                        }
+                    }
                     appTimeline
                 } else {
                     Text("当前时间范围内没有这个应用的统计数据")

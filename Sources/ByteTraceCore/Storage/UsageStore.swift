@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 7
+    public static let schemaVersion: Int64 = 8
     public static let accountingVersion: Int64 = 3
 
     private let database: SQLiteDatabase
@@ -111,7 +111,8 @@ public final class UsageStore: @unchecked Sendable {
 
     public func apply(
         _ aggregates: [DailyUsageAggregate],
-        bucketAggregates: [UsageBucketAggregate] = []
+        bucketAggregates: [UsageBucketAggregate] = [],
+        routeAggregates: [RouteUsageAggregate] = []
     ) throws {
         guard !aggregates.isEmpty || !bucketAggregates.isEmpty else { return }
 
@@ -125,6 +126,8 @@ public final class UsageStore: @unchecked Sendable {
             defer { sqlite3_finalize(dailyStatement) }
             let bucketStatement = try prepareBucketUsageUpsert()
             defer { sqlite3_finalize(bucketStatement) }
+            let routeStatement = try prepareRouteUsageUpsert()
+            defer { sqlite3_finalize(routeStatement) }
 
             var apps: [String: AppAggregate] = [:]
             for aggregate in aggregates {
@@ -142,6 +145,9 @@ public final class UsageStore: @unchecked Sendable {
             }
             for aggregate in bucketAggregates {
                 try upsertBucketUsage(aggregate, using: bucketStatement)
+            }
+            for aggregate in routeAggregates {
+                try upsertRouteUsage(aggregate, using: routeStatement)
             }
             try database.execute("COMMIT;")
         } catch {
@@ -224,6 +230,62 @@ public final class UsageStore: @unchecked Sendable {
             )
         }
         return records
+    }
+
+    /// 一段日期内每个应用按路径汇总的流量（只含当前口径）。
+    /// 早于路径统计上线的日期没有行，调用方用日汇总减去这里的合计得到「未区分」部分。
+    public func routeUsage(
+        from startDay: String,
+        through endDay: String
+    ) throws -> [RouteUsageRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try database.prepare(
+            """
+            SELECT app_key, route, download_bytes, upload_bytes
+            FROM daily_route_usage
+            WHERE accounting_version = ? AND day >= ? AND day <= ?;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(startDay, at: 2, in: statement)
+        try database.bind(endDay, at: 3, in: statement)
+
+        struct Key: Hashable {
+            let appKey: String
+            let route: TrafficRoute
+        }
+        var order: [Key] = []
+        var totals: [Key: (download: Int64, upload: Int64)] = [:]
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            guard let appKey = database.columnString(statement, at: 0),
+                  let route = TrafficRoute(rawValue: database.columnString(statement, at: 1) ?? "") else {
+                continue
+            }
+            let key = Key(appKey: appKey, route: route)
+            let existing = totals[key] ?? (0, 0)
+            if totals[key] == nil { order.append(key) }
+            totals[key] = (
+                Self.saturatingAdd(existing.download, sqlite3_column_int64(statement, 2)),
+                Self.saturatingAdd(existing.upload, sqlite3_column_int64(statement, 3))
+            )
+        }
+        return order.compactMap { key in
+            totals[key].map {
+                RouteUsageRecord(
+                    appKey: key.appKey,
+                    route: key.route,
+                    downloadBytes: $0.download,
+                    uploadBytes: $0.upload
+                )
+            }
+        }
     }
 
     public func bucketUsage(from start: Date, to end: Date) throws -> [UsageBucketRecord] {
@@ -740,6 +802,7 @@ public final class UsageStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try database.execute("DELETE FROM usage_buckets;")
+        try database.execute("DELETE FROM daily_route_usage;")
         try database.execute("DELETE FROM daily_usage;")
         try database.execute("DELETE FROM apps;")
         try database.execute("DELETE FROM collector_events;")
@@ -840,6 +903,26 @@ public final class UsageStore: @unchecked Sendable {
 
         if currentVersion <= 6 {
             try migrateVersionedExecutablePaths()
+        }
+
+        if currentVersion <= 7 {
+            try database.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_route_usage (
+                    accounting_version INTEGER NOT NULL CHECK (accounting_version > 0),
+                    day TEXT NOT NULL,
+                    app_key TEXT NOT NULL,
+                    route TEXT NOT NULL,
+                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (accounting_version, day, app_key, route),
+                    FOREIGN KEY (app_key) REFERENCES apps(app_key)
+                );
+
+                PRAGMA user_version = 8;
+                """
+            )
         }
     }
 
@@ -1272,6 +1355,36 @@ public final class UsageStore: @unchecked Sendable {
                 updated_at = excluded.updated_at;
             """
         )
+    }
+
+    private func prepareRouteUsageUpsert() throws -> OpaquePointer {
+        try database.prepare(
+            """
+            INSERT INTO daily_route_usage (
+                accounting_version, day, app_key, route,
+                download_bytes, upload_bytes, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accounting_version, day, app_key, route) DO UPDATE SET
+                download_bytes = daily_route_usage.download_bytes + excluded.download_bytes,
+                upload_bytes = daily_route_usage.upload_bytes + excluded.upload_bytes,
+                updated_at = excluded.updated_at;
+            """
+        )
+    }
+
+    private func upsertRouteUsage(
+        _ aggregate: RouteUsageAggregate,
+        using statement: OpaquePointer
+    ) throws {
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(aggregate.day, at: 2, in: statement)
+        try database.bind(aggregate.appKey, at: 3, in: statement)
+        try database.bind(aggregate.route.rawValue, at: 4, in: statement)
+        try database.bind(aggregate.downloadBytes, at: 5, in: statement)
+        try database.bind(aggregate.uploadBytes, at: 6, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
+        try database.stepDone(statement)
+        try database.reset(statement)
     }
 
     private func upsertApp(

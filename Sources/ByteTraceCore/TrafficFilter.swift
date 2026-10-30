@@ -73,6 +73,17 @@ public struct TrafficFilter: Sendable {
     }
 }
 
+/// 补充通道归并后的一条流量：按进程、来源（系统代理/TUN）与路径合并。
+public struct RoutedDelta: Equatable, Sendable {
+    public let delta: NettopDelta
+    public let route: TrafficRoute
+
+    public init(delta: NettopDelta, route: TrafficRoute) {
+        self.delta = delta
+        self.route = route
+    }
+}
+
 public struct SupplementalTrafficReducer: Sendable {
     public init() {}
 
@@ -84,12 +95,23 @@ public struct SupplementalTrafficReducer: Sendable {
     private struct Key: Hashable {
         let processName: String
         let source: Source
+        let route: TrafficRoute
     }
 
     public func reduce(
         _ deltas: [NettopDelta],
         proxyEndpoints: Set<NettopEndpoint>
     ) -> [NettopDelta] {
+        reduceWithRoutes(deltas, proxyEndpoints: proxyEndpoints).map(\.delta)
+    }
+
+    /// `route` 在合并前逐条连接判断出口（读取 mihomo 连接表时用应用侧本地端点匹配），
+    /// 合并后端点信息即被丢弃。
+    public func reduceWithRoutes(
+        _ deltas: [NettopDelta],
+        proxyEndpoints: Set<NettopEndpoint>,
+        route: (NettopDelta) -> TrafficRoute = { _ in .proxied }
+    ) -> [RoutedDelta] {
         guard !deltas.isEmpty else { return [] }
         let filter = TrafficFilter(proxyEndpoints: proxyEndpoints)
         var order: [Key] = []
@@ -97,7 +119,7 @@ public struct SupplementalTrafficReducer: Sendable {
 
         for delta in deltas where filter.shouldKeepSupplemental(delta) {
             let source: Source = filter.shouldKeepLoopback(delta) ? .loopback : .tunnel
-            let key = Key(processName: delta.processName, source: source)
+            let key = Key(processName: delta.processName, source: source, route: route(delta))
             let normalizedInterface = source == .loopback ? "lo0" : "utun"
             if let existing = grouped[key] {
                 grouped[key] = NettopDelta(
@@ -119,7 +141,9 @@ public struct SupplementalTrafficReducer: Sendable {
             }
         }
 
-        return order.compactMap { grouped[$0] }
+        return order.compactMap { key in
+            grouped[key].map { RoutedDelta(delta: $0, route: key.route) }
+        }
     }
 
     private func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {

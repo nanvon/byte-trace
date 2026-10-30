@@ -187,6 +187,36 @@ enum UsageObservationSurface: Hashable {
     case mainOverview
 }
 
+/// 一组记录按流量路径拆分的结果。`unattributedBytes` 是早于路径统计上线、
+/// 或当前时间范围内无法区分路径的部分。
+struct RouteBreakdown: Equatable {
+    struct Item: Equatable, Identifiable {
+        let route: TrafficRoute?
+        let bytes: Int64
+
+        var id: String { route?.rawValue ?? "unattributed" }
+        var title: String { route?.displayName ?? "未区分（更新前的数据）" }
+    }
+
+    let items: [Item]
+    let totalBytes: Int64
+
+    var proxiedBytes: Int64 {
+        items.filter { $0.route?.isProxied == true }.reduce(0) { $0 + $1.bytes }
+    }
+
+    var knownBytes: Int64 {
+        items.filter { $0.route != nil }.reduce(0) { $0 + $1.bytes }
+    }
+
+    var hasKnownRoute: Bool { knownBytes > 0 }
+
+    func fraction(of bytes: Int64) -> Double {
+        guard totalBytes > 0 else { return 0 }
+        return min(1, Double(bytes) / Double(totalBytes))
+    }
+}
+
 @MainActor
 final class ByteTraceViewModel: NSObject, ObservableObject {
     static let bundleIdentifier = "com.nanvon.ByteTrace"
@@ -211,6 +241,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var rangeBars: [UsageChartBar] = []
     @Published private(set) var detailTimeline: [UsageTimelinePoint] = []
     @Published private(set) var bucketStats: UsageBucketStats?
+    /// 当前时间范围内各应用按路径汇总的字节数（日粒度；「最近 1 小时」按今天统计）。
+    @Published private(set) var rangeRouteUsage: [String: [TrafficRoute: Int64]] = [:]
     private var dailyRangeRecords: [DailyUsageRecord] = []
     private var activeDetailAppKey: String?
     @Published private(set) var launchAtLoginEnabled: Bool
@@ -651,6 +683,40 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         refreshOverview()
     }
 
+    /// 路径数据按日汇总；「最近 1 小时」只能用今天的拆分近似。
+    var routeBreakdownUsesToday: Bool {
+        selectedRange == .lastHour
+    }
+
+    func routeBreakdown(for records: [DailyUsageRecord]) -> RouteBreakdown {
+        var routeBytes: [TrafficRoute: Int64] = [:]
+        var total: Int64 = 0
+        var known: Int64 = 0
+        for record in records where record.category != .proxyTransport {
+            let recordTotal = totalBytes(for: record)
+            total = saturatingAdd(total, recordTotal)
+            var recordKnown: Int64 = 0
+            for (route, bytes) in rangeRouteUsage[record.appKey] ?? [:] {
+                routeBytes[route] = saturatingAdd(routeBytes[route] ?? 0, bytes)
+                recordKnown = saturatingAdd(recordKnown, bytes)
+            }
+            // 「最近 1 小时」用的是今天的路径数据，可能大于该时段总量，按比例收敛到总量。
+            known = saturatingAdd(known, min(recordKnown, recordTotal))
+        }
+        let rawKnown = routeBytes.values.reduce(Int64(0)) { saturatingAdd($0, $1) }
+        let scale = rawKnown > known && rawKnown > 0 ? Double(known) / Double(rawKnown) : 1
+        var items = TrafficRoute.allCases.compactMap { route -> RouteBreakdown.Item? in
+            guard let bytes = routeBytes[route], bytes > 0 else { return nil }
+            let scaled = scale < 1 ? Int64(Double(bytes) * scale) : bytes
+            return RouteBreakdown.Item(route: route, bytes: scaled)
+        }
+        let unattributed = max(0, total - items.reduce(0) { $0 + $1.bytes })
+        if unattributed > 0 {
+            items.append(RouteBreakdown.Item(route: nil, bytes: unattributed))
+        }
+        return RouteBreakdown(items: items, totalBytes: total)
+    }
+
     func timeline(for appKey: String) -> [UsageTimelinePoint] {
         activeDetailAppKey == appKey ? detailTimeline : []
     }
@@ -664,6 +730,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             records = []
             menuBarHourTimeline = []
             rangeRecords = []
+            rangeRouteUsage = [:]
             rangeBars = []
             bucketStats = UsageBucketStats(
                 bucketCount: 0,
@@ -696,7 +763,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
         let document = ByteTraceExportDocument(
-            formatVersion: 3,
+            formatVersion: 4,
             accountingVersion: UsageStore.accountingVersion,
             product: "ByteTrace",
             exportedAt: end,
@@ -718,7 +785,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                     downloadBytes: $0.downloadBytes,
                     uploadBytes: $0.uploadBytes,
                     totalBytes: totalBytes(for: $0),
-                    sampleCount: $0.sampleCount
+                    sampleCount: $0.sampleCount,
+                    routeBytes: Dictionary(
+                        uniqueKeysWithValues: (rangeRouteUsage[$0.appKey] ?? [:]).map {
+                            ($0.key.rawValue, $0.value)
+                        }
+                    )
                 )
             }
         )
@@ -964,19 +1036,20 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 loopbackRestartAttempt = 0
             }
 
-            let acceptedDeltas: [NettopDelta]
+            let acceptedDeltas: [RoutedDelta]
             if lane == .loopback {
                 let proxyEndpoints = proxyEndpointMonitor.currentLoopbackEndpoints
                 detectProxyListeners(in: deltas, proxyEndpoints: proxyEndpoints)
-                acceptedDeltas = supplementalReducer.reduce(
+                acceptedDeltas = supplementalReducer.reduceWithRoutes(
                     deltas,
-                    proxyEndpoints: proxyEndpoints
+                    proxyEndpoints: proxyEndpoints,
+                    route: { [weak self] in self?.supplementalRoute(for: $0) ?? .proxied }
                 )
             } else {
-                acceptedDeltas = deltas
+                acceptedDeltas = deltas.map { RoutedDelta(delta: $0, route: .direct) }
             }
-            for delta in acceptedDeltas {
-                ingest(delta)
+            for routed in acceptedDeltas {
+                ingest(routed.delta, route: routed.route)
             }
 
         case .malformedRow:
@@ -1053,7 +1126,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func ingest(_ delta: NettopDelta) {
+    /// 补充通道单条连接的出口路径。
+    private func supplementalRoute(for delta: NettopDelta) -> TrafficRoute {
+        .proxied
+    }
+
+    private func ingest(_ delta: NettopDelta, route: TrafficRoute) {
         let token = NettopProcessToken(rawValue: delta.processName)
         let identity = resolver.resolve(token)
         let attributed = attributionCache.attribute(identity)
@@ -1075,7 +1153,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                     bundlePath: attributed.bundlePath,
                     executablePath: attributed.executablePath,
                     downloadBytes: delta.downloadBytes,
-                    uploadBytes: delta.uploadBytes
+                    uploadBytes: delta.uploadBytes,
+                    route: attributed.category == .proxyTransport ? nil : route
                 )
             )
         } catch {
@@ -1399,6 +1478,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         let end = Date()
         let start = selectedRange.startDate(relativeTo: end, calendar: calendar)
 
+        try loadRangeRoutes(from: store, start: start, end: end)
         if selectedRange.usesBucketSummary {
             let summaries = try store.bucketUsageSummary(from: start, to: end)
             dailyRangeRecords = []
@@ -1440,6 +1520,21 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             )
         }
         try loadActiveDetailTimeline(from: store, start: start, end: end)
+    }
+
+    /// 路径只按日汇总；「最近 1 小时」退化为今天的拆分，界面会注明。
+    private func loadRangeRoutes(from store: UsageStore, start: Date, end: Date) throws {
+        var usage: [String: [TrafficRoute: Int64]] = [:]
+        for record in try store.routeUsage(
+            from: Self.dayKey(for: start),
+            through: Self.dayKey(for: end)
+        ) {
+            usage[record.appKey, default: [:]][record.route] = saturatingAdd(
+                usage[record.appKey]?[record.route] ?? 0,
+                record.totalBytes
+            )
+        }
+        if usage != rangeRouteUsage { rangeRouteUsage = usage }
     }
 
     /// 「最近 1 小时」与「今天」的柱子来自分钟桶。头部应用按 15 分钟槽查询再并入

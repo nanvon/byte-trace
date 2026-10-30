@@ -26,11 +26,18 @@ public final class UsageAggregator: @unchecked Sendable {
         var bucket: UsageBucketAggregate
     }
 
+    private struct RouteKey: Hashable {
+        let day: String
+        let appKey: String
+        let route: TrafficRoute
+    }
+
     private let lock = NSLock()
     private let store: UsageStore
     private let calendar: Calendar
     private let maxPendingEntries: Int
     private var pending: [Key: Pending] = [:]
+    private var pendingRoutes: [RouteKey: RouteUsageAggregate] = [:]
 
     public init(
         store: UsageStore,
@@ -53,6 +60,7 @@ public final class UsageAggregator: @unchecked Sendable {
     public func discardPending() {
         lock.lock()
         pending.removeAll(keepingCapacity: true)
+        pendingRoutes.removeAll(keepingCapacity: true)
         lock.unlock()
     }
 
@@ -68,6 +76,17 @@ public final class UsageAggregator: @unchecked Sendable {
 
         lock.lock()
         defer { lock.unlock() }
+
+        if let route = delta.route {
+            let routeKey = RouteKey(day: day, appKey: delta.appKey, route: route)
+            if pendingRoutes[routeKey] == nil, pendingRoutes.count >= maxPendingEntries {
+                throw UsageAggregatorError.pendingLimitExceeded
+            }
+            if pending[key] == nil, pending.count >= maxPendingEntries {
+                throw UsageAggregatorError.pendingLimitExceeded
+            }
+            pendingRoutes[routeKey] = try merge(pendingRoutes[routeKey], with: delta, key: routeKey)
+        }
 
         if var existing = pending[key] {
             existing.daily = try merge(existing.daily, with: delta)
@@ -122,10 +141,42 @@ public final class UsageAggregator: @unchecked Sendable {
 
         try store.apply(
             values.map(\.daily),
-            bucketAggregates: values.map(\.bucket)
+            bucketAggregates: values.map(\.bucket),
+            routeAggregates: Array(pendingRoutes.values)
         )
         pending.removeAll(keepingCapacity: true)
+        pendingRoutes.removeAll(keepingCapacity: true)
         return values.count
+    }
+
+    private func merge(
+        _ aggregate: RouteUsageAggregate?,
+        with delta: UsageDelta,
+        key: RouteKey
+    ) throws -> RouteUsageAggregate {
+        guard let aggregate else {
+            return RouteUsageAggregate(
+                day: key.day,
+                appKey: key.appKey,
+                route: key.route,
+                lastSeenAt: delta.sampledAt,
+                downloadBytes: delta.downloadBytes,
+                uploadBytes: delta.uploadBytes
+            )
+        }
+        let downloadResult = aggregate.downloadBytes.addingReportingOverflow(delta.downloadBytes)
+        let uploadResult = aggregate.uploadBytes.addingReportingOverflow(delta.uploadBytes)
+        guard !downloadResult.overflow, !uploadResult.overflow else {
+            throw UsageAggregatorError.overflow
+        }
+        return RouteUsageAggregate(
+            day: aggregate.day,
+            appKey: aggregate.appKey,
+            route: aggregate.route,
+            lastSeenAt: max(aggregate.lastSeenAt, delta.sampledAt),
+            downloadBytes: downloadResult.partialValue,
+            uploadBytes: uploadResult.partialValue
+        )
     }
 
     private func merge(

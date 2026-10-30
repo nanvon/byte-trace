@@ -10,6 +10,8 @@ public struct UsageDelta: Equatable, Sendable {
     public let executablePath: String?
     public let downloadBytes: Int64
     public let uploadBytes: Int64
+    /// 应用侧流量的路径；代理传输为 nil，不记录路径。
+    public let route: TrafficRoute?
 
     public init(
         sampledAt: Date,
@@ -20,8 +22,10 @@ public struct UsageDelta: Equatable, Sendable {
         bundlePath: String? = nil,
         executablePath: String? = nil,
         downloadBytes: Int64,
-        uploadBytes: Int64
+        uploadBytes: Int64,
+        route: TrafficRoute? = nil
     ) {
+        self.route = route
         self.sampledAt = sampledAt
         self.appKey = appKey
         self.displayName = displayName

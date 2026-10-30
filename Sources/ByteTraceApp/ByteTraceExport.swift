@@ -21,6 +21,9 @@ struct ByteTraceExportDocument: Encodable {
         let uploadBytes: Int64
         let totalBytes: Int64
         let sampleCount: Int64
+        /// 按路径（direct / proxied / proxy_node / proxy_rule_direct）汇总的字节数；
+        /// 不含路径统计上线前的数据，代理传输为空。
+        let routeBytes: [String: Int64]
     }
 
     let formatVersion: Int
