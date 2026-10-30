@@ -1,4 +1,5 @@
 import AppKit
+import ByteTraceCore
 
 /// 应用图标缓存。
 ///
@@ -11,6 +12,23 @@ enum AppIconCache {
     /// 超过上限整体清空而不是做 LRU：图标数量本就有限，命中率高，
     /// 极端情况下重建一次的成本远低于维护淘汰顺序。
     private static let maxCount = 512
+    /// 列表行 → 借用图标的应用路径；路径变化（应用升级、移动）时键随之变化。
+    private static var resolvedPaths: [String: String?] = [:]
+
+    static func icon(for record: DailyUsageRecord) -> NSImage? {
+        let key = [record.appKey, record.bundlePath ?? "", record.executablePath ?? ""].joined(separator: "\u{1F}")
+        let path: String?
+        if let cached = resolvedPaths[key] {
+            path = cached
+        } else {
+            path = AppIconResolver.iconPath(for: record)
+            if resolvedPaths.count >= maxCount {
+                resolvedPaths.removeAll(keepingCapacity: true)
+            }
+            resolvedPaths[key] = path
+        }
+        return path.map(icon(forPath:))
+    }
 
     static func icon(forPath path: String) -> NSImage {
         if let cached = cache[path] { return cached }

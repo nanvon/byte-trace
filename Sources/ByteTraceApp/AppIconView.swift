@@ -1,14 +1,14 @@
 import ByteTraceCore
 import SwiftUI
 
-/// 菜单栏面板与主窗口共用的应用图标；无可用路径时显示占位符号。
+/// 菜单栏面板与主窗口共用的应用图标；自身没有图标时借用相近应用的图标，都找不到时显示占位符号。
 struct AppIconView: View {
     let record: DailyUsageRecord
     let size: CGFloat
 
     var body: some View {
-        if let path = record.bundlePath ?? record.executablePath {
-            Image(nsImage: AppIconCache.icon(forPath: path))
+        if let icon = AppIconCache.icon(for: record) {
+            Image(nsImage: icon)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: size, height: size)
