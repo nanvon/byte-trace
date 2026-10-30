@@ -4,19 +4,12 @@ import SwiftUI
 @MainActor
 final class ByteTraceAppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: ByteTraceViewModel?
-    private(set) static weak var mainWindow: NSWindow?
     private static var openMainWindowAction: (() -> Void)?
     private static var pendingOpenMainWindowRequest = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
         AppUpdater.shared.start()
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleMainWindowWillClose(_:)),
-            name: NSWindow.willCloseNotification,
-            object: nil
-        )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -60,25 +53,6 @@ final class ByteTraceAppDelegate: NSObject, NSApplicationDelegate {
 
     static func prepareMainWindow() {
         _ = NSApplication.shared.setActivationPolicy(.regular)
-    }
-
-    static func registerMainWindow(_ window: NSWindow) {
-        mainWindow = window
-        prepareMainWindow()
-    }
-
-    @objc private func handleMainWindowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              window === Self.mainWindow else {
-            return
-        }
-
-        Self.mainWindow = nil
-        _ = NSApplication.shared.setActivationPolicy(.accessory)
-    }
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
     }
 }
 

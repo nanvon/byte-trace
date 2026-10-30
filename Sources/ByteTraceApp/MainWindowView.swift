@@ -8,7 +8,6 @@ struct MainWindowView: View {
     @State private var selection: MainWindowPage = .overview
     /// 窗口打开时把键盘焦点交给侧边栏，否则 AppKit 会落到工具栏的折叠按钮上并画出蓝色焦点底。
     @FocusState private var isSidebarFocused: Bool
-    @Environment(\.openWindow) private var openWindow
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
@@ -52,7 +51,6 @@ struct MainWindowView: View {
         .frame(minWidth: 900, idealWidth: 1100, minHeight: 620, idealHeight: 780)
         .onAppear {
             selection = model.requestedMainWindowPage
-            ByteTraceAppDelegate.installOpenMainWindowAction { openWindow(id: "main") }
             ByteTraceAppDelegate.prepareMainWindow()
             NSApplication.shared.activate(ignoringOtherApps: true)
             if selection.showsUsage {
@@ -61,6 +59,7 @@ struct MainWindowView: View {
         }
         .onDisappear {
             model.endObservingUsage(.mainOverview)
+            NSApplication.shared.setActivationPolicy(.accessory)
         }
         .onChange(of: selection) { oldPage, newPage in
             if oldPage.showsUsage, !newPage.showsUsage {
@@ -73,7 +72,6 @@ struct MainWindowView: View {
         .onChange(of: model.requestedMainWindowPage) { _, page in
             selection = page
         }
-        .background(MainWindowRegistration())
     }
 
     private func sidebarLabel(_ title: String, systemImage: String, page: MainWindowPage) -> some View {
@@ -691,23 +689,6 @@ private struct UsageTableRow: View {
     static func totalBytes(of record: DailyUsageRecord) -> Int64 {
         let result = record.downloadBytes.addingReportingOverflow(record.uploadBytes)
         return result.overflow ? Int64.max : result.partialValue
-    }
-}
-
-@MainActor
-private struct MainWindowRegistration: NSViewRepresentable {
-    func makeNSView(context: Context) -> RegistrationView {
-        RegistrationView()
-    }
-
-    func updateNSView(_ nsView: RegistrationView, context: Context) {}
-
-    final class RegistrationView: NSView {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            guard let window else { return }
-            ByteTraceAppDelegate.registerMainWindow(window)
-        }
     }
 }
 
