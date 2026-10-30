@@ -26,8 +26,8 @@ struct RouteBreakdownCard: View {
                 Text(title)
                     .font(.headline)
                 Spacer()
-                if showsProxiedShare, breakdown.hasKnownRoute {
-                    Text("经代理 \(percent(breakdown.fraction(of: breakdown.proxiedBytes)))")
+                if showsProxiedShare, let share = breakdown.share, share.isRepresentative {
+                    Text("\(share.isPartial ? "已区分部分中" : "")\(share.title) \(percent(share.fraction))")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()

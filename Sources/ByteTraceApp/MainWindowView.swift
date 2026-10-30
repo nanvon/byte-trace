@@ -324,9 +324,9 @@ private struct MainUsagePage: View {
                     shareBase: shareBase,
                     proxiedShare: { record in
                         guard page != .proxy, !model.routeBreakdownUsesToday else { return nil }
-                        let breakdown = model.routeBreakdown(for: [record])
-                        guard breakdown.hasKnownRoute else { return nil }
-                        return breakdown.fraction(of: breakdown.proxiedBytes)
+                        guard let share = model.routeBreakdown(for: [record]).share,
+                              share.isRepresentative else { return nil }
+                        return share
                     },
                     subtitle: model.subtitle(for:)
                 )
@@ -614,7 +614,7 @@ private struct TrendChartCard: View {
 private struct UsageTable: View {
     let records: [DailyUsageRecord]
     let shareBase: Int64
-    var proxiedShare: (DailyUsageRecord) -> Double? = { _ in nil }
+    var proxiedShare: (DailyUsageRecord) -> RouteBreakdown.Share? = { _ in nil }
     var subtitle: (DailyUsageRecord) -> String? = { _ in nil }
 
     private static let numberColumnWidth: CGFloat = 90
@@ -681,8 +681,8 @@ private struct UsageTableRow: View {
     let numberColumnWidth: CGFloat
     let shareColumnWidth: CGFloat
     var showsPathHint: Bool = false
-    /// 经代理流量占该行的比例；无路径数据或占比不足 1% 时为 nil，不显示标签。
-    var proxiedShare: Double?
+    /// 路径摘要（走节点或经代理的比例）；无路径数据时为 nil，比例不足 1% 时不显示标签。
+    var proxiedShare: RouteBreakdown.Share?
     /// 系统进程用途说明或命令行进程的启动者。
     var subtitle: String?
 
@@ -694,16 +694,16 @@ private struct UsageTableRow: View {
                     HStack(spacing: 6) {
                         Text(record.displayName)
                             .lineLimit(1)
-                        if let proxiedShare, proxiedShare >= 0.01 {
-                            Text(proxiedShare >= 0.995
-                                 ? "经代理"
-                                 : "经代理 \(proxiedShare.formatted(.percent.precision(.fractionLength(0))))")
+                        if let proxiedShare, proxiedShare.fraction >= 0.01 {
+                            Text(proxiedShare.fraction >= 0.995
+                                 ? proxiedShare.title
+                                 : "\(proxiedShare.title) \(proxiedShare.fraction.formatted(.percent.precision(.fractionLength(0))))")
                                 .font(.caption2)
-                                .foregroundStyle(RouteColor.color(for: .proxied))
+                                .foregroundStyle(RouteColor.color(for: proxiedShare.route))
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
                                 .background(
-                                    Capsule().fill(RouteColor.color(for: .proxied).opacity(0.12))
+                                    Capsule().fill(RouteColor.color(for: proxiedShare.route).opacity(0.12))
                                 )
                                 .fixedSize()
                         }

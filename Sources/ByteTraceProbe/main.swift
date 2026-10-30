@@ -9,13 +9,19 @@ private struct Options {
     let accuracyURL: String?
     /// `--restart-check [URL]`：两个外部通道同时采集，一个中途重启并做间隙补偿，对照另一个不中断的通道。
     let restartCheckURL: String?
+    /// `--routes`：在 `--accuracy` 基础上轮询 mihomo 连接表，再加一次经代理命中规则直连的下载，
+    /// 核对每个用例的字节被分到哪条出口路径。
+    let checksRoutes: Bool
 
     static let defaultAccuracyURL = "https://speed.cloudflare.com/__down?bytes=20000000"
+    /// 国内 CDN 上的大文件，常见分流规则（`cn_domain` / `GEOSITE,cn`）会走 DIRECT；只取前 20 MB。
+    static let ruleDirectURL = "https://dldir1.qq.com/weixin/Universal/Mac/WeChatMac.dmg"
 
     init(arguments: [String]) {
         var duration: TimeInterval = 15
         var accuracyURL: String?
         var restartCheckURL: String?
+        var checksRoutes = false
         var index = 1
 
         while index < arguments.count {
@@ -31,6 +37,9 @@ private struct Options {
                     accuracyURL = Self.defaultAccuracyURL
                     index += 1
                 }
+            } else if arguments[index] == "--routes" {
+                checksRoutes = true
+                index += 1
             } else if arguments[index] == "--restart-check" {
                 if index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") {
                     restartCheckURL = arguments[index + 1]
@@ -45,8 +54,9 @@ private struct Options {
         }
 
         self.duration = duration
-        self.accuracyURL = accuracyURL
+        self.accuracyURL = accuracyURL ?? (checksRoutes ? Self.defaultAccuracyURL : nil)
         self.restartCheckURL = restartCheckURL
+        self.checksRoutes = checksRoutes
     }
 }
 
@@ -87,6 +97,7 @@ private struct ProbeSummary {
 private struct ProbeSample {
     let lane: ProbeLane
     let delta: NettopDelta
+    let route: TrafficRoute
     let attributed: AttributedProcess
 }
 
@@ -107,6 +118,7 @@ private final class ProbeCounters: @unchecked Sendable {
     private var externalSamples = 0
     private var supplementalSamples = 0
     private var trafficByLane: [ProbeLane: [String: ProcessTraffic]] = [:]
+    private var downloadByRoute: [String: [TrafficRoute: Int64]] = [:]
 
     func recordFrame(
         lane: ProbeLane,
@@ -134,6 +146,7 @@ private final class ProbeCounters: @unchecked Sendable {
             traffic.download += sample.delta.downloadBytes
             traffic.upload += sample.delta.uploadBytes
             trafficByLane[lane, default: [:]][sample.delta.processName] = traffic
+            downloadByRoute[sample.delta.processName, default: [:]][sample.route, default: 0] += sample.delta.downloadBytes
             attributedAppKeys.insert(sample.attributed.appKey)
             if sample.attributed.category == .proxyTransport {
                 proxySamples += 1
@@ -154,6 +167,18 @@ private final class ProbeCounters: @unchecked Sendable {
         where NettopProcessToken(rawValue: token).pid == pid {
             total.download += traffic.download
             total.upload += traffic.upload
+        }
+        return total
+    }
+
+    func downloadByRoute(pid: Int32) -> [TrafficRoute: Int64] {
+        lock.lock()
+        defer { lock.unlock() }
+        var total: [TrafficRoute: Int64] = [:]
+        for (token, routes) in downloadByRoute where NettopProcessToken(rawValue: token).pid == pid {
+            for (route, bytes) in routes {
+                total[route, default: 0] += bytes
+            }
         }
         return total
     }
@@ -211,6 +236,9 @@ private final class ProbeRuntime: @unchecked Sendable {
     let supplementalReducer = SupplementalTrafficReducer()
     var residualTracker = SupplementalResidualTracker()
     var pendingProcessTotals: [NettopDelta] = []
+    let mihomoTracker = MihomoRouteTracker()
+    let mihomoClient = MihomoClient()
+    var mihomoController: MihomoController?
     let resolver = SystemProcessIdentityResolver()
     let attributionCache = ProcessAttributionCache()
     let store: UsageStore
@@ -271,7 +299,7 @@ private func endpointLabel(_ endpoint: NettopEndpoint) -> String {
 }
 
 /// 运行 curl 并在等待期间继续转动主 RunLoop，让采集回调按时投递。
-private func runCurl(label: String, url: String, proxy: String?) -> CurlResult? {
+private func runCurl(label: String, url: String, proxy: String?, extraArguments: [String] = []) -> CurlResult? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
     var arguments = ["-s", "-o", "/dev/null", "-w", "%{size_download} %{size_header} %{size_upload} %{size_request}"]
@@ -280,7 +308,7 @@ private func runCurl(label: String, url: String, proxy: String?) -> CurlResult? 
     } else {
         arguments += ["--noproxy", "*"]
     }
-    process.arguments = arguments + [url]
+    process.arguments = arguments + extraArguments + [url]
     let output = Pipe()
     process.standardOutput = output
     do {
@@ -327,6 +355,45 @@ private func reportAccuracy(_ result: CurlResult, counters: ProbeCounters) -> Bo
     return ok
 }
 
+/// 打印用例按出口路径的下载字节分布；`expected` 非空时要求该路径占九成以上。
+private func reportRoutes(_ result: CurlResult, expected: TrafficRoute?, counters: ProbeCounters) -> Bool {
+    let routes = counters.downloadByRoute(pid: result.pid)
+    let total = routes.values.reduce(0, +)
+    let split = TrafficRoute.allCases
+        .map { "\($0.rawValue)=\(routes[$0] ?? 0)" }
+        .joined(separator: " ")
+    guard let expected else {
+        print("[routes] case=\(result.label) \(split)")
+        return true
+    }
+    let share = total > 0 ? Double(routes[expected] ?? 0) / Double(total) : 0
+    let ok = share >= 0.9
+    print("[routes] case=\(result.label) \(split) expected=\(expected.rawValue) share=\(String(format: "%.4f", share)) \(ok ? "OK" : "MISMATCH")")
+    return ok
+}
+
+/// 找到运行中的 mihomo 内核并读取其控制器地址；找不到时退回默认的 127.0.0.1:9090。
+private func discoverMihomoController() -> MihomoController {
+    let pgrep = Process()
+    pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    pgrep.arguments = ["mihomo"]
+    let output = Pipe()
+    pgrep.standardOutput = output
+    if (try? pgrep.run()) != nil {
+        pgrep.waitUntilExit()
+        let pids = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Int32($0) }
+        for pid in pids {
+            if let arguments = MihomoControllerDiscovery.processArguments(pid: pid),
+               let controller = MihomoControllerDiscovery.controller(arguments: arguments) {
+                return controller
+            }
+        }
+    }
+    return MihomoController(transport: .tcp(host: "127.0.0.1", port: 9090), secret: nil)
+}
+
 private func runProbe(options: Options) -> Int32 {
     let runtime: ProbeRuntime
     do {
@@ -344,28 +411,35 @@ private func runProbe(options: Options) -> Int32 {
         case let .parser(parserEvent):
             switch parserEvent {
             case let .frameCompleted(rowCount, deltas, isBaseline):
-                let acceptedDeltas: [NettopDelta]
+                let acceptedDeltas: [RoutedDelta]
                 switch lane {
                 case .external:
-                    acceptedDeltas = deltas
+                    acceptedDeltas = deltas.map { RoutedDelta(delta: $0, route: .direct) }
                 case .supplemental:
                     let proxyEndpoints = runtime.proxyEndpointMonitor.currentLoopbackEndpoints
+                    let tracker = runtime.mihomoTracker
+                    let route: (NettopDelta) -> TrafficRoute = {
+                        tracker.route(forLocalEndpoint: $0.localEndpoint) ?? .proxied
+                    }
                     let residuals = isBaseline ? [] : runtime.residualTracker.residuals(
                         processTotals: runtime.pendingProcessTotals,
                         connections: deltas,
                         proxyEndpoints: proxyEndpoints,
-                        at: Date()
+                        at: Date(),
+                        route: route
                     )
                     runtime.pendingProcessTotals = []
-                    acceptedDeltas = runtime.supplementalReducer.reduce(
+                    acceptedDeltas = runtime.supplementalReducer.reduceWithRoutes(
                         deltas,
-                        proxyEndpoints: proxyEndpoints
-                    ) + residuals.map(\.delta)
+                        proxyEndpoints: proxyEndpoints,
+                        route: route
+                    ) + residuals
                     if !residuals.isEmpty {
                         print("[parser] lane=supplemental residual_processes=\(residuals.count) residual_download=\(residuals.reduce(0) { $0 + $1.delta.downloadBytes })")
                     }
                 }
-                let samples = acceptedDeltas.compactMap { delta -> ProbeSample? in
+                let samples = acceptedDeltas.compactMap { routed -> ProbeSample? in
+                    let delta = routed.delta
                     let token = NettopProcessToken(rawValue: delta.processName)
                     let identity = runtime.resolver.resolve(token)
                     let attributed = runtime.attributionCache.attribute(identity)
@@ -392,7 +466,7 @@ private func runProbe(options: Options) -> Int32 {
                         print("[storage] ingest_failed error=\(error.localizedDescription)")
                     }
 
-                    return ProbeSample(lane: lane, delta: delta, attributed: attributed)
+                    return ProbeSample(lane: lane, delta: delta, route: routed.route, attributed: attributed)
                 }
                 let preview = runtime.counters.recordFrame(
                     lane: lane,
@@ -404,7 +478,7 @@ private func runProbe(options: Options) -> Int32 {
                 )
                 for sample in preview {
                     print(
-                        "[sample] lane=\(sample.lane.rawValue) process=\(sample.delta.processName) app=\(sample.attributed.displayName) app_key=\(sample.attributed.appKey) category=\(sample.attributed.category.rawValue) launcher=\(sample.attributed.launcherName ?? "-") download_bytes=\(sample.delta.downloadBytes) upload_bytes=\(sample.delta.uploadBytes)"
+                        "[sample] lane=\(sample.lane.rawValue) route=\(sample.route.rawValue) process=\(sample.delta.processName) app=\(sample.attributed.displayName) app_key=\(sample.attributed.appKey) category=\(sample.attributed.category.rawValue) launcher=\(sample.attributed.launcherName ?? "-") download_bytes=\(sample.delta.downloadBytes) upload_bytes=\(sample.delta.uploadBytes)"
                     )
                 }
 
@@ -458,7 +532,28 @@ private func runProbe(options: Options) -> Int32 {
         try runtime.externalCollector.start()
         try runtime.supplementalCollector.start()
 
+        var mihomoTimer: Timer?
+        if options.checksRoutes {
+            let controller = discoverMihomoController()
+            runtime.mihomoController = controller
+            print("[routes] mihomo_controller=\(controller.transport)")
+            let client = runtime.mihomoClient
+            let tracker = runtime.mihomoTracker
+            mihomoTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                Task.detached {
+                    do {
+                        let data = try await client.get("/connections", from: controller)
+                        tracker.update(with: try MihomoConnectionsParser.parse(data))
+                    } catch {
+                        print("[routes] mihomo_fetch_failed error=\(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+        defer { mihomoTimer?.invalidate() }
+
         var accuracyResults: [CurlResult] = []
+        var routeExpectations: [String: TrafficRoute] = [:]
         if let url = options.accuracyURL {
             // 两个通道都要先经过一帧基线；外部通道 5 秒一帧，等两帧再开始。
             RunLoop.main.run(until: Date().addingTimeInterval(11))
@@ -469,6 +564,16 @@ private func runProbe(options: Options) -> Int32 {
                 if let proxied = runCurl(label: "system_proxy", url: url, proxy: "http://\(endpointLabel(endpoint))") {
                     accuracyResults.append(proxied)
                 }
+                if options.checksRoutes,
+                   let ruleDirect = runCurl(
+                       label: "rule_direct",
+                       url: Options.ruleDirectURL,
+                       proxy: "http://\(endpointLabel(endpoint))",
+                       extraArguments: ["-r", "0-19999999"]
+                   ) {
+                    accuracyResults.append(ruleDirect)
+                }
+                routeExpectations = ["system_proxy": .proxyNode, "rule_direct": .proxyRuleDirect]
             } else {
                 print("[accuracy] case=system_proxy skipped reason=no_system_proxy")
             }
@@ -486,6 +591,17 @@ private func runProbe(options: Options) -> Int32 {
         var accuracyPassed = true
         for result in accuracyResults {
             accuracyPassed = reportAccuracy(result, counters: runtime.counters) && accuracyPassed
+        }
+        if options.checksRoutes {
+            var routesPassed = !accuracyResults.isEmpty
+            for result in accuracyResults {
+                routesPassed = reportRoutes(
+                    result,
+                    expected: routeExpectations[result.label],
+                    counters: runtime.counters
+                ) && routesPassed
+            }
+            print("[routes] result=\(routesPassed ? "PASS" : "FAIL")")
         }
         if options.accuracyURL != nil {
             print("[accuracy] result=\(accuracyPassed && !accuracyResults.isEmpty ? "PASS" : "FAIL")")

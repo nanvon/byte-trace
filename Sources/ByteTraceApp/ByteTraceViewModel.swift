@@ -230,6 +230,41 @@ struct RouteBreakdown: Equatable {
 
     var hasKnownRoute: Bool { knownBytes > 0 }
 
+    /// 列表标签与卡片标题的摘要。开启 TUN 时几乎所有流量都会进代理内核，
+    /// 「经代理」比例接近 100% 没有信息量；读到 mihomo 出口信息时改为只统计走节点的部分。
+    /// 比例只在已区分路径的流量里计算：更新前的数据没有路径信息，算进分母会把比例压到接近 0。
+    struct Share: Equatable {
+        let title: String
+        let fraction: Double
+        let route: TrafficRoute
+        /// 已区分路径的流量占全部流量的比例。
+        let coverage: Double
+
+        var isPartial: Bool { coverage < 0.99 }
+        /// 大部分流量来自更新前、没有路径信息时，比例代表性不足，界面不显示。
+        var isRepresentative: Bool { coverage >= 0.5 }
+    }
+
+    var share: Share? {
+        guard hasKnownRoute else { return nil }
+        let coverage = fraction(of: knownBytes)
+        let nodeBytes = bytes(for: .proxyNode)
+        if nodeBytes > 0 || bytes(for: .proxyRuleDirect) > 0 {
+            return Share(title: "走节点", fraction: knownFraction(of: nodeBytes), route: .proxyNode, coverage: coverage)
+        }
+        return Share(title: "经代理", fraction: knownFraction(of: proxiedBytes), route: .proxied, coverage: coverage)
+    }
+
+    private func knownFraction(of bytes: Int64) -> Double {
+        let known = knownBytes
+        guard known > 0 else { return 0 }
+        return min(1, Double(bytes) / Double(known))
+    }
+
+    func bytes(for route: TrafficRoute) -> Int64 {
+        items.filter { $0.route == route }.reduce(0) { $0 + $1.bytes }
+    }
+
     func fraction(of bytes: Int64) -> Double {
         guard totalBytes > 0 else { return 0 }
         return min(1, Double(bytes) / Double(totalBytes))
@@ -1181,6 +1216,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             }
             if lane == .loopback, !acceptedDeltas.isEmpty {
                 lastSupplementalTrafficAt = Date()
+                if mihomoTimer == nil {
+                    updateMihomoPolling()
+                }
             }
             for routed in acceptedDeltas {
                 ingest(routed.delta, route: routed.route)
@@ -1277,7 +1315,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             mihomoStatus = readsMihomoConnections ? .idle : .disabled
             return
         }
-        guard mihomoTimer == nil else { return }
+        if mihomoStatus == .disabled { mihomoStatus = .idle }
+        // 只在最近有补充通道流量时运行定时器；空闲时停掉，避免每 2 秒的无效唤醒。
+        guard mihomoTimer == nil, hasRecentSupplementalTraffic else { return }
         let timer = Timer(timeInterval: Self.mihomoPollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.mihomoTimerFired()
@@ -1286,13 +1326,19 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         timer.tolerance = 0.5
         RunLoop.main.add(timer, forMode: .common)
         mihomoTimer = timer
-        if mihomoStatus == .disabled { mihomoStatus = .idle }
+        mihomoTimerFired()
+    }
+
+    private var hasRecentSupplementalTraffic: Bool {
+        guard let lastSupplementalTrafficAt else { return false }
+        return Date().timeIntervalSince(lastSupplementalTrafficAt) <= Self.mihomoActiveWindow
     }
 
     private func mihomoTimerFired() {
         guard readsMihomoConnections, wantsCollection, !mihomoFetchInFlight else { return }
-        guard let lastSupplementalTrafficAt,
-              Date().timeIntervalSince(lastSupplementalTrafficAt) <= Self.mihomoActiveWindow else {
+        guard hasRecentSupplementalTraffic else {
+            mihomoTimer?.invalidate()
+            mihomoTimer = nil
             if case .connected = mihomoStatus { mihomoStatus = .idle }
             return
         }
