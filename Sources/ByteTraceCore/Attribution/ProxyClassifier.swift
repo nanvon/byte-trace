@@ -51,10 +51,46 @@ public struct ProxyClassifier: Sendable {
         rules.first { $0.matches(identity) }
     }
 
+    /// 追加一个运行时识别出的代理进程（监听系统代理端口的进程）。
+    /// 已被现有规则覆盖的路径原样返回，避免重复规则改变 appKey。
+    public func addingDetectedProxy(executablePath: String) -> ProxyClassifier {
+        let identity = ProcessIdentity(
+            pid: nil,
+            nettopProcessName: "",
+            executablePath: executablePath
+        )
+        guard match(identity) == nil else { return self }
+        let name = URL(fileURLWithPath: executablePath).lastPathComponent
+        let key = Self.ruleKey(for: name)
+        guard !key.isEmpty else { return self }
+        return ProxyClassifier(
+            rules: rules + [
+                ProxyRule(key: key, displayName: name, executablePaths: [executablePath])
+            ]
+        )
+    }
+
+    static func ruleKey(for name: String) -> String {
+        String(
+            name.lowercased().unicodeScalars.filter {
+                ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "-" || $0 == "_" || $0 == "."
+            }
+        )
+    }
+
     public static let defaultClassifier = ProxyClassifier(
         rules: [
-            ProxyRule(key: "mihomo", displayName: "Mihomo", processNames: ["mihomo"]),
-            ProxyRule(key: "clashbar", displayName: "ClashBar", processNames: ["ClashBar"])
+            ProxyRule(
+                key: "mihomo",
+                displayName: "Mihomo",
+                processNames: ["mihomo", "verge-mihomo", "verge-mihomo-alpha", "clash-meta", "mihomo-darwin-arm64"]
+            ),
+            ProxyRule(key: "clashbar", displayName: "ClashBar", processNames: ["ClashBar"]),
+            ProxyRule(key: "clash", displayName: "Clash", processNames: ["clash"]),
+            ProxyRule(key: "sing-box", displayName: "sing-box", processNames: ["sing-box"]),
+            ProxyRule(key: "xray", displayName: "Xray", processNames: ["xray", "Xray"]),
+            ProxyRule(key: "v2ray", displayName: "V2Ray", processNames: ["v2ray"]),
+            ProxyRule(key: "hysteria", displayName: "Hysteria", processNames: ["hysteria"])
         ]
     )
 }

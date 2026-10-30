@@ -27,7 +27,7 @@ swift run ByteTraceProbe --duration 15 # 应用级采集
 
 ### Xcode 本地运行
 
-`ByteTrace.xcodeproj` 只用于在 Xcode 里一键运行、查看完整 `.app` 形态（读取 `Packaging/Info.plist` 和菜单栏图标等资源，`swift run` 拿不到这些）：打开工程，选 `ByteTrace` scheme 和 My Mac，⌘R。运行前先退出已安装的 ByteTrace，两者共用同一个 bundle ID、偏好设置和 SQLite 数据库。
+`ByteTrace.xcodeproj` 只用于在 Xcode 里一键运行、查看完整 `.app` 形态（读取 `Packaging/Info.plist` 和菜单栏图标等资源，`swift run` 拿不到这些）：打开工程，选 `ByteTrace` scheme 和 My Mac，⌘R。两者共用同一个 bundle ID、偏好设置和 SQLite 数据库；数据目录的 `collector.lock`（`DataDirectoryLock`，`flock`）保证同一时刻只有一个实例采集，后启动的实例会等待并在另一个实例退出后自动接管。
 
 - 应用 target 用 Xcode 同步文件夹引用 `Sources/ByteTraceApp/`，`ByteTraceCore` 通过本地 Swift Package 引用，Sparkle 通过远程 Swift Package 引用。新增源文件直接放进对应 `Sources/` 目录即可，不要手改 `project.pbxproj`。
 - 共享 scheme 未配置测试 target；命令行构建、测试、CI 和打包仍使用 `swift build` / `swift test` / `package_app.sh`，不依赖这个工程。发布版本真值是 `Packaging/Info.plist` 的 `CFBundleShortVersionString`；直接用 Xcode 运行时，应同时保持 `CFBundleVersion` 一致。
@@ -75,12 +75,14 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径>  →  process:<名称>  →  unknown:<FNV哈希>
 ```
 
-`appKey` 是 SQLite 的主键，**改动派生规则会切断历史数据的连续性**（老数据变成孤儿行）。
+`appKey` 是 SQLite 的主键，**改动派生规则会切断历史数据的连续性**（老数据变成孤儿行），必须同时在 `UsageStore.migrate()` 追加合并迁移。
+
+- `exec:` 使用 `ExecutablePathNormalizer.normalize` 后的路径：版本号目录（`2.1.314`、`v24.17.0`、`0.164.0-aarch64-apple-darwin`）、内嵌版本（`node-v22.22.2` → `node-*`）、16 位以上十六进制哈希与 UUID 目录折叠成 `*`，让 mise / fnm / 自更新 CLI 的各版本合并为一个应用；规则对应 schema 7 的迁移。无应用包的进程展示名优先用路径派生名（nettop 进程名最多 15 字符，自更新 CLI 的进程名可能就是版本号）。
 
 - `hostCandidate()` 会沿父进程链（最多 8 层）向上找「可执行文件位于其 `.app/Contents/` 内、且 bundlePath 最短」的祖先。这是 helper 进程（如浏览器子进程）能归属到主应用的原因。
 - `ProcessAttributionCache` 以 `(pid, processStartTime)` 为键，规避 pid 复用。
 - 分类 `AppCategory`：`userApp` / `systemProcess`（可执行文件位于 `/System/`、`/usr/bin/` 等前缀）/ `proxyTransport` / `unclassified`。
-- 新增代理进程：在 `ProxyClassifier.defaultClassifier` 加一条 `ProxyRule`（可按 bundleID / 可执行路径 / 进程名匹配）。代理流量**单独展示、不做反向抵扣、不计入应用总量**——UI 各处统一用 `category != .proxyTransport` 过滤，新增汇总逻辑时必须沿用。
+- 新增代理进程：在 `ProxyClassifier.defaultClassifier` 加一条 `ProxyRule`（可按 bundleID / 可执行路径 / 进程名匹配）。静态规则之外，补充通道里本地端点等于系统代理端点的 lo0 连接所属进程（代理监听端）会被自动登记为代理（`TrafficFilter.proxyListenerProcessTokens` → `ProcessAttributionCache.registerDetectedProxy`），路径持久化在 `UserDefaults` 键 `ByteTrace.detectedProxyExecutables`；代理内核常以 root 运行，lsof 看不到它的监听套接字，所以用 nettop 数据识别。代理流量**单独展示、不做反向抵扣、不计入应用总量**——UI 各处统一用 `category != .proxyTransport` 过滤，新增汇总逻辑时必须沿用。
 
 ## 存储
 
@@ -88,7 +90,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 四张表：`apps`、`daily_usage`（键 `accounting_version`+`day`+`app_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`，分钟粒度）、`collector_events`。
 
-**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 6`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
+**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 7`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
 
 **写入是累加而非幂等**：所有 upsert 都是 `ON CONFLICT ... DO UPDATE SET x = x + excluded.x`。同一批聚合重复 flush 会双计。`flush()` 成功后必须清空 pending（现有代码已如此）。
 
@@ -109,7 +111,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 - **UI 刷新受可见性门控**：`refreshIfNeeded` 在 `visibleSurfaceCount == 0` 时直接返回，菜单栏面板与主窗口各自用 `beginObservingUsage()` / `endObservingUsage()` 加减计数（`onAppear` / `onDisappear`），从 0 变 1 时立即补一次刷新。终止路径（`stop` / `shutdown` / 网络切换）传 `force: true` 绕过门控。采集与落库完全不受影响。
   **因此数据保留策略不能挂在 `refresh()` 里**——它已移到 `flushTimerFired`，否则无人打开界面时清理永远不会执行。
 - **「今天」是双数据源**：汇总数字来自 `daily_usage`，趋势图来自 `usage_buckets`（`usesBucketSummary` 与 `usesFineGrainedTimeline` 两个开关分别控制）。「最近 10 分钟 / 1 小时」两者都用分钟桶，「本周 / 本月」两者都用日汇总。
-- **nettop 的时间字段只有时钟没有日期**，`sampleDate(for:)` 把「今天」的年月日嫁接上去，跨零点存在已知误差。
+- **nettop 的时间字段只有时钟没有日期**，`NettopSampleClock.date(for:)` 把「今天」的年月日嫁接上去；结果比当前时间晚 1 小时以上时回退一天，零点前采样、零点后处理的帧仍记入前一天。
 - 设置持久化：`UserDefaults` 键 `ByteTrace.showSystemProcesses`、`ByteTrace.usageRetentionPolicy`（默认 90 天）；登录时启动用 `SMAppService.mainApp`。
 - 导出 `formatVersion` 硬编码在 `exportCurrentRange(to:)`，结构变更时需同步 bump。
 

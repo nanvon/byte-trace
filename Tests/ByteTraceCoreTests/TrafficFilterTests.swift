@@ -152,6 +152,19 @@ final class TrafficFilterTests: XCTestCase {
         )
     }
 
+    func testProxyListenerSideIdentifiesTheProxyProcess() {
+        let tokens = TrafficFilter.proxyListenerProcessTokens(
+            in: [
+                delta("Dia.1", source: "127.0.0.1:57123", target: "127.0.0.1:7890"),
+                delta("my-core.9", source: "127.0.0.1:7890", target: "127.0.0.1:57123"),
+                delta("other.3", source: "127.0.0.1:8080", target: "127.0.0.1:57124")
+            ],
+            proxyEndpoints: [proxyEndpoint]
+        )
+
+        XCTAssertEqual(tokens, ["my-core.9"])
+    }
+
     func testEndpointParsingAndLoopbackDetection() {
         XCTAssertEqual(
             NettopEndpoint.parse("127.0.0.1:7890"),

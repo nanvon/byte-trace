@@ -237,6 +237,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     private static let showSystemProcessesKey = "ByteTrace.showSystemProcesses"
     private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
+    private static let detectedProxyExecutablesKey = "ByteTrace.detectedProxyExecutables"
     private enum CollectorLane: Sendable {
         case external
         case loopback
@@ -250,6 +251,14 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private let aggregator: UsageAggregator?
     private let proxyEndpointMonitor = SystemProxyEndpointMonitor()
     private let supplementalReducer = SupplementalTrafficReducer()
+    private let instanceLock = DataDirectoryLock(
+        url: DataDirectoryLock.defaultLockURL(bundleIdentifier: ByteTraceViewModel.bundleIdentifier)
+    )
+    private var instanceLockRetryTimer: Timer?
+    private var instanceLockWaitStartedAt: Date?
+    /// 已检查过的系统代理监听进程令牌（`名称.pid`），避免每帧重复解析身份。
+    private var checkedProxyListenerTokens: Set<String> = []
+    private var detectedProxyExecutables: [String]
     private var flushTimer: Timer?
     private var restartTimer: Timer?
     private var restartAttempt = 0
@@ -301,6 +310,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         _usageRetentionPolicy = Published(
             initialValue: UsageRetentionPolicy(rawValue: storedRetentionPolicy ?? "") ?? .ninetyDays
         )
+        detectedProxyExecutables = UserDefaults.standard.stringArray(
+            forKey: Self.detectedProxyExecutablesKey
+        ) ?? []
+        for path in detectedProxyExecutables {
+            attributionCache.registerDetectedProxy(executablePath: path)
+        }
 
         var storageError: String?
         do {
@@ -419,6 +434,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             lastError = "当前网络不可用，恢复网络后会自动继续采集。"
             return
         }
+        guard instanceLock.tryAcquire() else {
+            waitForInstanceLock()
+            return
+        }
+        cancelInstanceLockWait()
 
         wantsCollection = true
         lastError = nil
@@ -451,8 +471,61 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
         proxyEndpointMonitor.stop()
         flushAfterStop()
+        cancelInstanceLockWait()
+        instanceLock.release()
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
+    }
+
+    /// 另一个实例（已安装版与 Xcode 运行版、或更新重启时的旧进程）持有数据目录锁时，
+    /// 本实例不采集。前 15 秒每 0.5 秒重试，覆盖旧实例退出前的落库；之后每 10 秒重试，
+    /// 另一个实例退出后自动接管。
+    private func waitForInstanceLock() {
+        if instanceLockWaitStartedAt == nil {
+            instanceLockWaitStartedAt = Date()
+            status = .starting
+            recordCollectorEvent(kind: "instance_lock_busy")
+        }
+        guard instanceLockRetryTimer == nil else { return }
+        scheduleInstanceLockRetry(interval: 0.5)
+    }
+
+    private func scheduleInstanceLockRetry(interval: TimeInterval) {
+        instanceLockRetryTimer?.invalidate()
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.instanceLockRetryTimerFired()
+            }
+        }
+        timer.tolerance = interval / 2
+        RunLoop.main.add(timer, forMode: .common)
+        instanceLockRetryTimer = timer
+    }
+
+    private func instanceLockRetryTimerFired() {
+        guard !wantsCollection else {
+            cancelInstanceLockWait()
+            return
+        }
+        if instanceLock.tryAcquire() {
+            instanceLock.release()
+            cancelInstanceLockWait()
+            start()
+            return
+        }
+        let waited = Date().timeIntervalSince(instanceLockWaitStartedAt ?? Date())
+        if waited >= 15, instanceLockRetryTimer?.timeInterval ?? 0 < 10 {
+            let message = "另一个 ByteTrace 正在采集同一份数据，本实例不会重复记录；另一个实例退出后会自动接管。"
+            lastError = message
+            status = .failed(message)
+            scheduleInstanceLockRetry(interval: 10)
+        }
+    }
+
+    private func cancelInstanceLockWait() {
+        instanceLockRetryTimer?.invalidate()
+        instanceLockRetryTimer = nil
+        instanceLockWaitStartedAt = nil
     }
 
     /// 更新退出前确认最终采样已保存；失败时交由更新窗口提供重试。
@@ -493,6 +566,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         networkPathMonitor.cancel()
         flushNow(forceRefresh: true)
+        cancelInstanceLockWait()
+        instanceLock.release()
         status = .stopped
     }
 
@@ -891,9 +966,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
             let acceptedDeltas: [NettopDelta]
             if lane == .loopback {
+                let proxyEndpoints = proxyEndpointMonitor.currentLoopbackEndpoints
+                detectProxyListeners(in: deltas, proxyEndpoints: proxyEndpoints)
                 acceptedDeltas = supplementalReducer.reduce(
                     deltas,
-                    proxyEndpoints: proxyEndpointMonitor.currentLoopbackEndpoints
+                    proxyEndpoints: proxyEndpoints
                 )
             } else {
                 acceptedDeltas = deltas
@@ -940,6 +1017,39 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 lastError = loopbackLastError
                 recordCollectorEvent(kind: "loopback_parse_schema_changed", details: message)
             }
+        }
+    }
+
+    /// 监听系统代理端口的进程就是代理内核。静态规则没覆盖到的（自编译内核、
+    /// 其他客户端）在这里登记为代理传输，避免它的外层流量混进应用总量。
+    private func detectProxyListeners(
+        in deltas: [NettopDelta],
+        proxyEndpoints: Set<NettopEndpoint>
+    ) {
+        let tokens = TrafficFilter.proxyListenerProcessTokens(
+            in: deltas,
+            proxyEndpoints: proxyEndpoints
+        )
+        guard !tokens.isEmpty else { return }
+        if checkedProxyListenerTokens.count > 256 {
+            checkedProxyListenerTokens.removeAll()
+        }
+        for rawToken in tokens where checkedProxyListenerTokens.insert(rawToken).inserted {
+            let identity = resolver.resolve(NettopProcessToken(rawValue: rawToken))
+            guard attributionCache.attribute(identity).category != .proxyTransport,
+                  let executablePath = identity.executablePath,
+                  attributionCache.registerDetectedProxy(executablePath: executablePath) else {
+                continue
+            }
+            detectedProxyExecutables.append(executablePath)
+            UserDefaults.standard.set(
+                detectedProxyExecutables,
+                forKey: Self.detectedProxyExecutablesKey
+            )
+            recordCollectorEvent(
+                kind: "proxy_process_detected",
+                details: URL(fileURLWithPath: executablePath).lastPathComponent
+            )
         }
     }
 
@@ -1581,33 +1691,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         return UsageTotals(downloadBytes: download, uploadBytes: upload)
     }
 
-    private static func sampleDate(for rawValue: String, fallback: Date = Date()) -> Date {
-        let timeParts = rawValue.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
-        let clock = timeParts[0].split(separator: ":")
-        guard clock.count == 3,
-              let hour = Int(clock[0]),
-              let minute = Int(clock[1]),
-              let second = Int(clock[2]),
-              (0..<24).contains(hour),
-              (0..<60).contains(minute),
-              (0..<60).contains(second) else {
-            return fallback
-        }
-
-        let calendar = Calendar.autoupdatingCurrent
-        var components = calendar.dateComponents([.year, .month, .day], from: fallback)
-        components.hour = hour
-        components.minute = minute
-        components.second = second
-        if timeParts.count == 2 {
-            let fractional = String(timeParts[1].prefix(9)).padding(
-                toLength: 9,
-                withPad: "0",
-                startingAt: 0
-            )
-            components.nanosecond = Int(fractional) ?? 0
-        }
-        return calendar.date(from: components) ?? fallback
+    private static func sampleDate(for rawValue: String) -> Date {
+        NettopSampleClock.date(for: rawValue)
     }
 
     private static func dayKey(for date: Date) -> String {

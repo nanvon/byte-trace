@@ -89,6 +89,67 @@ final class ProcessAttributorTests: XCTestCase {
         XCTAssertEqual(attributed.category, .systemProcess)
     }
 
+    func testVersionedExecutablesShareOneKeyAndStableName() {
+        let attributor = ProcessAttributor()
+        let first = attributor.attribute(
+            ProcessIdentity(
+                pid: 30,
+                nettopProcessName: "2.1.300",
+                executablePath: "/Users/u/.local/share/claude/versions/2.1.300"
+            )
+        )
+        let second = attributor.attribute(
+            ProcessIdentity(
+                pid: 31,
+                nettopProcessName: "2.1.314",
+                executablePath: "/Users/u/.local/share/claude/versions/2.1.314"
+            )
+        )
+        let node = attributor.attribute(
+            ProcessIdentity(
+                pid: 32,
+                nettopProcessName: "npm exec figma-developer-mcp --stdio",
+                executablePath: "/Users/u/.local/share/mise/installs/node/22.22.0/bin/node"
+            )
+        )
+
+        XCTAssertEqual(first.appKey, "exec:/Users/u/.local/share/claude/versions/*")
+        XCTAssertEqual(second.appKey, first.appKey)
+        XCTAssertEqual(first.displayName, "claude")
+        XCTAssertEqual(node.appKey, "exec:/Users/u/.local/share/mise/installs/node/*/bin/node")
+        XCTAssertEqual(node.displayName, "node")
+    }
+
+    func testTruncatedProcessNameUsesExecutableFileName() {
+        let attributed = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 33,
+                nettopProcessName: "SafariSearchUpl",
+                executablePath: "/System/Library/ExtensionKit/Extensions/SafariSearchUploadWorker.appex/Contents/MacOS/SafariSearchUploadWorker"
+            )
+        )
+
+        XCTAssertEqual(attributed.displayName, "SafariSearchUploadWorker")
+        XCTAssertEqual(attributed.category, .systemProcess)
+    }
+
+    func testDetectedProxyExecutableBecomesProxyTransport() {
+        let cache = ProcessAttributionCache()
+        let identity = ProcessIdentity(
+            pid: 34,
+            processStartTime: Date(timeIntervalSince1970: 1),
+            nettopProcessName: "my-core",
+            executablePath: "/opt/proxy/my-core"
+        )
+        XCTAssertEqual(cache.attribute(identity).category, .unclassified)
+
+        XCTAssertTrue(cache.registerDetectedProxy(executablePath: "/opt/proxy/my-core"))
+        XCTAssertFalse(cache.registerDetectedProxy(executablePath: "/opt/proxy/my-core"))
+        let attributed = cache.attribute(identity)
+        XCTAssertEqual(attributed.category, .proxyTransport)
+        XCTAssertEqual(attributed.appKey, "proxy:my-core")
+    }
+
     func testProxyRulesUseExactProcessNames() {
         let classifier = ProxyClassifier(
             rules: [
@@ -149,7 +210,7 @@ final class ProcessAttributorTests: XCTestCase {
 
         XCTAssertEqual(
             attributed.appKey,
-            "exec:/Users/nanvon/.local/share/fnm/node-versions/v24.17.0/installation/bin/node"
+            "exec:/Users/nanvon/.local/share/fnm/node-versions/*/installation/bin/node"
         )
         XCTAssertNotEqual(attributed.category, .userApp)
     }

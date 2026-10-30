@@ -42,6 +42,25 @@ public struct TrafficFilter: Sendable {
         !shouldKeepSupplemental(delta)
     }
 
+    /// 本地端点就是系统代理端点的回环连接属于代理进程自身（监听端）。
+    /// 代理内核常以 root 运行，lsof 看不到它的监听套接字，nettop 却能看到这一侧连接，
+    /// 据此识别未在静态规则里的代理进程。返回 nettop 进程令牌（`名称.pid`）。
+    public static func proxyListenerProcessTokens(
+        in deltas: [NettopDelta],
+        proxyEndpoints: Set<NettopEndpoint>
+    ) -> Set<String> {
+        guard !proxyEndpoints.isEmpty else { return [] }
+        var tokens: Set<String> = []
+        for delta in deltas where delta.interface == "lo0" {
+            guard let localEndpoint = delta.localEndpoint,
+                  proxyEndpoints.contains(localEndpoint) else {
+                continue
+            }
+            tokens.insert(delta.processName)
+        }
+        return tokens
+    }
+
     public static func isLoopbackTarget(_ target: String) -> Bool {
         NettopEndpoint.parse(target)?.isLoopback == true
     }

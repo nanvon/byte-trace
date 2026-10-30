@@ -140,6 +140,85 @@ final class UsageStoreMigrationTests: XCTestCase {
         )
     }
 
+    func testVersionedExecutableKeysMergeIntoNormalizedKey() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("byte-trace-exec-normalize-\(UUID().uuidString).sqlite3")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + "-wal")
+            try? FileManager.default.removeItem(atPath: url.path + "-shm")
+        }
+
+        let database = try SQLiteDatabase(url: url)
+        try createVersionFiveTables(in: database)
+        try database.execute(
+            """
+            INSERT INTO apps VALUES (
+                'exec:/Users/u/.local/share/claude/versions/2.1.300', NULL, NULL,
+                '/Users/u/.local/share/claude/versions/2.1.300', '2.1.300',
+                'unclassified', '1754000000.000000', '1754000000.000000'
+            );
+            INSERT INTO apps VALUES (
+                'exec:/Users/u/.local/share/claude/versions/2.1.314', NULL, NULL,
+                '/Users/u/.local/share/claude/versions/2.1.314', '2.1.314',
+                'unclassified', '1754000100.000000', '1754000200.000000'
+            );
+            INSERT INTO apps VALUES (
+                'exec:/usr/bin/curl', NULL, NULL, '/usr/bin/curl', 'curl',
+                'system_process', '1754000000.000000', '1754000000.000000'
+            );
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'exec:/Users/u/.local/share/claude/versions/2.1.300', 10, 1, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'exec:/Users/u/.local/share/claude/versions/2.1.314', 20, 2, 2, '1754000200.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-19', 'exec:/Users/u/.local/share/claude/versions/2.1.314', 5, 0, 1, '1754086400.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'exec:/usr/bin/curl', 7, 7, 1, '1754000000.000000');
+            INSERT INTO usage_buckets VALUES (1754000000, 'exec:/Users/u/.local/share/claude/versions/2.1.300', 10, 1, 1, '1754000000.000000');
+            INSERT INTO usage_buckets VALUES (1754000000, 'exec:/Users/u/.local/share/claude/versions/2.1.314', 20, 2, 2, '1754000200.000000');
+            PRAGMA user_version = 5;
+            """
+        )
+
+        _ = try UsageStore(databaseURL: url)
+        let migrated = try SQLiteDatabase(url: url)
+        let key = "exec:/Users/u/.local/share/claude/versions/*"
+        XCTAssertEqual(
+            try migrated.scalarInt64("SELECT COUNT(*) FROM apps WHERE app_key LIKE 'exec:/Users/u/.local/share/claude/%';"),
+            1
+        )
+        XCTAssertEqual(
+            try migrated.scalarInt64(
+                "SELECT COUNT(*) FROM apps WHERE app_key = '\(key)' AND display_name = 'claude' AND executable_path LIKE '%2.1.314' AND first_seen_at = '1754000000.000000';"
+            ),
+            1
+        )
+        XCTAssertEqual(
+            try migrated.scalarInt64(
+                "SELECT download_bytes FROM daily_usage WHERE app_key = '\(key)' AND day = '2025-07-18';"
+            ),
+            30
+        )
+        XCTAssertEqual(
+            try migrated.scalarInt64(
+                "SELECT sample_count FROM daily_usage WHERE app_key = '\(key)' AND day = '2025-07-18';"
+            ),
+            3
+        )
+        XCTAssertEqual(
+            try migrated.scalarInt64("SELECT COUNT(*) FROM daily_usage WHERE app_key = '\(key)';"),
+            2
+        )
+        XCTAssertEqual(
+            try migrated.scalarInt64(
+                "SELECT upload_bytes FROM usage_buckets WHERE app_key = '\(key)' AND bucket_start = 1754000000;"
+            ),
+            3
+        )
+        XCTAssertEqual(
+            try migrated.scalarInt64("SELECT download_bytes FROM daily_usage WHERE app_key = 'exec:/usr/bin/curl';"),
+            7
+        )
+        XCTAssertEqual(try migrated.scalarInt64("PRAGMA user_version;"), UsageStore.schemaVersion)
+    }
+
     private func seedLegacyCCBarUsage(at url: URL, sampleDate: Date) throws {
         let database = try SQLiteDatabase(url: url)
         try createVersionFiveTables(in: database)

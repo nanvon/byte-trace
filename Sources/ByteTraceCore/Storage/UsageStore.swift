@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 6
+    public static let schemaVersion: Int64 = 7
     public static let accountingVersion: Int64 = 3
 
     private let database: SQLiteDatabase
@@ -837,6 +837,137 @@ public final class UsageStore: @unchecked Sendable {
         if currentVersion <= 5 {
             try migrateAccountingVersion()
         }
+
+        if currentVersion <= 6 {
+            try migrateVersionedExecutablePaths()
+        }
+    }
+
+    /// 版本 7：`exec:` appKey 改为归一化路径（版本号、哈希目录折叠成 `*`），
+    /// 把同一工具各版本的历史行合并到新 appKey。所有口径一并合并，写入仍是累加。
+    private func migrateVersionedExecutablePaths() throws {
+        try database.execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            var renames: [(oldKey: String, newKey: String, app: StoredApp, category: String)] = []
+            let statement = try database.prepare(
+                """
+                SELECT app_key, bundle_id, bundle_path, executable_path, display_name,
+                       category, first_seen_at, last_seen_at
+                FROM apps
+                WHERE app_key LIKE 'exec:%';
+                """
+            )
+            defer { sqlite3_finalize(statement) }
+            while true {
+                let result = sqlite3_step(statement)
+                if result == SQLITE_DONE { break }
+                guard result == SQLITE_ROW else {
+                    throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+                }
+                guard let oldKey = database.columnString(statement, at: 0) else { continue }
+                let path = String(oldKey.dropFirst("exec:".count))
+                let newKey = "exec:\(ExecutablePathNormalizer.normalize(path))"
+                guard newKey != oldKey else { continue }
+                let displayName = ExecutablePathNormalizer.displayName(forExecutablePath: path)
+                    ?? database.columnString(statement, at: 4)
+                    ?? "未知进程"
+                renames.append((
+                    oldKey,
+                    newKey,
+                    StoredApp(
+                        bundleID: database.columnString(statement, at: 1),
+                        bundlePath: database.columnString(statement, at: 2),
+                        executablePath: database.columnString(statement, at: 3),
+                        displayName: displayName,
+                        firstSeenAt: database.columnString(statement, at: 6) ?? "0.000000",
+                        lastSeenAt: database.columnString(statement, at: 7) ?? "0.000000"
+                    ),
+                    database.columnString(statement, at: 5) ?? AppCategory.unclassified.rawValue
+                ))
+            }
+
+            for rename in renames {
+                try upsertRenamedApp(rename.app, appKey: rename.newKey, category: rename.category)
+                try mergeUsageRows(in: "daily_usage", timeColumn: "day", from: rename.oldKey, to: rename.newKey)
+                try mergeUsageRows(in: "usage_buckets", timeColumn: "bucket_start", from: rename.oldKey, to: rename.newKey)
+                let deleteApp = try database.prepare("DELETE FROM apps WHERE app_key = ?;")
+                defer { sqlite3_finalize(deleteApp) }
+                try database.bind(rename.oldKey, at: 1, in: deleteApp)
+                try database.stepDone(deleteApp)
+            }
+            try database.execute("PRAGMA user_version = 7;")
+            try database.execute("COMMIT;")
+        } catch {
+            try? database.execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// 合并到同一新 appKey 的多行里，以最后出现的那行为准更新元数据。
+    private func upsertRenamedApp(_ storedApp: StoredApp, appKey: String, category: String) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO apps (
+                app_key, bundle_id, bundle_path, executable_path,
+                display_name, category, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(app_key) DO UPDATE SET
+                bundle_id = CASE WHEN excluded.last_seen_at >= apps.last_seen_at
+                    THEN excluded.bundle_id ELSE apps.bundle_id END,
+                bundle_path = CASE WHEN excluded.last_seen_at >= apps.last_seen_at
+                    THEN excluded.bundle_path ELSE apps.bundle_path END,
+                executable_path = CASE WHEN excluded.last_seen_at >= apps.last_seen_at
+                    THEN excluded.executable_path ELSE apps.executable_path END,
+                display_name = CASE WHEN excluded.last_seen_at >= apps.last_seen_at
+                    THEN excluded.display_name ELSE apps.display_name END,
+                category = CASE WHEN excluded.last_seen_at >= apps.last_seen_at
+                    THEN excluded.category ELSE apps.category END,
+                first_seen_at = MIN(apps.first_seen_at, excluded.first_seen_at),
+                last_seen_at = MAX(apps.last_seen_at, excluded.last_seen_at);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(appKey, at: 1, in: statement)
+        try database.bind(storedApp.bundleID, at: 2, in: statement)
+        try database.bind(storedApp.bundlePath, at: 3, in: statement)
+        try database.bind(storedApp.executablePath, at: 4, in: statement)
+        try database.bind(storedApp.displayName, at: 5, in: statement)
+        try database.bind(category, at: 6, in: statement)
+        try database.bind(storedApp.firstSeenAt, at: 7, in: statement)
+        try database.bind(storedApp.lastSeenAt, at: 8, in: statement)
+        try database.stepDone(statement)
+    }
+
+    private func mergeUsageRows(
+        in table: String,
+        timeColumn: String,
+        from oldAppKey: String,
+        to newAppKey: String
+    ) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO \(table) (
+                accounting_version, \(timeColumn), app_key, download_bytes,
+                upload_bytes, sample_count, updated_at
+            )
+            SELECT accounting_version, \(timeColumn), ?, download_bytes,
+                   upload_bytes, sample_count, updated_at
+            FROM \(table)
+            WHERE app_key = ?
+            ON CONFLICT(accounting_version, \(timeColumn), app_key) DO UPDATE SET
+                download_bytes = \(table).download_bytes + excluded.download_bytes,
+                upload_bytes = \(table).upload_bytes + excluded.upload_bytes,
+                sample_count = \(table).sample_count + excluded.sample_count,
+                updated_at = MAX(\(table).updated_at, excluded.updated_at);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+
+        try database.bind(newAppKey, at: 1, in: statement)
+        try database.bind(oldAppKey, at: 2, in: statement)
+        try database.stepDone(statement)
+        try deleteRows(in: table, for: oldAppKey)
     }
 
     private func migrateAccountingVersion() throws {

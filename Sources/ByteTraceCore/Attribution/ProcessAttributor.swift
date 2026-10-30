@@ -71,7 +71,7 @@ public struct ProcessAttributor: Sendable {
         } else if let bundlePath = host.bundlePath {
             appKey = "app:\(bundlePath)"
         } else if let executablePath {
-            appKey = "exec:\(executablePath)"
+            appKey = "exec:\(ExecutablePathNormalizer.normalize(executablePath))"
         } else if !identity.nettopProcessName.isEmpty {
             appKey = "process:\(identity.nettopProcessName)"
         } else {
@@ -143,6 +143,10 @@ public struct ProcessAttributor: Sendable {
     }
 
     private func displayName(for identity: ProcessIdentity, host: HostCandidate) -> String {
+        if host.bundleID == nil, host.bundlePath == nil,
+           let pathName = executableDisplayName(for: identity) {
+            return pathName
+        }
         if let displayName = host.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
            !displayName.isEmpty {
             return displayName
@@ -155,6 +159,26 @@ public struct ProcessAttributor: Sendable {
             return URL(fileURLWithPath: executablePath).lastPathComponent
         }
         return "未知进程"
+    }
+
+    /// 无应用包的命令行进程：nettop 进程名最多 15 个字符，自更新 CLI 的进程名还可能
+    /// 就是版本号（`2.1.314`）。路径带版本目录、或进程名是路径文件名的截断前缀时，
+    /// 改用路径派生的稳定名称，避免同一 appKey 的展示名随版本或截断来回变化。
+    private func executableDisplayName(for identity: ProcessIdentity) -> String? {
+        guard let executablePath = Self.canonicalPath(identity.executablePath),
+              let pathName = ExecutablePathNormalizer.displayName(forExecutablePath: executablePath),
+              !pathName.isEmpty else {
+            return nil
+        }
+        let processName = (identity.displayName ?? identity.nettopProcessName)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if ExecutablePathNormalizer.normalize(executablePath) != executablePath
+            || processName.isEmpty
+            || ExecutablePathNormalizer.isVersionLike(processName)
+            || (pathName.count > processName.count && pathName.hasPrefix(processName)) {
+            return pathName
+        }
+        return nil
     }
 
     private static func isInsideAppContents(_ executablePath: String, bundlePath: String) -> Bool {
@@ -213,7 +237,7 @@ public final class ProcessAttributionCache: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private let attributor: ProcessAttributor
+    private var attributor: ProcessAttributor
     private let maxCount: Int
     private var cache: [CacheKey: AttributedProcess] = [:]
     private var accessOrder: [CacheKey] = []
@@ -229,7 +253,10 @@ public final class ProcessAttributionCache: @unchecked Sendable {
     public func attribute(_ identity: ProcessIdentity) -> AttributedProcess {
         guard let pid = identity.pid,
               let processStartTime = identity.processStartTime else {
-            return attributor.attribute(identity)
+            lock.lock()
+            let currentAttributor = attributor
+            lock.unlock()
+            return currentAttributor.attribute(identity)
         }
 
         let key = CacheKey(pid: pid, processStartTime: processStartTime)
@@ -245,7 +272,10 @@ public final class ProcessAttributionCache: @unchecked Sendable {
         }
         lock.unlock()
 
-        let attributed = attributor.attribute(identity)
+        lock.lock()
+        let currentAttributor = attributor
+        lock.unlock()
+        let attributed = currentAttributor.attribute(identity)
         lock.lock()
         if cache[key] == nil {
             cache[key] = attributed
@@ -261,6 +291,23 @@ public final class ProcessAttributionCache: @unchecked Sendable {
             accessOrder.removeFirst()
             cache.removeValue(forKey: oldest)
         }
+    }
+
+    /// 把运行时识别出的代理进程加入分类规则；规则有变化时清空缓存并返回 true。
+    @discardableResult
+    public func registerDetectedProxy(executablePath: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let classifier = attributor.proxyClassifier.addingDetectedProxy(
+            executablePath: executablePath
+        )
+        guard classifier.rules.count != attributor.proxyClassifier.rules.count else {
+            return false
+        }
+        attributor = ProcessAttributor(proxyClassifier: classifier)
+        cache.removeAll(keepingCapacity: true)
+        accessOrder.removeAll(keepingCapacity: true)
+        return true
     }
 
     public func removeAll() {
