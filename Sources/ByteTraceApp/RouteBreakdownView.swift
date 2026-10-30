@@ -2,61 +2,49 @@ import ByteTraceCore
 import SwiftUI
 
 enum RouteColor {
-    static func color(for route: TrafficRoute?) -> Color {
-        switch route {
-        case .direct: return .green
-        case .proxied: return .purple
-        case .proxyNode: return .indigo
-        case .proxyRuleDirect: return .teal
-        case nil: return Color.primary.opacity(0.18)
-        }
-    }
+    static let direct = Color.green
+    static let proxy = Color.indigo
+    /// 未读到 mihomo 连接表、无法分摊出口的经代理流量。
+    static let unknown = Color.gray
 }
 
-/// 流量路径卡片：一条分段条加逐项明细。
-struct RouteBreakdownCard: View {
+/// 直连 / 代理拆分卡片：标题行带代理占比，下面一条分段条和一行图例。
+struct RouteSplitCard: View {
     let title: String
-    let breakdown: RouteBreakdown
-    let footnote: String?
-    var showsProxiedShare = true
+    let split: RouteSplit
+    /// 显示在卡片底部的必要说明。
+    var note: String?
+    /// 悬停时显示的口径说明。
+    var help: String?
+    var showsProxyShare = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
                 Text(title)
                     .font(.headline)
                 Spacer()
-                if showsProxiedShare, let share = breakdown.share, share.isRepresentative {
-                    Text("\(share.isPartial ? "已区分部分中" : "")\(share.title) \(percent(share.fraction))")
+                if showsProxyShare, split.isRepresentative {
+                    Text("\(split.isPartial ? "已区分部分中" : "")代理 \(percent(split.proxyFraction))")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
             }
 
-            RouteSegmentBar(breakdown: breakdown, height: 8)
+            RouteSegmentBar(split: split, height: 8)
 
-            VStack(spacing: 6) {
-                ForEach(breakdown.items) { item in
-                    HStack(spacing: 8) {
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(RouteColor.color(for: item.route))
-                            .frame(width: 8, height: 8)
-                        Text(item.title)
-                        Spacer()
-                        Text(ByteTraceViewModel.formatBytes(item.bytes))
-                            .foregroundStyle(.secondary)
-                        Text(percent(breakdown.fraction(of: item.bytes)))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 52, alignment: .trailing)
-                    }
-                    .font(.callout)
-                    .monospacedDigit()
+            HStack(spacing: 20) {
+                legend(color: RouteColor.direct, title: "直连", bytes: split.directBytes)
+                legend(color: RouteColor.proxy, title: "代理流量", bytes: split.proxyBytes)
+                if split.unknownBytes > 0 {
+                    legend(color: RouteColor.unknown, title: "出口未知", bytes: split.unknownBytes)
                 }
+                Spacer(minLength: 0)
             }
 
-            if let footnote {
-                Text(footnote)
+            if let note = combinedNote {
+                Text(note)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -65,12 +53,43 @@ struct RouteBreakdownCard: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
         .cardSurface()
+        .help(help ?? "")
     }
 
-    static func footnote(usesToday: Bool) -> String {
-        var text = "直连：没有经过本机代理或 TUN。经代理：通过系统代理或 TUN 交给本机代理 / VPN 转发。"
-        if usesToday {
-            text += "「最近 1 小时」的路径按今天的数据统计。"
+    private func legend(color: Color, title: String, bytes: Int64) -> some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(color)
+                .frame(width: 8, height: 8)
+            Text(title)
+            Text(ByteTraceViewModel.formatBytes(bytes))
+                .fontWeight(.semibold)
+            Text(percent(split.fraction(of: bytes)))
+                .foregroundStyle(.secondary)
+        }
+        .font(.callout)
+        .monospacedDigit()
+        .accessibilityElement(children: .combine)
+    }
+
+    private var combinedNote: String? {
+        var parts: [String] = []
+        if let note { parts.append(note) }
+        if split.isPartial, split.unattributedBytes > 0 {
+            parts.append("另有 \(ByteTraceViewModel.formatBytes(split.unattributedBytes)) 发生在路径统计启用前，未区分直连 / 代理。")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    /// 菜单栏、主窗口共用的口径说明。
+    static func help(for split: RouteSplit) -> String {
+        var text = "代理流量：经代理节点（机场）转发的应用流量；进了代理内核但命中直连规则的算直连。"
+        text += "出口未确认的短连接按同一应用已确认的比例估算。不含加密协议开销，机场计费通常略高。"
+        if split.unknownBytes > 0 {
+            text += "未读到 mihomo 连接表的经代理流量无法区分出口，记为「出口未知」，不计入代理流量。"
+        }
+        if split.isPartial, split.unattributedBytes > 0 {
+            text += "路径统计启用前的 \(ByteTraceViewModel.formatBytes(split.unattributedBytes)) 没有路径记录，不计入。"
         }
         return text
     }
@@ -81,16 +100,16 @@ struct RouteBreakdownCard: View {
 }
 
 struct RouteSegmentBar: View {
-    let breakdown: RouteBreakdown
+    let split: RouteSplit
     var height: CGFloat = 6
 
     var body: some View {
         GeometryReader { geometry in
             HStack(spacing: 1) {
-                ForEach(breakdown.items) { item in
+                ForEach(segments, id: \.title) { segment in
                     Rectangle()
-                        .fill(RouteColor.color(for: item.route))
-                        .frame(width: max(0, geometry.size.width * breakdown.fraction(of: item.bytes) - 1))
+                        .fill(segment.color)
+                        .frame(width: max(0, geometry.size.width * split.fraction(of: segment.bytes) - 1))
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -99,5 +118,13 @@ struct RouteSegmentBar: View {
         .background(Color.primary.opacity(0.06))
         .clipShape(Capsule())
         .accessibilityHidden(true)
+    }
+
+    private var segments: [(title: String, color: Color, bytes: Int64)] {
+        [
+            ("直连", RouteColor.direct, split.directBytes),
+            ("代理", RouteColor.proxy, split.proxyBytes),
+            ("出口未知", RouteColor.unknown, split.unknownBytes)
+        ].filter { $0.bytes > 0 }
     }
 }

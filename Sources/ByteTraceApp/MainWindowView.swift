@@ -238,68 +238,61 @@ private struct MainUsagePage: View {
         .fixedSize()
     }
 
+    /// 总量 | 代理流量 | 直连。当前范围没有任何路径记录时，后两张换成上行 / 下行。
+    /// 代理内核的外层收发（含规则直连）只在「代理传输」页展示，不放在这里，避免和代理流量混淆。
     private var summaryCards: some View {
         let totals = model.selectedRangeTotals
+        let split = model.routeSplit(for: model.rangeRecords)
         return LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
+            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3),
             spacing: 12
         ) {
             SummaryCard(
                 title: "总量",
                 swatch: nil,
                 value: totals.totalBytes,
-                caption: "不含代理传输"
+                caption: directionCaption(upload: totals.uploadBytes, download: totals.downloadBytes)
             )
-            SummaryCard(
-                title: "下行",
-                swatch: TrafficColor.download,
-                value: totals.downloadBytes,
-                caption: shareCaption(totals.downloadBytes, of: totals.totalBytes)
-            )
-            SummaryCard(
-                title: "上行",
-                swatch: TrafficColor.upload,
-                value: totals.uploadBytes,
-                caption: shareCaption(totals.uploadBytes, of: totals.totalBytes)
-            )
-            SummaryCard(
-                title: "代理传输",
-                swatch: TrafficColor.proxy,
-                value: model.selectedRangeProxyTotals.totalBytes,
-                caption: "单独展示，不计入总量"
-            )
+            if split.hasKnownRoute {
+                routeSummaryCards(split: split, usesToday: model.routeBreakdownUsesToday)
+            } else {
+                SummaryCard(
+                    title: "上行",
+                    swatch: TrafficColor.upload,
+                    value: totals.uploadBytes,
+                    caption: shareCaption(totals.uploadBytes, of: totals.totalBytes)
+                )
+                SummaryCard(
+                    title: "下行",
+                    swatch: TrafficColor.download,
+                    value: totals.downloadBytes,
+                    caption: shareCaption(totals.downloadBytes, of: totals.totalBytes)
+                )
+            }
         }
     }
 
-    private func shareCaption(_ value: Int64, of total: Int64) -> String {
-        guard total > 0 else { return "占 0%" }
-        let fraction = Double(value) / Double(total)
-        return "占 \(fraction.formatted(.percent.precision(.fractionLength(1))))"
-    }
-
-    /// 概览按全部非代理流量、应用页与系统页按本页记录拆分直连与经代理。
+    /// 概览的直连 / 代理已在顶部卡片里；应用页与系统页按本页记录拆分，代理传输页估算外层去向。
     @ViewBuilder
     private var routeSection: some View {
         if page == .proxy, searchText.isEmpty,
            let estimate = model.proxyTransportEstimate(
                proxyBytes: model.selectedRangeProxyTotals.totalBytes
            ) {
-            RouteBreakdownCard(
+            RouteSplitCard(
                 title: "代理外层流量去向（估算）",
-                breakdown: estimate,
-                footnote: "按 mihomo 连接表中应用侧「节点 / 规则直连」的字节比例估算代理内核外层连接的去向，仅供参考，不计入应用总量。",
-                showsProxiedShare: false
+                split: estimate,
+                note: "按应用侧直连 / 代理的字节比例估算，不计入应用总量。",
+                showsProxyShare: false
             )
-        } else if page != .proxy, searchText.isEmpty {
-            let records = page == .overview
-                ? model.rangeRecords
-                : model.rangeRecords.filter(page.includes)
-            let breakdown = model.routeBreakdown(for: records)
-            if breakdown.hasKnownRoute {
-                RouteBreakdownCard(
-                    title: "流量路径",
-                    breakdown: breakdown,
-                    footnote: RouteBreakdownCard.footnote(usesToday: model.routeBreakdownUsesToday)
+        } else if page == .applications || page == .system, searchText.isEmpty {
+            let split = model.routeSplit(for: model.rangeRecords.filter(page.includes))
+            if split.hasKnownRoute {
+                RouteSplitCard(
+                    title: "直连与代理",
+                    split: split,
+                    note: model.routeBreakdownUsesToday ? "「最近 1 小时」按今天的比例估算。" : nil,
+                    help: RouteSplitCard.help(for: split)
                 )
             }
         }
@@ -322,11 +315,11 @@ private struct MainUsagePage: View {
                 UsageTable(
                     records: visible,
                     shareBase: shareBase,
-                    proxiedShare: { record in
-                        guard page != .proxy, !model.routeBreakdownUsesToday else { return nil }
-                        guard let share = model.routeBreakdown(for: [record]).share,
-                              share.isRepresentative else { return nil }
-                        return share
+                    // 路径只有日粒度，「最近 1 小时」逐行比例没有意义，整列不显示。
+                    showsProxyColumn: page != .proxy && !model.routeBreakdownUsesToday,
+                    proxyShare: { record in
+                        let split = model.routeSplit(for: [record])
+                        return split.isRepresentative ? split.proxyFraction : nil
                     },
                     subtitle: model.subtitle(for:)
                 )
@@ -371,11 +364,57 @@ private struct MainUsagePage: View {
     }
 }
 
+/// 代理流量与直连两张统计卡，概览与应用详情共用；口径与菜单栏「代理流量」一致。
+@MainActor
+@ViewBuilder
+private func routeSummaryCards(split: RouteSplit, usesToday: Bool) -> some View {
+    let help = RouteSplitCard.help(for: split)
+    SummaryCard(
+        title: "代理流量",
+        swatch: RouteColor.proxy,
+        value: split.proxyBytes,
+        caption: split.unknownBytes > 0
+            ? "另有 \(ByteTraceViewModel.formatBytes(split.unknownBytes)) 出口未知"
+            : routeCaption(split.proxyBytes, in: split, usesToday: usesToday),
+        help: help
+    )
+    SummaryCard(
+        title: "直连",
+        swatch: RouteColor.direct,
+        value: split.directBytes,
+        caption: routeCaption(split.directBytes, in: split, usesToday: usesToday),
+        help: help
+    )
+}
+
+/// 覆盖完整时给占比；大部分流量没有路径记录时不给比例，改为说明未区分的量。
+@MainActor
+private func routeCaption(_ bytes: Int64, in split: RouteSplit, usesToday: Bool) -> String {
+    let percent = split.fraction(of: bytes).formatted(.percent.precision(.fractionLength(1)))
+    if usesToday { return "按今天的比例估算 · \(percent)" }
+    if !split.isPartial { return "占 \(percent)" }
+    if split.isRepresentative { return "已区分部分的 \(percent)" }
+    return "\(ByteTraceViewModel.formatBytes(split.unattributedBytes)) 未区分（统计启用前）"
+}
+
+@MainActor
+private func directionCaption(upload: Int64, download: Int64) -> String {
+    "↑ \(ByteTraceViewModel.formatBytes(upload))　↓ \(ByteTraceViewModel.formatBytes(download))"
+}
+
+@MainActor
+private func shareCaption(_ value: Int64, of total: Int64) -> String {
+    guard total > 0 else { return "占 0%" }
+    let fraction = Double(value) / Double(total)
+    return "占 \(fraction.formatted(.percent.precision(.fractionLength(1))))"
+}
+
 private struct SummaryCard: View {
     let title: String
     let swatch: Color?
     let value: Int64
     let caption: String
+    var help: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -408,6 +447,7 @@ private struct SummaryCard: View {
         .padding(.vertical, 14)
         .cardSurface()
         .accessibilityElement(children: .combine)
+        .help(help ?? "")
     }
 }
 
@@ -426,8 +466,8 @@ private struct TrendChartCard: View {
                 Text("流量趋势 · \(range.chartUnitTitle)")
                     .font(.headline)
                 Spacer()
-                legend(color: TrafficColor.download, title: "下行")
                 legend(color: TrafficColor.upload, title: "上行")
+                legend(color: TrafficColor.download, title: "下行")
             }
 
             if bars.isEmpty {
@@ -575,7 +615,7 @@ private struct TrendChartCard: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(timeTitle(for: bar))
                 .font(.caption.weight(.semibold))
-            Text("↓ \(ByteTraceViewModel.formatBytes(bar.downloadBytes))　↑ \(ByteTraceViewModel.formatBytes(bar.uploadBytes))")
+            Text("↑ \(ByteTraceViewModel.formatBytes(bar.uploadBytes))　↓ \(ByteTraceViewModel.formatBytes(bar.downloadBytes))")
                 .font(.caption)
             if let name = bar.topAppName, bar.totalBytes > 0, bar.topAppBytes > 0 {
                 let share = min(1, Double(bar.topAppBytes) / Double(bar.totalBytes))
@@ -610,15 +650,18 @@ private struct TrendChartCard: View {
     }
 }
 
-/// 应用、代理传输、系统进程共用的表格：应用 | 下行 | 上行 | 合计 | 占比。
+/// 应用、代理传输、系统进程共用的表格：应用 | 上行 | 下行 | 合计 | 代理 | 占比。
 private struct UsageTable: View {
     let records: [DailyUsageRecord]
     let shareBase: Int64
-    var proxiedShare: (DailyUsageRecord) -> RouteBreakdown.Share? = { _ in nil }
+    var showsProxyColumn = false
+    /// 经代理节点转发的流量占比；没有足够的路径记录时为 nil。
+    var proxyShare: (DailyUsageRecord) -> Double? = { _ in nil }
     var subtitle: (DailyUsageRecord) -> String? = { _ in nil }
 
-    private static let numberColumnWidth: CGFloat = 90
-    private static let shareColumnWidth: CGFloat = 150
+    private static let numberColumnWidth: CGFloat = 84
+    private static let proxyColumnWidth: CGFloat = 52
+    private static let shareColumnWidth: CGFloat = 120
 
     var body: some View {
         let duplicateNames = ByteTraceViewModel.duplicateDisplayNames(in: records)
@@ -626,12 +669,17 @@ private struct UsageTable: View {
             HStack(spacing: 12) {
                 Text("名称")
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text("下行")
-                    .frame(width: Self.numberColumnWidth, alignment: .trailing)
                 Text("上行")
+                    .frame(width: Self.numberColumnWidth, alignment: .trailing)
+                Text("下行")
                     .frame(width: Self.numberColumnWidth, alignment: .trailing)
                 Text("合计")
                     .frame(width: Self.numberColumnWidth, alignment: .trailing)
+                if showsProxyColumn {
+                    Text("代理")
+                        .frame(width: Self.proxyColumnWidth, alignment: .trailing)
+                        .help("代理流量（经机场节点转发）占该应用流量的比例；规则直连不算。")
+                }
                 Text("占比")
                     .frame(width: Self.shareColumnWidth, alignment: .leading)
             }
@@ -650,8 +698,9 @@ private struct UsageTable: View {
                             share: share(of: record),
                             numberColumnWidth: Self.numberColumnWidth,
                             shareColumnWidth: Self.shareColumnWidth,
+                            proxyColumnWidth: showsProxyColumn ? Self.proxyColumnWidth : nil,
                             showsPathHint: duplicateNames.contains(record.displayName),
-                            proxiedShare: proxiedShare(record),
+                            proxyShare: showsProxyColumn ? proxyShare(record) : nil,
                             subtitle: subtitle(record)
                         )
                     }
@@ -680,9 +729,11 @@ private struct UsageTableRow: View {
     let share: Double
     let numberColumnWidth: CGFloat
     let shareColumnWidth: CGFloat
+    /// nil 时不显示代理列。
+    var proxyColumnWidth: CGFloat?
     var showsPathHint: Bool = false
-    /// 路径摘要（走节点或经代理的比例）；无路径数据时为 nil，比例不足 1% 时不显示标签。
-    var proxiedShare: RouteBreakdown.Share?
+    /// 经代理节点转发的流量占比；无路径数据或不足 1% 时显示「—」。
+    var proxyShare: Double?
     /// 系统进程用途说明或命令行进程的启动者。
     var subtitle: String?
 
@@ -691,23 +742,8 @@ private struct UsageTableRow: View {
             HStack(spacing: 10) {
                 AppIconView(record: record, size: 24)
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(record.displayName)
-                            .lineLimit(1)
-                        if let proxiedShare, proxiedShare.fraction >= 0.01 {
-                            Text(proxiedShare.fraction >= 0.995
-                                 ? proxiedShare.title
-                                 : "\(proxiedShare.title) \(proxiedShare.fraction.formatted(.percent.precision(.fractionLength(0))))")
-                                .font(.caption2)
-                                .foregroundStyle(RouteColor.color(for: proxiedShare.route))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(
-                                    Capsule().fill(RouteColor.color(for: proxiedShare.route).opacity(0.12))
-                                )
-                                .fixedSize()
-                        }
-                    }
+                    Text(record.displayName)
+                        .lineLimit(1)
                     if let subtitle {
                         Text(subtitle)
                             .font(.caption)
@@ -729,15 +765,28 @@ private struct UsageTableRow: View {
             // 这里刻意不加 .contentTransition(.numericText())：列表每 10 秒刷新一次且
             // 数值必然变化，逐行数字滚动动画会让整个可见列表持续重绘，是渲染开销的主要来源。
             // 顶部统计卡数量固定，仍保留动画作为视觉焦点。
-            Text(ByteTraceViewModel.formatBytes(record.downloadBytes))
+            Text(ByteTraceViewModel.formatBytes(record.uploadBytes))
                 .foregroundStyle(.secondary)
                 .frame(width: numberColumnWidth, alignment: .trailing)
-            Text(ByteTraceViewModel.formatBytes(record.uploadBytes))
+            Text(ByteTraceViewModel.formatBytes(record.downloadBytes))
                 .foregroundStyle(.secondary)
                 .frame(width: numberColumnWidth, alignment: .trailing)
             Text(ByteTraceViewModel.formatBytes(Self.totalBytes(of: record)))
                 .fontWeight(.semibold)
                 .frame(width: numberColumnWidth, alignment: .trailing)
+
+            if let proxyColumnWidth {
+                Group {
+                    if let proxyShare, proxyShare >= 0.01 {
+                        Text(proxyShare.formatted(.percent.precision(.fractionLength(0))))
+                            .foregroundStyle(RouteColor.proxy)
+                    } else {
+                        Text("—")
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .frame(width: proxyColumnWidth, alignment: .trailing)
+            }
 
             HStack(spacing: 8) {
                 UsageShareBar(fraction: share, height: 5)
@@ -775,18 +824,6 @@ private struct AppDetailView: View {
                 if let record {
                     appHeader(record)
                     appStats(record)
-                    if record.category != .proxyTransport {
-                        let breakdown = model.routeBreakdown(for: [record])
-                        if breakdown.hasKnownRoute {
-                            RouteBreakdownCard(
-                                title: "流量路径",
-                                breakdown: breakdown,
-                                footnote: RouteBreakdownCard.footnote(
-                                    usesToday: model.routeBreakdownUsesToday
-                                )
-                            )
-                        }
-                    }
                     appTimeline
                 } else {
                     Text("当前时间范围内没有这个应用的统计数据")
@@ -832,40 +869,45 @@ private struct AppDetailView: View {
         }
     }
 
+    /// 合计 | 直连 | 代理；代理传输或没有足够的路径记录时，后两张换成上行 / 下行。
     private func appStats(_ record: DailyUsageRecord) -> some View {
         let total = totalBytes(for: record)
+        let split = record.category == .proxyTransport ? RouteSplit.empty : model.routeSplit(for: [record])
         return HStack(spacing: 12) {
             SummaryCard(
                 title: "合计",
                 swatch: nil,
                 value: total,
-                caption: model.selectedRange.title
+                caption: directionCaption(upload: record.uploadBytes, download: record.downloadBytes)
             )
-            SummaryCard(
-                title: "下行",
-                swatch: TrafficColor.download,
-                value: record.downloadBytes,
-                caption: shareCaption(record.downloadBytes, of: total)
-            )
-            SummaryCard(
-                title: "上行",
-                swatch: TrafficColor.upload,
-                value: record.uploadBytes,
-                caption: shareCaption(record.uploadBytes, of: total)
-            )
+            if split.hasKnownRoute {
+                routeSummaryCards(split: split, usesToday: model.routeBreakdownUsesToday)
+            } else {
+                SummaryCard(
+                    title: "上行",
+                    swatch: TrafficColor.upload,
+                    value: record.uploadBytes,
+                    caption: shareCaption(record.uploadBytes, of: total)
+                )
+                SummaryCard(
+                    title: "下行",
+                    swatch: TrafficColor.download,
+                    value: record.downloadBytes,
+                    caption: shareCaption(record.downloadBytes, of: total)
+                )
+            }
         }
-    }
-
-    private func shareCaption(_ value: Int64, of total: Int64) -> String {
-        guard total > 0 else { return "占 0%" }
-        let fraction = Double(value) / Double(total)
-        return "占 \(fraction.formatted(.percent.precision(.fractionLength(1))))"
     }
 
     private var appTimeline: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("应用趋势")
-                .font(.headline)
+            HStack(spacing: 16) {
+                Text("应用趋势")
+                    .font(.headline)
+                Spacer()
+                timelineLegend(color: TrafficColor.upload, title: "上行")
+                timelineLegend(color: TrafficColor.download, title: "下行")
+            }
 
             let points = model.timeline(for: appKey)
             if points.isEmpty {
@@ -877,9 +919,15 @@ private struct AppDetailView: View {
                 Chart(points) { point in
                     BarMark(
                         x: .value("时间", point.start),
-                        y: .value("总量", point.totalBytes)
+                        y: .value("字节", point.downloadBytes)
                     )
                     .foregroundStyle(TrafficColor.download)
+
+                    BarMark(
+                        x: .value("时间", point.start),
+                        y: .value("字节", point.uploadBytes)
+                    )
+                    .foregroundStyle(TrafficColor.upload)
                 }
                 .chartYAxis {
                     AxisMarks(position: .leading) { value in
@@ -895,6 +943,17 @@ private struct AppDetailView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
         .cardSurface()
+    }
+
+    private func timelineLegend(color: Color, title: String) -> some View {
+        HStack(spacing: 5) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(color)
+                .frame(width: 8, height: 8)
+            Text(title)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
     private func totalBytes(for record: DailyUsageRecord) -> Int64 {

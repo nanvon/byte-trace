@@ -206,68 +206,117 @@ enum MihomoConnectionStatus: Equatable {
     }
 }
 
-/// 一组记录按流量路径拆分的结果。`unattributedBytes` 是早于路径统计上线、
-/// 或当前时间范围内无法区分路径的部分。
-struct RouteBreakdown: Equatable {
-    struct Item: Equatable, Identifiable {
-        let route: TrafficRoute?
-        let bytes: Int64
-
-        var id: String { route?.rawValue ?? "unattributed" }
-        var title: String { route?.displayName ?? "未区分（更新前的数据）" }
-    }
-
-    let items: [Item]
+/// 应用侧流量按实际出口拆成「直连 / 代理」，菜单栏与主窗口共用这一套口径。
+///
+/// - 直连：没有经过本机代理 / TUN（`direct`），加上进了代理内核但命中 DIRECT 规则的部分（`proxyRuleDirect`）。
+/// - 代理：由代理内核经节点转发（`proxyNode`）。
+/// - 出口未知（`proxied`，多为短于 mihomo 轮询间隔就结束的连接）按该应用已确认的「节点 : 规则直连」比例分摊；
+///   应用自身没有已确认出口时按 `reference`（同一时间范围内全部应用）的比例分摊；
+///   两者都没有（未读到 mihomo 连接表）时记入 `unknownBytes`。
+/// - 路径统计上线前的流量没有路径记录，只计入 `totalBytes`，不参与比例。
+struct RouteSplit: Equatable {
+    let directBytes: Int64
+    let proxyBytes: Int64
+    let unknownBytes: Int64
+    /// 全部流量，含没有路径记录的部分。
     let totalBytes: Int64
 
-    var proxiedBytes: Int64 {
-        items.filter { $0.route?.isProxied == true }.reduce(0) { $0 + $1.bytes }
+    static let empty = RouteSplit(directBytes: 0, proxyBytes: 0, unknownBytes: 0, totalBytes: 0)
+
+    init(directBytes: Int64, proxyBytes: Int64, unknownBytes: Int64, totalBytes: Int64) {
+        self.directBytes = directBytes
+        self.proxyBytes = proxyBytes
+        self.unknownBytes = unknownBytes
+        self.totalBytes = totalBytes
     }
 
+    /// - Parameters:
+    ///   - usages: 每个应用的总字节与按路径汇总的字节。
+    ///   - reference: 应用自身没有已确认出口时参照的整体路径字节。
+    init(usages: [(totalBytes: Int64, routes: [TrafficRoute: Int64])], reference: [TrafficRoute: Int64]) {
+        var direct = 0.0
+        var proxy = 0.0
+        var pending = 0.0
+        var total: Int64 = 0
+        for usage in usages {
+            total = Self.saturatingAdd(total, usage.totalBytes)
+            let routes = usage.routes
+            let recorded = routes.values.reduce(0.0) { $0 + Double($1) }
+            guard recorded > 0 else { continue }
+            // 「最近 1 小时」用的是今天的路径数据，可能大于该时段总量，按比例收敛到总量。
+            let scale = min(1, Double(usage.totalBytes) / recorded)
+            let node = Double(routes[.proxyNode] ?? 0) * scale
+            let ruleDirect = Double(routes[.proxyRuleDirect] ?? 0) * scale
+            let unknownExit = Double(routes[.proxied] ?? 0) * scale
+            direct += Double(routes[.direct] ?? 0) * scale + ruleDirect
+            proxy += node
+            if node + ruleDirect > 0 {
+                let nodeShare = node / (node + ruleDirect)
+                proxy += unknownExit * nodeShare
+                direct += unknownExit * (1 - nodeShare)
+            } else {
+                pending += unknownExit
+            }
+        }
+
+        var unknown = 0.0
+        let referenceNode = Double(reference[.proxyNode] ?? 0)
+        let referenceRuleDirect = Double(reference[.proxyRuleDirect] ?? 0)
+        if pending > 0 {
+            if referenceNode + referenceRuleDirect > 0 {
+                let nodeShare = referenceNode / (referenceNode + referenceRuleDirect)
+                proxy += pending * nodeShare
+                direct += pending * (1 - nodeShare)
+            } else {
+                unknown = pending
+            }
+        }
+        self.init(
+            directBytes: Self.bytes(direct),
+            proxyBytes: Self.bytes(proxy),
+            unknownBytes: Self.bytes(unknown),
+            totalBytes: total
+        )
+    }
+
+    /// 有路径记录的流量（直连 + 代理 + 出口未知）。
     var knownBytes: Int64 {
-        items.filter { $0.route != nil }.reduce(0) { $0 + $1.bytes }
+        Self.saturatingAdd(Self.saturatingAdd(directBytes, proxyBytes), unknownBytes)
     }
 
     var hasKnownRoute: Bool { knownBytes > 0 }
 
-    /// 列表标签与卡片标题的摘要。开启 TUN 时几乎所有流量都会进代理内核，
-    /// 「经代理」比例接近 100% 没有信息量；读到 mihomo 出口信息时改为只统计走节点的部分。
-    /// 比例只在已区分路径的流量里计算：更新前的数据没有路径信息，算进分母会把比例压到接近 0。
-    struct Share: Equatable {
-        let title: String
-        let fraction: Double
-        let route: TrafficRoute
-        /// 已区分路径的流量占全部流量的比例。
-        let coverage: Double
+    /// 没有路径记录的流量（路径统计启用前）。
+    var unattributedBytes: Int64 { max(0, totalBytes - knownBytes) }
 
-        var isPartial: Bool { coverage < 0.99 }
-        /// 大部分流量来自更新前、没有路径信息时，比例代表性不足，界面不显示。
-        var isRepresentative: Bool { coverage >= 0.5 }
+    /// 有路径记录的流量占全部流量的比例。
+    var coverage: Double {
+        guard totalBytes > 0 else { return hasKnownRoute ? 1 : 0 }
+        return min(1, Double(knownBytes) / Double(totalBytes))
     }
 
-    var share: Share? {
-        guard hasKnownRoute else { return nil }
-        let coverage = fraction(of: knownBytes)
-        let nodeBytes = bytes(for: .proxyNode)
-        if nodeBytes > 0 || bytes(for: .proxyRuleDirect) > 0 {
-            return Share(title: "走节点", fraction: knownFraction(of: nodeBytes), route: .proxyNode, coverage: coverage)
-        }
-        return Share(title: "经代理", fraction: knownFraction(of: proxiedBytes), route: .proxied, coverage: coverage)
-    }
+    var isPartial: Bool { coverage < 0.99 }
 
-    private func knownFraction(of bytes: Int64) -> Double {
+    /// 大部分流量来自更新前、没有路径记录时，比例代表性不足，界面不显示百分比；字节数照常显示。
+    var isRepresentative: Bool { hasKnownRoute && coverage >= 0.5 }
+
+    /// 在有路径记录的流量里所占的比例；更新前的数据不进分母，否则比例会被压到接近 0。
+    func fraction(of bytes: Int64) -> Double {
         let known = knownBytes
         guard known > 0 else { return 0 }
         return min(1, Double(bytes) / Double(known))
     }
 
-    func bytes(for route: TrafficRoute) -> Int64 {
-        items.filter { $0.route == route }.reduce(0) { $0 + $1.bytes }
+    var proxyFraction: Double { fraction(of: proxyBytes) }
+
+    private static func bytes(_ value: Double) -> Int64 {
+        guard value.isFinite, value > 0 else { return 0 }
+        return value >= Double(Int64.max) ? Int64.max : Int64(value.rounded())
     }
 
-    func fraction(of bytes: Int64) -> Double {
-        guard totalBytes > 0 else { return 0 }
-        return min(1, Double(bytes) / Double(totalBytes))
+    private static func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let result = lhs.addingReportingOverflow(rhs)
+        return result.overflow ? Int64.max : result.partialValue
     }
 }
 
@@ -276,8 +325,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     static let bundleIdentifier = "com.nanvon.ByteTrace"
 
     @Published private(set) var records: [DailyUsageRecord] = []
-    /// 今日应用侧已识别为代理节点的上下行总量。
-    @Published private(set) var todayProxyNodeBytes: Int64 = 0
+    /// 今日应用侧流量的直连 / 代理拆分，供菜单栏今日卡片使用；与主窗口「今天」范围同一口径。
+    @Published private(set) var todayRouteSplit: RouteSplit = .empty
     @Published private(set) var status: MonitorStatus = .stopped
     @Published private(set) var lastError: String?
     @Published var requestedMainWindowPage: MainWindowPage = .overview
@@ -301,6 +350,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var bucketStats: UsageBucketStats?
     /// 当前时间范围内各应用按路径汇总的字节数（日粒度；「最近 1 小时」按今天统计）。
     @Published private(set) var rangeRouteUsage: [String: [TrafficRoute: Int64]] = [:]
+    /// `rangeRouteUsage` 按路径合并后的总量，作为出口未知流量的分摊参照。
+    private var rangeRouteReference: [TrafficRoute: Int64] = [:]
     private var dailyRangeRecords: [DailyUsageRecord] = []
     private var activeDetailAppKey: String?
     @Published private(set) var launchAtLoginEnabled: Bool
@@ -499,17 +550,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         Self.dayKey(for: Date())
     }
 
-    private static let todayDisplayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
-        formatter.dateFormat = "M月d日 EEEE"
-        return formatter
-    }()
-
-    var todayDisplayText: String {
-        Self.todayDisplayFormatter.string(from: Date())
-    }
-
     func openAppDetail(_ appKey: String) {
         requestedMainWindowPage = .overview
         pendingAppDetailKey = appKey
@@ -701,7 +741,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     func refresh() {
         guard let store else {
             records = []
-            todayProxyNodeBytes = 0
+            todayRouteSplit = .empty
             menuBarHourTimeline = []
             rangeRecords = []
             rangeBars = []
@@ -729,7 +769,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     func refreshToday() {
         guard let store else {
             records = []
-            todayProxyNodeBytes = 0
+            todayRouteSplit = .empty
             menuBarHourTimeline = []
             return
         }
@@ -785,55 +825,29 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         selectedRange == .lastHour
     }
 
-    func routeBreakdown(for records: [DailyUsageRecord]) -> RouteBreakdown {
-        var routeBytes: [TrafficRoute: Int64] = [:]
-        var total: Int64 = 0
-        var known: Int64 = 0
-        for record in records where record.category != .proxyTransport {
-            let recordTotal = totalBytes(for: record)
-            total = saturatingAdd(total, recordTotal)
-            var recordKnown: Int64 = 0
-            for (route, bytes) in rangeRouteUsage[record.appKey] ?? [:] {
-                routeBytes[route] = saturatingAdd(routeBytes[route] ?? 0, bytes)
-                recordKnown = saturatingAdd(recordKnown, bytes)
-            }
-            // 「最近 1 小时」用的是今天的路径数据，可能大于该时段总量，按比例收敛到总量。
-            known = saturatingAdd(known, min(recordKnown, recordTotal))
-        }
-        let rawKnown = routeBytes.values.reduce(Int64(0)) { saturatingAdd($0, $1) }
-        let scale = rawKnown > known && rawKnown > 0 ? Double(known) / Double(rawKnown) : 1
-        var items = TrafficRoute.allCases.compactMap { route -> RouteBreakdown.Item? in
-            guard let bytes = routeBytes[route], bytes > 0 else { return nil }
-            let scaled = scale < 1 ? Int64(Double(bytes) * scale) : bytes
-            return RouteBreakdown.Item(route: route, bytes: scaled)
-        }
-        let unattributed = max(0, total - items.reduce(0) { $0 + $1.bytes })
-        if unattributed > 0 {
-            items.append(RouteBreakdown.Item(route: nil, bytes: unattributed))
-        }
-        return RouteBreakdown(items: items, totalBytes: total)
+    func routeSplit(for records: [DailyUsageRecord]) -> RouteSplit {
+        RouteSplit(
+            usages: records.filter { $0.category != .proxyTransport }.map {
+                (totalBytes(for: $0), rangeRouteUsage[$0.appKey] ?? [:])
+            },
+            reference: rangeRouteReference
+        )
     }
 
-    /// 代理外层流量按应用侧「节点 / 规则直连」比例估算去向。没有 mihomo 路径数据时返回 nil。
-    func proxyTransportEstimate(proxyBytes: Int64) -> RouteBreakdown? {
-        var node: Int64 = 0
-        var ruleDirect: Int64 = 0
-        var unknownExit: Int64 = 0
-        for routes in rangeRouteUsage.values {
-            node = saturatingAdd(node, routes[.proxyNode] ?? 0)
-            ruleDirect = saturatingAdd(ruleDirect, routes[.proxyRuleDirect] ?? 0)
-            unknownExit = saturatingAdd(unknownExit, routes[.proxied] ?? 0)
-        }
+    /// 代理外层流量按应用侧「代理节点 / 规则直连」比例估算去向。没有 mihomo 路径数据时返回 nil。
+    func proxyTransportEstimate(proxyBytes: Int64) -> RouteSplit? {
+        let node = rangeRouteReference[.proxyNode] ?? 0
+        let ruleDirect = rangeRouteReference[.proxyRuleDirect] ?? 0
+        let unknownExit = rangeRouteReference[.proxied] ?? 0
         let known = saturatingAdd(node, ruleDirect)
         guard proxyBytes > 0, known > 0 else { return nil }
         // 应用侧有路径记录的经代理流量不足代理外层的一半时（多为更新前的数据），比例代表性不足，不估算。
         guard Double(saturatingAdd(known, unknownExit)) >= Double(proxyBytes) * 0.5 else { return nil }
         let nodeBytes = Int64(Double(proxyBytes) * Double(node) / Double(known))
-        return RouteBreakdown(
-            items: [
-                RouteBreakdown.Item(route: .proxyNode, bytes: nodeBytes),
-                RouteBreakdown.Item(route: .proxyRuleDirect, bytes: proxyBytes - nodeBytes)
-            ].filter { $0.bytes > 0 },
+        return RouteSplit(
+            directBytes: proxyBytes - nodeBytes,
+            proxyBytes: nodeBytes,
+            unknownBytes: 0,
             totalBytes: proxyBytes
         )
     }
@@ -851,10 +865,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             pendingLauncherNames = [:]
             launcherNames = [:]
             records = []
-            todayProxyNodeBytes = 0
+            todayRouteSplit = .empty
             menuBarHourTimeline = []
             rangeRecords = []
             rangeRouteUsage = [:]
+            rangeRouteReference = [:]
             rangeBars = []
             bucketStats = UsageBucketStats(
                 bucketCount: 0,
@@ -968,6 +983,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     /// 列表副标题：系统进程的中文用途说明，命令行进程的启动者。
     func subtitle(for record: DailyUsageRecord) -> String? {
         var parts: [String] = []
+        // 解析前就退出的进程只剩 nettop 进程名，没有路径可作区分提示。
+        if record.appKey.hasPrefix("process:"),
+           record.bundlePath == nil, record.executablePath == nil {
+            parts.append("进程已退出，未能识别来源")
+        }
         if record.category != .userApp,
            let description = SystemProcessDescriptions.description(forExecutablePath: record.executablePath) {
             parts.append(description)
@@ -1755,12 +1775,23 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private func loadToday(from store: UsageStore) throws -> [DailyUsageRecord] {
         let today = dayKey
         let newRecords = try store.dailyUsage(for: today)
-        let appKeys = Set(newRecords.filter { $0.category != .proxyTransport }.map(\.appKey))
-        let nodeBytes = try store.routeUsage(from: today, through: today)
-            .filter { $0.route == .proxyNode && appKeys.contains($0.appKey) }
-            .reduce(Int64(0)) { saturatingAdd($0, $1.totalBytes) }
+        let appRecords = newRecords.filter { $0.category != .proxyTransport }
+        let appKeys = Set(appRecords.map(\.appKey))
+        var appRoutes: [String: [TrafficRoute: Int64]] = [:]
+        var reference: [TrafficRoute: Int64] = [:]
+        for usage in try store.routeUsage(from: today, through: today) where appKeys.contains(usage.appKey) {
+            appRoutes[usage.appKey, default: [:]][usage.route] = saturatingAdd(
+                appRoutes[usage.appKey]?[usage.route] ?? 0,
+                usage.totalBytes
+            )
+            reference[usage.route] = saturatingAdd(reference[usage.route] ?? 0, usage.totalBytes)
+        }
+        let routeSplit = RouteSplit(
+            usages: appRecords.map { (totalBytes(for: $0), appRoutes[$0.appKey] ?? [:]) },
+            reference: reference
+        )
         if newRecords != records { records = newRecords }
-        if nodeBytes != todayProxyNodeBytes { todayProxyNodeBytes = nodeBytes }
+        if routeSplit != todayRouteSplit { todayRouteSplit = routeSplit }
         return newRecords
     }
 
@@ -1858,7 +1889,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 record.totalBytes
             )
         }
-        if usage != rangeRouteUsage { rangeRouteUsage = usage }
+        if usage != rangeRouteUsage {
+            rangeRouteUsage = usage
+            var reference: [TrafficRoute: Int64] = [:]
+            for routes in usage.values {
+                for (route, bytes) in routes {
+                    reference[route] = saturatingAdd(reference[route] ?? 0, bytes)
+                }
+            }
+            rangeRouteReference = reference
+        }
     }
 
     /// 「最近 1 小时」与「今天」的柱子来自分钟桶。头部应用按 15 分钟槽查询再并入

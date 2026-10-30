@@ -9,14 +9,16 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("ByteTrace.menuBar.proxySectionExpanded") private var isProxyExpanded = false
-    @AppStorage("ByteTrace.menuBar.systemSectionExpanded") private var isSystemExpanded = false
+    @AppStorage("ByteTrace.menuBar.systemSectionExpanded") private var isSystemExpanded = true
     @State private var showsMoreApplications = false
+    @State private var showsMoreSystemProcesses = false
+    @State private var showsMoreProxyProcesses = false
     /// 滚动内容的实际高度；初值是常见内容的估计，避免首帧高度为 0。
     @State private var contentHeight: CGFloat = 560
 
-    private let collapsedRowLimit = 8
+    private let collapsedRowLimit = 5
     private let expandedRowLimit = 15
-    private let sectionRowLimit = 5
+    private let collapsedSectionRowLimit = 3
 
     var body: some View {
         VStack(spacing: 0) {
@@ -46,7 +48,7 @@ struct MenuBarView: View {
             if let version = updater.availableVersion {
                 HStack(spacing: 8) {
                     Spacer()
-                    Text(version)
+                    Text("新版本 \(version)")
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .lineLimit(1)
@@ -63,7 +65,7 @@ struct MenuBarView: View {
             }
         }
         .frame(width: 390)
-        .background(Color(nsColor: .windowBackgroundColor))
+        // 不铺不透明底色，保留 MenuBarExtra 窗口的系统材质；卡片自带实底。
         // 面板收起后就没人看数据了，停掉周期性 UI 刷新；重新展开时立即补一次。
         .onAppear { model.beginObservingUsage(.menuBar) }
         .onDisappear { model.endObservingUsage(.menuBar) }
@@ -137,17 +139,14 @@ struct MenuBarView: View {
         model.status != .collecting || model.lastError != nil
     }
 
+    /// 状态标题已在顶部显示，这里只补充原因与操作。
     private var statusCard: some View {
-        HStack(alignment: .top, spacing: 9) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(model.status.title)
-                    .font(.subheadline.weight(.medium))
-                Text(model.lastError ?? model.status.detail)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            Spacer(minLength: 8)
+        HStack(spacing: 9) {
+            Text(model.lastError ?? model.status.detail)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Button(model.isCollecting ? "停止" : "开始") {
                 if model.isCollecting {
                     model.stop()
@@ -171,18 +170,24 @@ struct MenuBarView: View {
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(model.todayDisplayText)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("代理流量")
+                        .foregroundStyle(.secondary)
+                    Text(ByteTraceViewModel.formatBytes(model.todayRouteSplit.proxyBytes))
+                        .fontWeight(.semibold)
+                        .monospacedDigit()
+                }
+                .font(.body)
+                .help(RouteSplitCard.help(for: model.todayRouteSplit))
             }
 
             totalText
 
-            DirectionShareBar(totals: totals)
+            DirectionShareBar(downloadBytes: totals.downloadBytes, uploadBytes: totals.uploadBytes)
 
             HStack(spacing: 18) {
-                legendValue(color: TrafficColor.download, title: "下行", bytes: totals.downloadBytes)
                 legendValue(color: TrafficColor.upload, title: "上行", bytes: totals.uploadBytes)
+                legendValue(color: TrafficColor.download, title: "下行", bytes: totals.downloadBytes)
             }
 
             Divider()
@@ -234,7 +239,7 @@ struct MenuBarView: View {
     private var usageContent: some View {
         let applications = model.applicationRecords
         if model.records.isEmpty {
-            EmptyTrafficView()
+            EmptyTrafficView(status: model.status)
                 .padding(.top, 10)
         } else {
             HStack(alignment: .firstTextBaseline) {
@@ -263,33 +268,13 @@ struct MenuBarView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
                 } else {
-                    UsageRows(
-                        records: Array(applications.prefix(applicationRowLimit)),
-                        onSelect: openAppDetail,
-                        subtitle: model.subtitle(for:)
+                    expandableRows(
+                        applications,
+                        collapsedLimit: collapsedRowLimit,
+                        isExpanded: $showsMoreApplications,
+                        page: .applications,
+                        noun: "个应用"
                     )
-                    if applications.count > collapsedRowLimit {
-                        Button {
-                            withAnimation(reduceMotion ? nil : .smooth(duration: 0.22)) {
-                                showsMoreApplications.toggle()
-                            }
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: showsMoreApplications ? "chevron.up" : "chevron.down")
-                                    .font(.caption2.weight(.semibold))
-                                Text(showsMoreApplications ? "收起" : "显示更多")
-                            }
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .interactiveHoverHighlight(cornerRadius: 6)
-                        .pointingHandCursor()
-                        .padding(.horizontal, 4)
-                    }
                 }
             }
             .padding(.vertical, 4)
@@ -302,32 +287,12 @@ struct MenuBarView: View {
         }
     }
 
-    private var applicationRowLimit: Int {
-        showsMoreApplications ? expandedRowLimit : collapsedRowLimit
-    }
-
     private var hasSeparateSection: Bool {
         !model.proxyRecords.isEmpty || (model.showsSystemProcesses && !model.systemRecords.isEmpty)
     }
 
     private var separateSection: some View {
         VStack(spacing: 0) {
-            if !model.proxyRecords.isEmpty {
-                CollapsibleSectionCard(
-                    symbolName: "arrow.triangle.2.circlepath",
-                    tint: TrafficColor.proxy,
-                    title: "代理传输",
-                    subtitle: "\(proxyNames) · 单独展示，不计入总量",
-                    bytes: model.proxyTotals.totalBytes,
-                    isExpanded: $isProxyExpanded
-                ) {
-                    sectionRows(model.proxyRecords, page: .proxy, noun: "个代理进程")
-                }
-            }
-            if !model.proxyRecords.isEmpty, model.showsSystemProcesses, !model.systemRecords.isEmpty {
-                Divider()
-                    .padding(.leading, 44)
-            }
             if model.showsSystemProcesses, !model.systemRecords.isEmpty {
                 CollapsibleSectionCard(
                     symbolName: "desktopcomputer",
@@ -337,37 +302,107 @@ struct MenuBarView: View {
                     bytes: systemTotalBytes,
                     isExpanded: $isSystemExpanded
                 ) {
-                    sectionRows(model.systemRecords, page: .system, noun: "个进程")
+                    VStack(alignment: .leading, spacing: 0) {
+                        expandableRows(
+                            model.systemRecords,
+                            collapsedLimit: collapsedSectionRowLimit,
+                            isExpanded: $showsMoreSystemProcesses,
+                            page: .system,
+                            noun: "个进程"
+                        )
+                    }
+                    .padding(.bottom, 4)
+                }
+            }
+            if !model.proxyRecords.isEmpty, model.showsSystemProcesses, !model.systemRecords.isEmpty {
+                Divider()
+                    .padding(.leading, 44)
+            }
+            if !model.proxyRecords.isEmpty {
+                CollapsibleSectionCard(
+                    symbolName: "arrow.triangle.2.circlepath",
+                    tint: TrafficColor.proxy,
+                    title: "代理传输",
+                    subtitle: "\(proxyNames) · 不计入总量",
+                    bytes: model.proxyTotals.totalBytes,
+                    isExpanded: $isProxyExpanded
+                ) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        expandableRows(
+                            model.proxyRecords,
+                            collapsedLimit: collapsedSectionRowLimit,
+                            isExpanded: $showsMoreProxyProcesses,
+                            page: .proxy,
+                            noun: "个代理进程"
+                        )
+                    }
+                    .padding(.bottom, 4)
                 }
             }
         }
         .cardSurface()
     }
 
-    /// 展开后列出前几个进程；超出时给出跳转主窗口对应页面的入口。
-    private func sectionRows(
+    /// 应用、系统进程、代理传输三处共用：折叠时列出前几行，展开到 `expandedRowLimit` 行，
+    /// 仍有剩余时给出跳转主窗口对应页面的入口。折叠后只差一行时直接全部列出，不为一行单独放按钮。
+    @ViewBuilder
+    private func expandableRows(
         _ records: [DailyUsageRecord],
+        collapsedLimit: Int,
+        isExpanded: Binding<Bool>,
         page: MainWindowPage,
         noun: String
     ) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            UsageRows(
-                records: Array(records.prefix(sectionRowLimit)),
-                onSelect: openAppDetail,
-                subtitle: model.subtitle(for:)
-            )
-            if records.count > sectionRowLimit {
-                Button("在主窗口查看全部 \(records.count) \(noun)") {
-                    openMainWindow(page: page)
-                }
-                .buttonStyle(.link)
-                .font(.callout)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .pointingHandCursor()
-            }
+        let canExpand = records.count > collapsedLimit + 1
+        let expandedCount = min(records.count, expandedRowLimit)
+        let visibleCount = canExpand
+            ? (isExpanded.wrappedValue ? expandedCount : collapsedLimit)
+            : records.count
+        UsageRows(
+            records: Array(records.prefix(visibleCount)),
+            onSelect: openAppDetail,
+            subtitle: model.subtitle(for:)
+        )
+        if canExpand {
+            showMoreButton(isExpanded: isExpanded, moreCount: expandedCount - collapsedLimit)
         }
-        .padding(.bottom, 4)
+        if canExpand, isExpanded.wrappedValue, records.count > expandedRowLimit {
+            sectionLink(count: records.count, page: page, noun: noun)
+        }
+    }
+
+    private func sectionLink(count: Int, page: MainWindowPage, noun: String) -> some View {
+        Button("在主窗口查看全部 \(count) \(noun)") {
+            openMainWindow(page: page)
+        }
+        .buttonStyle(.link)
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .pointingHandCursor()
+    }
+
+    private func showMoreButton(isExpanded: Binding<Bool>, moreCount: Int) -> some View {
+        Button {
+            withAnimation(reduceMotion ? nil : .smooth(duration: 0.22)) {
+                isExpanded.wrappedValue.toggle()
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: isExpanded.wrappedValue ? "chevron.up" : "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                Text(isExpanded.wrappedValue ? "收起" : "再显示 \(moreCount) 个")
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .interactiveHoverHighlight(cornerRadius: 6)
+        .pointingHandCursor()
+        .padding(.horizontal, 4)
     }
 
     private var proxyNames: String {
@@ -388,57 +423,99 @@ struct MenuBarView: View {
         model.requestedMainWindowPage = page
         ByteTraceAppDelegate.prepareMainWindow()
         openWindow(id: "main")
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
     private func openAppDetail(_ appKey: String) {
         model.openAppDetail(appKey)
         ByteTraceAppDelegate.prepareMainWindow()
         openWindow(id: "main")
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }
 
-/// 下行与上行的占比条。
+/// 上行与下行的占比条（上行在左）。今日卡片填满整条；列表行按 `fraction`（相对第一名）截取长度，
+/// 同一行里仍按上行橙、下行蓝拆分，方向不用读数字也能看出来。
 private struct DirectionShareBar: View {
-    let totals: UsageTotals
+    let downloadBytes: Int64
+    let uploadBytes: Int64
+    /// 0...1，填充部分占轨道的比例。
+    var fraction: Double = 1
+    var height: CGFloat = 6
 
     var body: some View {
         GeometryReader { geometry in
-            let gap: CGFloat = totals.downloadBytes > 0 && totals.uploadBytes > 0 ? 2 : 0
-            let available = max(0, geometry.size.width - gap)
-            HStack(spacing: gap) {
-                if totals.totalBytes > 0 {
-                    Capsule()
-                        .fill(TrafficColor.download)
-                        .frame(width: available * downloadFraction)
-                    Capsule()
+            let filledWidth = geometry.size.width * clampedFraction
+            let gap: CGFloat = downloadBytes > 0 && uploadBytes > 0 && filledWidth > 4 ? 1.5 : 0
+            let available = max(0, filledWidth - gap)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.primary.opacity(0.08))
+                HStack(spacing: gap) {
+                    Rectangle()
                         .fill(TrafficColor.upload)
-                } else {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: available * uploadFraction)
+                    Rectangle()
+                        .fill(TrafficColor.download)
                 }
+                .frame(width: filledWidth)
+                .clipShape(Capsule())
             }
         }
-        .frame(height: 6)
+        .frame(height: height)
         .accessibilityHidden(true)
     }
 
-    private var downloadFraction: Double {
-        guard totals.totalBytes > 0 else { return 0 }
-        return min(1, Double(totals.downloadBytes) / Double(totals.totalBytes))
+    private var totalBytes: Int64 {
+        let result = downloadBytes.addingReportingOverflow(uploadBytes)
+        return result.overflow ? Int64.max : result.partialValue
+    }
+
+    private var clampedFraction: Double {
+        guard totalBytes > 0, fraction.isFinite else { return 0 }
+        return min(max(fraction, 0), 1)
+    }
+
+    private var uploadFraction: Double {
+        guard totalBytes > 0 else { return 0 }
+        return min(1, Double(uploadBytes) / Double(totalBytes))
     }
 }
 
-/// 最近 60 分钟每分钟一根柱子，最后一根代表当前分钟。
+/// 最近 60 分钟每分钟一根柱子，最后一根代表当前分钟。右上角平时显示峰值，悬停时显示该分钟的时间与流量。
 private struct HourSparkline: View {
     let points: [UsageTimelinePoint]
 
+    @State private var hoveredIndex: Int?
+    @State private var barsWidth: CGFloat = 0
+
     private static let slotCount = 60
     private static let maxBarHeight: CGFloat = 28
+    private static let minuteFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
 
     var body: some View {
-        let values = slotValues
+        let currentMinute = Self.currentMinute
+        let values = slotValues(currentMinute: currentMinute)
         let peak = values.max() ?? 0
         VStack(spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("最近 1 小时 · 每分钟")
+                Spacer(minLength: 8)
+                if let hoveredIndex, values.indices.contains(hoveredIndex) {
+                    Text("\(minuteLabel(at: hoveredIndex, currentMinute: currentMinute)) · \(ByteTraceViewModel.formatBytes(values[hoveredIndex]))")
+                        .foregroundStyle(.primary)
+                } else if peak > 0 {
+                    Text("峰值 \(ByteTraceViewModel.formatBytes(peak))/分钟")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+
             HStack(alignment: .bottom, spacing: 2) {
                 ForEach(values.indices, id: \.self) { index in
                     RoundedRectangle(cornerRadius: 1)
@@ -447,11 +524,25 @@ private struct HourSparkline: View {
                 }
             }
             .frame(height: Self.maxBarHeight + 6, alignment: .bottom)
+            .contentShape(Rectangle())
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.width
+            } action: { width in
+                barsWidth = width
+            }
+            .onContinuousHover { phase in
+                switch phase {
+                case let .active(location):
+                    guard barsWidth > 0 else { return }
+                    let index = Int(location.x / barsWidth * CGFloat(Self.slotCount))
+                    hoveredIndex = min(max(index, 0), Self.slotCount - 1)
+                case .ended:
+                    hoveredIndex = nil
+                }
+            }
 
             HStack {
                 Text("60 分钟前")
-                Spacer()
-                Text("最近 1 小时 · 每分钟")
                 Spacer()
                 Text("现在")
             }
@@ -460,13 +551,23 @@ private struct HourSparkline: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("最近 1 小时每分钟流量")
+        .accessibilityValue(peak > 0 ? "峰值 \(ByteTraceViewModel.formatBytes(peak))/分钟" : "暂无流量")
+    }
+
+    private static var currentMinute: Date? {
+        Calendar.autoupdatingCurrent.dateInterval(of: .minute, for: Date())?.start
+    }
+
+    private func minuteLabel(at index: Int, currentMinute: Date?) -> String {
+        guard let currentMinute else { return "" }
+        let date = currentMinute.addingTimeInterval(-Double(Self.slotCount - 1 - index) * 60)
+        return Self.minuteFormatter.string(from: date)
     }
 
     /// 把分钟点映射到以当前分钟结尾的 60 个槽，没有数据的分钟记 0。
-    private var slotValues: [Int64] {
+    private func slotValues(currentMinute: Date?) -> [Int64] {
         var values = Array(repeating: Int64(0), count: Self.slotCount)
-        let calendar = Calendar.autoupdatingCurrent
-        guard let currentMinute = calendar.dateInterval(of: .minute, for: Date())?.start else {
+        guard let currentMinute else {
             return values
         }
         for point in points {
@@ -484,8 +585,9 @@ private struct HourSparkline: View {
     }
 
     private func color(at index: Int, value: Int64) -> Color {
-        if value == 0 { return Color.primary.opacity(0.08) }
-        return index == Self.slotCount - 1
+        let isHighlighted = hoveredIndex.map { $0 == index } ?? (index == Self.slotCount - 1)
+        if value == 0 { return Color.primary.opacity(isHighlighted && hoveredIndex != nil ? 0.2 : 0.08) }
+        return isHighlighted
             ? TrafficColor.download
             : TrafficColor.download.opacity(0.35)
     }
@@ -609,9 +711,15 @@ private struct UsageRowView: View {
                 }
 
                 HStack(spacing: 8) {
-                    UsageShareBar(fraction: share, height: 4)
+                    DirectionShareBar(
+                        downloadBytes: record.downloadBytes,
+                        uploadBytes: record.uploadBytes,
+                        fraction: share,
+                        height: 4
+                    )
+                    // 箭头沿用占比条的方向配色，对应关系一眼可见。
                     Text(
-                        "↓ \(ByteTraceViewModel.formatBytes(record.downloadBytes))  ↑ \(ByteTraceViewModel.formatBytes(record.uploadBytes))"
+                        "\(Text("↑").foregroundStyle(TrafficColor.upload)) \(ByteTraceViewModel.formatBytes(record.uploadBytes))  \(Text("↓").foregroundStyle(TrafficColor.download)) \(ByteTraceViewModel.formatBytes(record.downloadBytes))"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -622,7 +730,7 @@ private struct UsageRowView: View {
                 if let subtitle {
                     Text(subtitle)
                         .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 if showsPathHint, let path = record.bundlePath ?? record.executablePath {
@@ -646,21 +754,35 @@ private struct UsageRowView: View {
     }
 }
 
+/// 标题不重复顶部状态；说明按状态区分，统计停止或出错时不提示「再等几秒」。
 private struct EmptyTrafficView: View {
+    let status: MonitorStatus
+
     var body: some View {
         VStack(spacing: 9) {
             Image(systemName: "chart.bar.xaxis")
                 .font(.title2)
                 .foregroundStyle(.secondary)
-            Text("正在读取系统流量")
+            Text("今天还没有流量记录")
                 .font(.body.weight(.medium))
-            Text("再等几秒，今天的应用流量就会显示在这里。")
+            Text(detail)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 34)
+    }
+
+    private var detail: String {
+        switch status {
+        case .starting, .baseline, .collecting:
+            return "再等几秒，今天的应用流量就会显示在这里。"
+        case .stopped:
+            return "开始统计后，应用流量会显示在这里。"
+        case .reconnecting, .incompatible, .failed:
+            return "统计恢复后，应用流量会显示在这里。"
+        }
     }
 }
 
