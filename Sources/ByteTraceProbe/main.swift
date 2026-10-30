@@ -4,9 +4,15 @@ import Foundation
 
 private struct Options {
     let duration: TimeInterval
+    /// `--accuracy [URL]`：用 curl 分别直连和经系统代理下载已知大小的内容，
+    /// 对照 curl 自报的字节数检查两个通道的计数。
+    let accuracyURL: String?
+
+    static let defaultAccuracyURL = "https://speed.cloudflare.com/__down?bytes=20000000"
 
     init(arguments: [String]) {
         var duration: TimeInterval = 15
+        var accuracyURL: String?
         var index = 1
 
         while index < arguments.count {
@@ -14,13 +20,35 @@ private struct Options {
                let value = TimeInterval(arguments[index + 1]), value > 0 {
                 duration = value
                 index += 2
+            } else if arguments[index] == "--accuracy" {
+                if index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") {
+                    accuracyURL = arguments[index + 1]
+                    index += 2
+                } else {
+                    accuracyURL = Self.defaultAccuracyURL
+                    index += 1
+                }
             } else {
                 index += 1
             }
         }
 
         self.duration = duration
+        self.accuracyURL = accuracyURL
     }
+}
+
+private struct ProcessTraffic {
+    var download: Int64 = 0
+    var upload: Int64 = 0
+}
+
+private struct CurlResult {
+    let label: String
+    let pid: Int32
+    let downloadBytes: Int64
+    let uploadBytes: Int64
+    let status: Int32
 }
 
 private enum ProbeLane: String {
@@ -66,6 +94,7 @@ private final class ProbeCounters: @unchecked Sendable {
     private var supplementalFrames = 0
     private var externalSamples = 0
     private var supplementalSamples = 0
+    private var trafficByLane: [ProbeLane: [String: ProcessTraffic]] = [:]
 
     func recordFrame(
         lane: ProbeLane,
@@ -89,6 +118,10 @@ private final class ProbeCounters: @unchecked Sendable {
             supplementalSamples += samples.count
         }
         for sample in samples {
+            var traffic = trafficByLane[lane, default: [:]][sample.delta.processName] ?? ProcessTraffic()
+            traffic.download += sample.delta.downloadBytes
+            traffic.upload += sample.delta.uploadBytes
+            trafficByLane[lane, default: [:]][sample.delta.processName] = traffic
             attributedAppKeys.insert(sample.attributed.appKey)
             if sample.attributed.category == .proxyTransport {
                 proxySamples += 1
@@ -99,6 +132,18 @@ private final class ProbeCounters: @unchecked Sendable {
         let preview = Array(samples.prefix(previewCount))
         printedSamples += preview.count
         return preview
+    }
+
+    func traffic(lane: ProbeLane, pid: Int32) -> ProcessTraffic {
+        lock.lock()
+        defer { lock.unlock() }
+        var total = ProcessTraffic()
+        for (token, traffic) in trafficByLane[lane, default: [:]]
+        where NettopProcessToken(rawValue: token).pid == pid {
+            total.download += traffic.download
+            total.upload += traffic.upload
+        }
+        return total
     }
 
     func recordMalformedRow() {
@@ -152,6 +197,8 @@ private final class ProbeRuntime: @unchecked Sendable {
     let supplementalCollector = NettopCollector(scope: .supplementalConnections)
     let proxyEndpointMonitor = SystemProxyEndpointMonitor()
     let supplementalReducer = SupplementalTrafficReducer()
+    var residualTracker = SupplementalResidualTracker()
+    var pendingProcessTotals: [NettopDelta] = []
     let resolver = SystemProcessIdentityResolver()
     let attributionCache = ProcessAttributionCache()
     let store: UsageStore
@@ -211,6 +258,63 @@ private func endpointLabel(_ endpoint: NettopEndpoint) -> String {
     return "\(host):\(port)"
 }
 
+/// 运行 curl 并在等待期间继续转动主 RunLoop，让采集回调按时投递。
+private func runCurl(label: String, url: String, proxy: String?) -> CurlResult? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+    var arguments = ["-s", "-o", "/dev/null", "-w", "%{size_download} %{size_header} %{size_upload} %{size_request}"]
+    if let proxy {
+        arguments += ["-x", proxy]
+    } else {
+        arguments += ["--noproxy", "*"]
+    }
+    process.arguments = arguments + [url]
+    let output = Pipe()
+    process.standardOutput = output
+    do {
+        try process.run()
+    } catch {
+        print("[accuracy] case=\(label) launch_failed error=\(error.localizedDescription)")
+        return nil
+    }
+    let pid = process.processIdentifier
+    while process.isRunning {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    }
+    let fields = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        .split(separator: " ")
+        .compactMap { Int64($0) }
+    guard fields.count == 4 else {
+        print("[accuracy] case=\(label) unexpected_curl_output status=\(process.terminationStatus)")
+        return nil
+    }
+    return CurlResult(
+        label: label,
+        pid: pid,
+        downloadBytes: fields[0] + fields[1],
+        uploadBytes: fields[2] + fields[3],
+        status: process.terminationStatus
+    )
+}
+
+/// 按 curl 自报的 HTTP 层字节数对照通道计数。nettop 统计的是套接字层字节，
+/// 还包含 TLS 记录与握手开销，因此比值略大于 1 属于正常；明显小于 1 说明漏记。
+private func reportAccuracy(_ result: CurlResult, counters: ProbeCounters) -> Bool {
+    // 开启 TUN 时 `--noproxy` 的直连也会经 utun 走补充通道，因此按两个通道合计。
+    let external = counters.traffic(lane: .external, pid: result.pid)
+    let supplemental = counters.traffic(lane: .supplemental, pid: result.pid)
+    let counted = ProcessTraffic(
+        download: external.download + supplemental.download,
+        upload: external.upload + supplemental.upload
+    )
+    let ratio = result.downloadBytes > 0 ? Double(counted.download) / Double(result.downloadBytes) : 0
+    let ok = result.status == 0 && ratio >= 0.97 && ratio <= 1.10
+    print(
+        "[accuracy] case=\(result.label) pid=\(result.pid) external_download=\(external.download) supplemental_download=\(supplemental.download) curl_download=\(result.downloadBytes) counted_download=\(counted.download) ratio=\(String(format: "%.4f", ratio)) curl_upload=\(result.uploadBytes) counted_upload=\(counted.upload) \(ok ? "OK" : "MISMATCH")"
+    )
+    return ok
+}
+
 private func runProbe(options: Options) -> Int32 {
     let runtime: ProbeRuntime
     do {
@@ -233,10 +337,21 @@ private func runProbe(options: Options) -> Int32 {
                 case .external:
                     acceptedDeltas = deltas
                 case .supplemental:
+                    let proxyEndpoints = runtime.proxyEndpointMonitor.currentLoopbackEndpoints
+                    let residuals = isBaseline ? [] : runtime.residualTracker.residuals(
+                        processTotals: runtime.pendingProcessTotals,
+                        connections: deltas,
+                        proxyEndpoints: proxyEndpoints,
+                        at: Date()
+                    )
+                    runtime.pendingProcessTotals = []
                     acceptedDeltas = runtime.supplementalReducer.reduce(
                         deltas,
-                        proxyEndpoints: runtime.proxyEndpointMonitor.currentLoopbackEndpoints
-                    )
+                        proxyEndpoints: proxyEndpoints
+                    ) + residuals.map(\.delta)
+                    if !residuals.isEmpty {
+                        print("[parser] lane=supplemental residual_processes=\(residuals.count) residual_download=\(residuals.reduce(0) { $0 + $1.delta.downloadBytes })")
+                    }
                 }
                 let samples = acceptedDeltas.compactMap { delta -> ProbeSample? in
                     let token = NettopProcessToken(rawValue: delta.processName)
@@ -280,6 +395,12 @@ private func runProbe(options: Options) -> Int32 {
                         "[sample] lane=\(sample.lane.rawValue) process=\(sample.delta.processName) app=\(sample.attributed.displayName) app_key=\(sample.attributed.appKey) category=\(sample.attributed.category.rawValue) download_bytes=\(sample.delta.downloadBytes) upload_bytes=\(sample.delta.uploadBytes)"
                     )
                 }
+
+            case .baselineCaptured:
+                break
+
+            case let .processTotals(rows):
+                runtime.pendingProcessTotals = rows
 
             case .malformedRow:
                 runtime.counters.recordMalformedRow()
@@ -325,12 +446,38 @@ private func runProbe(options: Options) -> Int32 {
         try runtime.externalCollector.start()
         try runtime.supplementalCollector.start()
 
-        let deadline = Date().addingTimeInterval(options.duration)
-        RunLoop.main.run(until: deadline)
+        var accuracyResults: [CurlResult] = []
+        if let url = options.accuracyURL {
+            // 两个通道都要先经过一帧基线；外部通道 5 秒一帧，等两帧再开始。
+            RunLoop.main.run(until: Date().addingTimeInterval(11))
+            if let direct = runCurl(label: "direct", url: url, proxy: nil) {
+                accuracyResults.append(direct)
+            }
+            if let endpoint = runtime.proxyEndpointMonitor.currentLoopbackEndpoints.first {
+                if let proxied = runCurl(label: "system_proxy", url: url, proxy: "http://\(endpointLabel(endpoint))") {
+                    accuracyResults.append(proxied)
+                }
+            } else {
+                print("[accuracy] case=system_proxy skipped reason=no_system_proxy")
+            }
+            // curl 退出后至少再等一帧外部通道，让最后的增量落到计数里。
+            RunLoop.main.run(until: Date().addingTimeInterval(7))
+        } else {
+            let deadline = Date().addingTimeInterval(options.duration)
+            RunLoop.main.run(until: deadline)
+        }
 
         runtime.externalCollector.stop()
         runtime.supplementalCollector.stop()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+
+        var accuracyPassed = true
+        for result in accuracyResults {
+            accuracyPassed = reportAccuracy(result, counters: runtime.counters) && accuracyPassed
+        }
+        if options.accuracyURL != nil {
+            print("[accuracy] result=\(accuracyPassed && !accuracyResults.isEmpty ? "PASS" : "FAIL")")
+        }
 
         let flushedEntries = try runtime.aggregator.flush()
         let day = runtime.dayKey(for: Date())

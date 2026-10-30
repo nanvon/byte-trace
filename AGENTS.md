@@ -21,6 +21,7 @@ swift run ByteTraceApp                       # 开发模式运行菜单栏应用
 
 ```bash
 swift run ByteTraceProbe --duration 15 # 应用级采集
+swift run ByteTraceProbe --accuracy    # 用 curl 直连／经系统代理各下载 20 MB，对照两个通道的计数（会产生真实下载流量）
 ```
 
 `package_app.sh` 环境变量：`BYTE_TRACE_SIGNING_IDENTITY`（默认 `-`，ad-hoc）、`BYTE_TRACE_SWIFT_TRIPLE`（仅接受 `arm64` 目标，默认跟随 `Info.plist` 的最低系统版本）。
@@ -38,6 +39,8 @@ ByteTrace 按 nettop 接口类型拆分成两个常驻通道，避免高功耗�
 
 - 外部通道：`nettop -c -n -P -d -x -L 0 -s 5 -t external -J time,interface,state,bytes_in,bytes_out`。`-P` 按进程汇总，覆盖 Wi-Fi／有线等已定义非回环接口上的直连和代理进程外层连接。
 - 补充通道：`nettop -c -n -d -x -L 0 -s 1 -t loopback -t undefined -J time,interface,state,bytes_in,bytes_out`。连接级解析只保留两类应用侧流量：目标精确命中当前系统代理的 `lo0` 连接，以及具有明确本地／远端端点的 `utun*` 连接。1 秒采样用于减少短连接漏记，落库和 UI 刷新仍保持低频。
+
+**已关闭连接的残差**：连接关闭后 nettop 的连接行立即消失，最后一个采样周期的字节只留在进程行里（实测经系统代理下载 10 MB，只读连接行记到 86%）。连接模式下解析器额外发出 `processTotals` 事件，`SupplementalResidualTracker` 用「进程行增量 − 该进程本帧全部连接行增量」得到残差；仅当该进程最近 30 秒的补充通道流量都属于系统代理 lo0 / TUN、且没有出现过被丢弃的本地 IPC 时，才记到其中字节最多的一类，否则不补。补记后 `--accuracy` 实测直连（TUN）和经系统代理都在 100.2% 左右（多出的是 TLS 开销）。外部通道的 `-P` 进程行本身就包含已关闭连接，不需要补。
 
 **`-c` 是性能关键参数，不要移除**（man: "Less intensive use of the CPU - draws less often"）。在 `-L 0` 日志模式下它只跳过 curses 绘制，不改变采样周期与 CSV 输出：同时运行带／不带 `-c` 的两个补充通道 30 秒，帧数、有效行数、上下行字节完全一致（0.00% 差异），而补充通道 CPU 从 9.0% 降到 2.1%。这是实测结论而非文档保证，未来 macOS 升级后若出现帧率或数据异常，应优先排查这里。
 
@@ -69,7 +72,8 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 ### 帧与基线
 
 - nettop 每个采样周期重复输出一次以 `time` 开头的表头行；解析器**靠下一个表头到来才结束上一帧**（`beginFrame` 内先调 `completeCurrentFrame`）。因此流中最后一帧只会在 `stop()` / `finish()` 时才吐出。
-- **两个通道分别丢弃首帧**（`deltas = []`，仅置 `hasBaseline = true`）：`-d` 模式下首帧携带的是启动时刻的累计值而非增量。每次重启 nettop（重连、唤醒、网络切换）都会重新经历一次基线帧，这个间隙的流量必然丢失，属于已知取舍。
+- **两个通道分别丢弃首帧**（`deltas = []`，仅置 `hasBaseline = true`）：`-d` 模式下首帧携带的是启动时刻的累计值而非增量。每次重启 nettop（重连、唤醒、网络切换）都会重新经历一次基线帧。
+- **外部通道重启间隙补偿**（`NettopRestartGapRecovery`）：`-P` 基线是进程生命周期累计值，不同 nettop 实例之间一致，解析器在基线帧前发出 `baselineCaptured`，「新基线 − (旧基线 + 期间增量)」即漏记字节。只补上一轮见过的进程、停止到新基线不超过 60 秒、负值按 0、单进程按 10 Gbps 设上限；`start()` 时 `arm()`，`stop()` / `shutdown()` 释放数据目录锁时 `reset()`，避免另一个实例接管期间的流量被重复补记。补充通道的重启间隙仍按已知取舍丢弃。
 - 外部通道表头缺少 `time` / `bytes_in` / `bytes_out` / 进程列 → 全部采集停止且不再自动重连，避免写入脏数据。补充通道还要求 `interface`；仅补充格式不兼容时，外部通道继续工作并提示系统代理与 TUN 补充流量暂不可统计。
 - 两个子进程都设置 `NSUnbufferedIO=YES`：`-L 0` 输出到普通 Pipe 时默认会整块缓冲，精简 `-J` 列后低流量场景可能长时间收不到完整帧；禁用子进程 stdio 缓冲可按各自采样周期逐帧交付。
 - 父进程读取 stdout 使用 POSIX `read()`；不要改回 `FileHandle.read(upToCount: 64KB)`，后者在低输出的 `-P` 通道上可能等到大块数据或 EOF 才返回，导致 UI 长时间收不到帧。

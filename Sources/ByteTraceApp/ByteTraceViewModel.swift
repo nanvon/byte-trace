@@ -325,6 +325,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var detectedProxyExecutables: [String]
     private let mihomoClient = MihomoClient()
     private let mihomoRouteTracker = MihomoRouteTracker()
+    private var externalGapRecovery = NettopRestartGapRecovery()
+    private var supplementalResidualTracker = SupplementalResidualTracker()
+    private var pendingSupplementalProcessTotals: [NettopDelta] = []
     private var mihomoController: MihomoController?
     private var mihomoTimer: Timer?
     private var mihomoFetchInFlight = false
@@ -517,6 +520,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         cancelInstanceLockWait()
 
         wantsCollection = true
+        externalGapRecovery.arm()
+        supplementalResidualTracker.reset()
         lastError = nil
         loopbackLastError = nil
         loopbackCollectorCompatible = true
@@ -550,6 +555,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         flushAfterStop()
         cancelInstanceLockWait()
         instanceLock.release()
+        externalGapRecovery.reset()
         updateMihomoPolling()
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
@@ -646,6 +652,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         flushNow(forceRefresh: true)
         cancelInstanceLockWait()
         instanceLock.release()
+        externalGapRecovery.reset()
         updateMihomoPolling()
         status = .stopped
     }
@@ -1091,11 +1098,39 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     private func handle(_ event: NettopParserEvent, lane: CollectorLane) {
         switch event {
+        case let .baselineCaptured(rows):
+            guard lane == .external else { return }
+            let recovered = externalGapRecovery.recover(fromBaseline: rows, at: Date())
+            guard !recovered.isEmpty else { return }
+            var download: Int64 = 0
+            var upload: Int64 = 0
+            for delta in recovered {
+                download = saturatingAdd(download, delta.downloadBytes)
+                upload = saturatingAdd(upload, delta.uploadBytes)
+                ingest(delta, route: .direct)
+            }
+            recordCollectorEvent(
+                kind: "collector_gap_recovered",
+                details: "processes=\(recovered.count) download=\(download) upload=\(upload)"
+            )
+
+        case let .processTotals(rows):
+            if lane == .loopback {
+                pendingSupplementalProcessTotals = rows
+            }
+
         case let .frameCompleted(_, deltas, isBaseline):
+            let processTotals = lane == .loopback ? pendingSupplementalProcessTotals : []
+            if lane == .loopback {
+                pendingSupplementalProcessTotals = []
+            }
             if lane == .external, isStarted {
                 status = isBaseline ? .baseline : .collecting
             }
             guard !isBaseline else { return }
+            if lane == .external {
+                externalGapRecovery.record(deltas, at: Date())
+            }
             if lane == .external, isStarted {
                 restartAttempt = 0
                 lastError = loopbackLastError
@@ -1107,11 +1142,21 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             if lane == .loopback {
                 let proxyEndpoints = proxyEndpointMonitor.currentLoopbackEndpoints
                 detectProxyListeners(in: deltas, proxyEndpoints: proxyEndpoints)
+                let route: (NettopDelta) -> TrafficRoute = { [weak self] in
+                    self?.supplementalRoute(for: $0) ?? .proxied
+                }
+                let residuals = supplementalResidualTracker.residuals(
+                    processTotals: processTotals,
+                    connections: deltas,
+                    proxyEndpoints: proxyEndpoints,
+                    at: Date(),
+                    route: route
+                )
                 acceptedDeltas = supplementalReducer.reduceWithRoutes(
                     deltas,
                     proxyEndpoints: proxyEndpoints,
-                    route: { [weak self] in self?.supplementalRoute(for: $0) ?? .proxied }
-                )
+                    route: route
+                ) + residuals
             } else {
                 acceptedDeltas = deltas.map { RoutedDelta(delta: $0, route: .direct) }
             }

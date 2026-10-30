@@ -26,7 +26,14 @@ final class NettopCSVParserTests: XCTestCase {
         XCTAssertEqual(parser.completeFrameCount, 2)
         XCTAssertEqual(parser.state, .collecting)
 
-        guard case let .frameCompleted(rowCount, deltas, isBaseline) = events[0] else {
+        guard case let .baselineCaptured(baselineRows) = events[0] else {
+            return XCTFail("expected baseline rows")
+        }
+        XCTAssertEqual(baselineRows.map(\.processName), ["Dia.1"])
+        XCTAssertEqual(baselineRows.map(\.downloadBytes), [100])
+        XCTAssertEqual(baselineRows.map(\.uploadBytes), [200])
+
+        guard case let .frameCompleted(rowCount, deltas, isBaseline) = events[1] else {
             return XCTFail("expected baseline frame")
         }
         XCTAssertEqual(rowCount, 1)
@@ -372,5 +379,29 @@ final class NettopCSVParserTests: XCTestCase {
             deltas.first?.connectionTarget,
             "fe80::8af:5f9:677:e110%en0.50231"
         )
+    }
+
+    func testConnectionModeReportsProcessTotalsBeforeFrame() {
+        let input = """
+        time,,interface,state,bytes_in,bytes_out,
+        20:00:00.000,curl.9,,,100,1,
+        20:00:00.000,tcp4 127.0.0.1:49502<->127.0.0.1:7890,lo0,Established,100,1,
+        time,,interface,state,bytes_in,bytes_out,
+        20:00:01.000,curl.9,,,600,2,
+        20:00:01.000,Idle.10,,,0,0,
+        time,,interface,state,bytes_in,bytes_out,
+        """
+
+        var parser = NettopCSVParser(mode: .connections)
+        let events = parser.consume(Data((input + "\n").utf8))
+        guard events.count == 3,
+              case .frameCompleted(_, _, true) = events[0],
+              case let .processTotals(rows) = events[1],
+              case let .frameCompleted(_, deltas, false) = events[2] else {
+            return XCTFail("unexpected events: \(events)")
+        }
+        XCTAssertEqual(rows.map(\.processName), ["curl.9"])
+        XCTAssertEqual(rows.map(\.downloadBytes), [600])
+        XCTAssertEqual(deltas, [])
     }
 }

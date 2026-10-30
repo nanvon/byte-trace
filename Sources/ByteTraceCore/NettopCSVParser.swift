@@ -140,6 +140,12 @@ public enum NettopParserState: Equatable, Sendable {
 
 public enum NettopParserEvent: Equatable, Sendable {
     case frameCompleted(rowCount: Int, deltas: [NettopDelta], isBaseline: Bool)
+    /// 仅 `-P` 进程汇总模式：基线帧各进程的累计值，紧挨在对应的基线 `frameCompleted` 之前，
+    /// 供重启间隙补偿使用（见 `NettopRestartGapRecovery`）。
+    case baselineCaptured(rows: [NettopDelta])
+    /// 仅连接模式：本帧非零进程行增量，紧挨在对应的 `frameCompleted` 之前。
+    /// 进程行包含本周期内已关闭连接的字节，用于残差补记（见 `SupplementalResidualTracker`）。
+    case processTotals(rows: [NettopDelta])
     case malformedRow
     case schemaChanged
     case incompatibleSchema(missingColumns: [String])
@@ -310,6 +316,7 @@ public struct NettopCSVParser: Sendable {
             sourceRows = currentRows
         }
         let rows = sourceRows
+        let processRows = mode == .connections ? currentProcessRows : []
         currentRows.removeAll(keepingCapacity: true)
         currentProcessRows.removeAll(keepingCapacity: true)
         currentProcessName = nil
@@ -319,10 +326,33 @@ public struct NettopCSVParser: Sendable {
         hasBaseline = true
         state = isBaseline ? .baseline : .collecting
 
+        var events: [NettopParserEvent] = []
         let deltas: [NettopDelta]
         if isBaseline {
             deltas = []
+            if mode == .processSummary {
+                events.append(.baselineCaptured(rows: rows.map { row in
+                    NettopDelta(
+                        sampledAt: row.sampledAt,
+                        processName: row.processName,
+                        downloadBytes: row.downloadBytes,
+                        uploadBytes: row.uploadBytes,
+                        interface: row.interface
+                    )
+                }))
+            }
         } else {
+            if mode == .connections {
+                events.append(.processTotals(rows: processRows.compactMap { row in
+                    guard row.downloadBytes > 0 || row.uploadBytes > 0 else { return nil }
+                    return NettopDelta(
+                        sampledAt: row.sampledAt,
+                        processName: row.processName,
+                        downloadBytes: row.downloadBytes,
+                        uploadBytes: row.uploadBytes
+                    )
+                }))
+            }
             deltas = rows.compactMap { row in
                 guard row.downloadBytes > 0 || row.uploadBytes > 0 else { return nil }
                 return NettopDelta(
@@ -339,7 +369,8 @@ public struct NettopCSVParser: Sendable {
             }
         }
 
-        return [.frameCompleted(rowCount: rows.count, deltas: deltas, isBaseline: isBaseline)]
+        events.append(.frameCompleted(rowCount: rows.count, deltas: deltas, isBaseline: isBaseline))
+        return events
     }
 
     private func parseRow(_ fields: [String], using schema: Schema) -> ParsedRow? {

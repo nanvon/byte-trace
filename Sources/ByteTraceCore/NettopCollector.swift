@@ -218,7 +218,7 @@ public final class NettopCollector: @unchecked Sendable {
                 updateState(isBaseline ? .baseline : .collecting)
             case .incompatibleSchema:
                 updateState(.incompatible)
-            case .malformedRow, .schemaChanged:
+            case .malformedRow, .schemaChanged, .baselineCaptured, .processTotals:
                 break
             }
             emitParserEvent(event)
