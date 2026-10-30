@@ -187,6 +187,25 @@ enum UsageObservationSurface: Hashable {
     case mainOverview
 }
 
+/// mihomo 连接表读取状态，供设置页展示。
+enum MihomoConnectionStatus: Equatable {
+    case disabled
+    case idle
+    case searching
+    case connected(connectionCount: Int)
+    case failed(String)
+
+    var title: String {
+        switch self {
+        case .disabled: return "已关闭"
+        case .idle: return "等待经代理的流量"
+        case .searching: return "未找到 mihomo 控制器"
+        case let .connected(count): return "已连接，正在跟踪 \(count) 条连接"
+        case let .failed(message): return message
+        }
+    }
+}
+
 /// 一组记录按流量路径拆分的结果。`unattributedBytes` 是早于路径统计上线、
 /// 或当前时间范围内无法区分路径的部分。
 struct RouteBreakdown: Equatable {
@@ -265,11 +284,24 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             applyRetentionPolicyIfNeeded(force: true)
         }
     }
+    @Published var readsMihomoConnections: Bool {
+        didSet {
+            guard oldValue != readsMihomoConnections else { return }
+            UserDefaults.standard.set(readsMihomoConnections, forKey: Self.readsMihomoConnectionsKey)
+            updateMihomoPolling()
+        }
+    }
+    @Published private(set) var mihomoStatus: MihomoConnectionStatus = .idle
     let databaseURL: URL
 
     private static let showSystemProcessesKey = "ByteTrace.showSystemProcesses"
     private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
     private static let detectedProxyExecutablesKey = "ByteTrace.detectedProxyExecutables"
+    private static let readsMihomoConnectionsKey = "ByteTrace.readsMihomoConnections"
+    /// 只在最近有经代理流量时轮询，空闲时不访问控制器。
+    private static let mihomoActiveWindow: TimeInterval = 30
+    private static let mihomoPollInterval: TimeInterval = 2
+    private static let mihomoDiscoveryInterval: TimeInterval = 30
     private enum CollectorLane: Sendable {
         case external
         case loopback
@@ -291,6 +323,15 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     /// 已检查过的系统代理监听进程令牌（`名称.pid`），避免每帧重复解析身份。
     private var checkedProxyListenerTokens: Set<String> = []
     private var detectedProxyExecutables: [String]
+    private let mihomoClient = MihomoClient()
+    private let mihomoRouteTracker = MihomoRouteTracker()
+    private var mihomoController: MihomoController?
+    private var mihomoTimer: Timer?
+    private var mihomoFetchInFlight = false
+    private var lastMihomoDiscoveryAt: Date?
+    private var lastSupplementalTrafficAt: Date?
+    /// 最近出现过流量的代理传输进程 pid，用来读取内核命令行参数找控制器。
+    private var proxyProcessPIDs: [Int32] = []
     private var flushTimer: Timer?
     private var restartTimer: Timer?
     private var restartAttempt = 0
@@ -341,6 +382,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
         _usageRetentionPolicy = Published(
             initialValue: UsageRetentionPolicy(rawValue: storedRetentionPolicy ?? "") ?? .ninetyDays
+        )
+        _readsMihomoConnections = Published(
+            initialValue: UserDefaults.standard.object(forKey: Self.readsMihomoConnectionsKey) as? Bool ?? true
         )
         detectedProxyExecutables = UserDefaults.standard.stringArray(
             forKey: Self.detectedProxyExecutablesKey
@@ -480,6 +524,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         startFlushTimer()
         startCollectorProcess()
         startLoopbackCollectorProcess()
+        updateMihomoPolling()
     }
 
     func stop() {
@@ -505,6 +550,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         flushAfterStop()
         cancelInstanceLockWait()
         instanceLock.release()
+        updateMihomoPolling()
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
     }
@@ -600,6 +646,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         flushNow(forceRefresh: true)
         cancelInstanceLockWait()
         instanceLock.release()
+        updateMihomoPolling()
         status = .stopped
     }
 
@@ -715,6 +762,26 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             items.append(RouteBreakdown.Item(route: nil, bytes: unattributed))
         }
         return RouteBreakdown(items: items, totalBytes: total)
+    }
+
+    /// 代理外层流量按应用侧「节点 / 规则直连」比例估算去向。没有 mihomo 路径数据时返回 nil。
+    func proxyTransportEstimate(proxyBytes: Int64) -> RouteBreakdown? {
+        var node: Int64 = 0
+        var ruleDirect: Int64 = 0
+        for routes in rangeRouteUsage.values {
+            node = saturatingAdd(node, routes[.proxyNode] ?? 0)
+            ruleDirect = saturatingAdd(ruleDirect, routes[.proxyRuleDirect] ?? 0)
+        }
+        let known = saturatingAdd(node, ruleDirect)
+        guard proxyBytes > 0, known > 0 else { return nil }
+        let nodeBytes = Int64(Double(proxyBytes) * Double(node) / Double(known))
+        return RouteBreakdown(
+            items: [
+                RouteBreakdown.Item(route: .proxyNode, bytes: nodeBytes),
+                RouteBreakdown.Item(route: .proxyRuleDirect, bytes: proxyBytes - nodeBytes)
+            ].filter { $0.bytes > 0 },
+            totalBytes: proxyBytes
+        )
     }
 
     func timeline(for appKey: String) -> [UsageTimelinePoint] {
@@ -1048,6 +1115,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             } else {
                 acceptedDeltas = deltas.map { RoutedDelta(delta: $0, route: .direct) }
             }
+            if lane == .loopback, !acceptedDeltas.isEmpty {
+                lastSupplementalTrafficAt = Date()
+            }
             for routed in acceptedDeltas {
                 ingest(routed.delta, route: routed.route)
             }
@@ -1128,7 +1198,119 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     /// 补充通道单条连接的出口路径。
     private func supplementalRoute(for delta: NettopDelta) -> TrafficRoute {
-        .proxied
+        guard readsMihomoConnections else { return .proxied }
+        return mihomoRouteTracker.route(forLocalEndpoint: delta.localEndpoint) ?? .proxied
+    }
+
+    // MARK: - mihomo 连接表
+
+    private func updateMihomoPolling() {
+        guard readsMihomoConnections, wantsCollection else {
+            mihomoTimer?.invalidate()
+            mihomoTimer = nil
+            mihomoController = nil
+            mihomoRouteTracker.removeAll()
+            mihomoStatus = readsMihomoConnections ? .idle : .disabled
+            return
+        }
+        guard mihomoTimer == nil else { return }
+        let timer = Timer(timeInterval: Self.mihomoPollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.mihomoTimerFired()
+            }
+        }
+        timer.tolerance = 0.5
+        RunLoop.main.add(timer, forMode: .common)
+        mihomoTimer = timer
+        if mihomoStatus == .disabled { mihomoStatus = .idle }
+    }
+
+    private func mihomoTimerFired() {
+        guard readsMihomoConnections, wantsCollection, !mihomoFetchInFlight else { return }
+        guard let lastSupplementalTrafficAt,
+              Date().timeIntervalSince(lastSupplementalTrafficAt) <= Self.mihomoActiveWindow else {
+            if case .connected = mihomoStatus { mihomoStatus = .idle }
+            return
+        }
+
+        if mihomoController == nil {
+            let now = Date()
+            if let lastMihomoDiscoveryAt,
+               now.timeIntervalSince(lastMihomoDiscoveryAt) < Self.mihomoDiscoveryInterval {
+                return
+            }
+            lastMihomoDiscoveryAt = now
+            mihomoController = discoverMihomoController()
+            guard mihomoController != nil else {
+                mihomoStatus = .searching
+                return
+            }
+        }
+        guard let controller = mihomoController else { return }
+
+        mihomoFetchInFlight = true
+        let client = mihomoClient
+        let tracker = mihomoRouteTracker
+        Task.detached(priority: .utility) { [weak self] in
+            let result: Result<Int, Error>
+            do {
+                let data = try await client.get("/connections", from: controller)
+                let snapshot = try MihomoConnectionsParser.parse(data)
+                tracker.update(with: snapshot)
+                result = .success(snapshot.connections.count)
+            } catch {
+                result = .failure(error)
+            }
+            await MainActor.run { [weak self] in
+                self?.finishMihomoFetch(result, controller: controller)
+            }
+        }
+    }
+
+    private func finishMihomoFetch(_ result: Result<Int, Error>, controller: MihomoController) {
+        mihomoFetchInFlight = false
+        switch result {
+        case let .success(count):
+            if mihomoStatus != .connected(connectionCount: count) {
+                if case .connected = mihomoStatus {} else {
+                    recordCollectorEvent(kind: "mihomo_connected")
+                }
+                mihomoStatus = .connected(connectionCount: count)
+            }
+        case let .failure(error):
+            // 内核重启后地址可能变化：清掉控制器，下一轮按间隔重新发现。
+            if mihomoController == controller { mihomoController = nil }
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if mihomoStatus != .failed(message) {
+                recordCollectorEvent(kind: "mihomo_unavailable", details: message)
+            }
+            mihomoStatus = .failed(message)
+        }
+    }
+
+    /// 先读代理传输进程的命令行参数与配置；都没有时尝试 mihomo 与 Clash Verge 的默认地址。
+    private func discoverMihomoController() -> MihomoController? {
+        for pid in proxyProcessPIDs.reversed() {
+            if let arguments = MihomoControllerDiscovery.processArguments(pid: pid),
+               let controller = MihomoControllerDiscovery.controller(arguments: arguments) {
+                return controller
+            }
+        }
+        let vergeSocket = "/tmp/verge/verge-mihomo.sock"
+        if FileManager.default.fileExists(atPath: vergeSocket) {
+            return MihomoController(transport: .unix(path: vergeSocket), secret: nil)
+        }
+        guard !proxyProcessPIDs.isEmpty else { return nil }
+        return MihomoController(transport: .tcp(host: "127.0.0.1", port: 9090), secret: nil)
+    }
+
+    private func noteProxyProcess(pid: Int32) {
+        guard proxyProcessPIDs.last != pid else { return }
+        proxyProcessPIDs.removeAll { $0 == pid }
+        proxyProcessPIDs.append(pid)
+        if proxyProcessPIDs.count > 8 {
+            proxyProcessPIDs.removeFirst(proxyProcessPIDs.count - 8)
+        }
     }
 
     private func ingest(_ delta: NettopDelta, route: TrafficRoute) {
@@ -1139,6 +1321,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         // 应用侧记入对应应用；代理镜像丢弃，代理外层仍由 external 通道单独统计。
         if !TrafficFilter.shouldKeepAfterAttribution(delta, category: attributed.category) {
             return
+        }
+        if attributed.category == .proxyTransport, let pid = attributed.pid {
+            noteProxyProcess(pid: pid)
         }
         guard let aggregator else { return }
 

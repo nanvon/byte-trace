@@ -37,6 +37,17 @@ struct SettingsView: View {
                     )
                 }
 
+                Section("代理分流") {
+                    Toggle(
+                        "读取 mihomo 连接表区分节点与规则直连",
+                        isOn: $model.readsMihomoConnections
+                    )
+                    LabeledContent("状态", value: model.mihomoStatus.title)
+                    Text("经系统代理或 TUN 的流量默认只能确认「经代理」。开启后会在有经代理流量时，每 2 秒读取一次本机 mihomo（Clash.Meta）控制器的连接列表，按连接判断走代理节点还是命中 DIRECT 规则；流量字节仍以 nettop 为准，不读取域名、不上传任何数据。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("本地存储") {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("数据库位置")

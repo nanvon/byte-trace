@@ -41,7 +41,15 @@ ByteTrace 按 nettop 接口类型拆分成两个常驻通道，避免高功耗�
 
 **`-c` 是性能关键参数，不要移除**（man: "Less intensive use of the CPU - draws less often"）。在 `-L 0` 日志模式下它只跳过 curses 绘制，不改变采样周期与 CSV 输出：同时运行带／不带 `-c` 的两个补充通道 30 秒，帧数、有效行数、上下行字节完全一致（0.00% 差异），而补充通道 CPU 从 9.0% 降到 2.1%。这是实测结论而非文档保证，未来 macOS 升级后若出现帧率或数据异常，应优先排查这里。
 
-系统代理端点通过 `SCDynamicStoreCopyProxies` 首次读取，并监听 `State:/Network/Global/Proxies` 变化；只接受启用的 HTTP／HTTPS／SOCKS 本机回环端点，因此不写死 `7890`、不轮询 Mihomo API。补充通道丢弃其他本地 IPC、无明确端点的广播／通配连接，并在进程归属后丢弃代理进程的 utun 镜像；代理外层流量仍由外部通道单独展示、不反向抵扣、不计入应用总量。端点仅参与内存过滤，不落库、不展示。
+系统代理端点通过 `SCDynamicStoreCopyProxies` 首次读取，并监听 `State:/Network/Global/Proxies` 变化；只接受启用的 HTTP／HTTPS／SOCKS 本机回环端点，因此不写死 `7890`。补充通道丢弃其他本地 IPC、无明确端点的广播／通配连接，并在进程归属后丢弃代理进程的 utun 镜像；代理外层流量仍由外部通道单独展示、不反向抵扣、不计入应用总量。端点仅参与内存过滤，不落库、不展示。
+
+### mihomo 连接表（可选）
+
+设置「代理分流」默认开启时，`ByteTraceViewModel` 每 2 秒读取一次 mihomo 的 `/connections`，用应用侧本地端点（`metadata.sourceIP:sourcePort`，系统代理为 `127.0.0.1:端口`，TUN 为 `198.18.0.1:端口`）匹配补充通道的连接，按 `chains[0]` 把经代理流量细分为「代理节点」与「规则直连」（`DIRECT`）。只在最近 30 秒见过补充通道流量时才请求，连接表只在内存里保留 120 秒，不落库、不展示域名。
+
+- 控制器发现顺序：已识别代理进程的启动参数（`-ext-ctl` / `-ext-ctl-unix` / `-secret`，以及 `-f` / `-d` 指向配置的顶层 `external-controller` / `secret`）→ `/tmp/verge/verge-mihomo.sock` → `127.0.0.1:9090`；找不到时每 30 秒重试。代理内核常以 root 运行，参数通过 `KERN_PROCARGS2` 读取。
+- TCP 请求用不走系统代理的 `URLSession`；unix socket 用 POSIX 套接字发 HTTP/1.0，响应兼容 chunked。
+- 读不到连接表时补充通道仍记 `proxied`，总量不受影响。代理外层流量的「节点 / 规则直连」只按应用侧比例估算，仅在代理页展示，不计入应用总量，也不用 mihomo 的总字节数修正 nettop 结果。
 
 ### 数据流（正式管线）
 
@@ -114,7 +122,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
   **因此数据保留策略不能挂在 `refresh()` 里**——它已移到 `flushTimerFired`，否则无人打开界面时清理永远不会执行。
 - **「今天」是双数据源**：汇总数字来自 `daily_usage`，趋势图来自 `usage_buckets`（`usesBucketSummary` 与 `usesFineGrainedTimeline` 两个开关分别控制）。「最近 10 分钟 / 1 小时」两者都用分钟桶，「本周 / 本月」两者都用日汇总。
 - **nettop 的时间字段只有时钟没有日期**，`NettopSampleClock.date(for:)` 把「今天」的年月日嫁接上去；结果比当前时间晚 1 小时以上时回退一天，零点前采样、零点后处理的帧仍记入前一天。
-- 设置持久化：`UserDefaults` 键 `ByteTrace.showSystemProcesses`、`ByteTrace.usageRetentionPolicy`（默认 90 天）；登录时启动用 `SMAppService.mainApp`。
+- 设置持久化：`UserDefaults` 键 `ByteTrace.showSystemProcesses`、`ByteTrace.usageRetentionPolicy`（默认 90 天）、`ByteTrace.readsMihomoConnections`（默认开启）、`ByteTrace.detectedProxyExecutables`（运行时识别出的代理内核路径）；登录时启动用 `SMAppService.mainApp`。
 - 导出 `formatVersion` 硬编码在 `exportCurrentRange(to:)`，结构变更时需同步 bump。
 
 ## 代码风格约定

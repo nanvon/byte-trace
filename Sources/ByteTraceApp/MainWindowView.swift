@@ -280,7 +280,17 @@ private struct MainUsagePage: View {
     /// 概览按全部非代理流量、应用页与系统页按本页记录拆分直连与经代理。
     @ViewBuilder
     private var routeSection: some View {
-        if page != .proxy, searchText.isEmpty {
+        if page == .proxy, searchText.isEmpty,
+           let estimate = model.proxyTransportEstimate(
+               proxyBytes: model.selectedRangeProxyTotals.totalBytes
+           ) {
+            RouteBreakdownCard(
+                title: "代理外层流量去向（估算）",
+                breakdown: estimate,
+                footnote: "按 mihomo 连接表中应用侧「节点 / 规则直连」的字节比例估算代理内核外层连接的去向，仅供参考，不计入应用总量。",
+                showsProxiedShare: false
+            )
+        } else if page != .proxy, searchText.isEmpty {
             let records = page == .overview
                 ? model.rangeRecords
                 : model.rangeRecords.filter(page.includes)

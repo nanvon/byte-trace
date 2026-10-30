@@ -18,6 +18,7 @@ struct RouteBreakdownCard: View {
     let title: String
     let breakdown: RouteBreakdown
     let footnote: String?
+    var showsProxiedShare = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -25,7 +26,7 @@ struct RouteBreakdownCard: View {
                 Text(title)
                     .font(.headline)
                 Spacer()
-                if breakdown.hasKnownRoute {
+                if showsProxiedShare, breakdown.hasKnownRoute {
                     Text("经代理 \(percent(breakdown.fraction(of: breakdown.proxiedBytes)))")
                         .font(.callout)
                         .foregroundStyle(.secondary)
