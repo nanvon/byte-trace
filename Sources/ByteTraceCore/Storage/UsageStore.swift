@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 8
+    public static let schemaVersion: Int64 = 9
     public static let accountingVersion: Int64 = 3
 
     private let database: SQLiteDatabase
@@ -792,6 +792,50 @@ public final class UsageStore: @unchecked Sendable {
     }
 
     /// WAL 下 DELETE 不收缩文件；大量删除后按需调用。阻塞操作，勿在主线程执行。
+    /// 命令行进程最近一次的启动者（appKey → 名称），仅用于展示，覆盖写入。
+    public func recordLaunchers(_ launchers: [String: String], at date: Date = Date()) throws {
+        guard !launchers.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try database.prepare(
+            """
+            INSERT INTO app_launchers (app_key, launcher_name, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(app_key) DO UPDATE SET
+                launcher_name = excluded.launcher_name,
+                updated_at = excluded.updated_at;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        for (appKey, launcherName) in launchers {
+            try database.bind(appKey, at: 1, in: statement)
+            try database.bind(launcherName, at: 2, in: statement)
+            try database.bind(Self.timestamp(date), at: 3, in: statement)
+            try database.stepDone(statement)
+            try database.reset(statement)
+        }
+    }
+
+    public func launcherNames() throws -> [String: String] {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try database.prepare("SELECT app_key, launcher_name FROM app_launchers;")
+        defer { sqlite3_finalize(statement) }
+        var names: [String: String] = [:]
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            if let appKey = database.columnString(statement, at: 0),
+               let name = database.columnString(statement, at: 1) {
+                names[appKey] = name
+            }
+        }
+        return names
+    }
+
     public func vacuum() throws {
         lock.lock()
         defer { lock.unlock() }
@@ -803,6 +847,7 @@ public final class UsageStore: @unchecked Sendable {
         defer { lock.unlock() }
         try database.execute("DELETE FROM usage_buckets;")
         try database.execute("DELETE FROM daily_route_usage;")
+        try database.execute("DELETE FROM app_launchers;")
         try database.execute("DELETE FROM daily_usage;")
         try database.execute("DELETE FROM apps;")
         try database.execute("DELETE FROM collector_events;")
@@ -921,6 +966,20 @@ public final class UsageStore: @unchecked Sendable {
                 );
 
                 PRAGMA user_version = 8;
+                """
+            )
+        }
+
+        if currentVersion <= 8 {
+            try database.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_launchers (
+                    app_key TEXT PRIMARY KEY,
+                    launcher_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                PRAGMA user_version = 9;
                 """
             )
         }

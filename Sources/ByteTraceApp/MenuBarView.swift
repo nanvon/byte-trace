@@ -265,7 +265,8 @@ struct MenuBarView: View {
                 } else {
                     UsageRows(
                         records: Array(applications.prefix(applicationRowLimit)),
-                        onSelect: openAppDetail
+                        onSelect: openAppDetail,
+                        subtitle: model.subtitle(for:)
                     )
                     if applications.count > collapsedRowLimit {
                         Button {
@@ -352,7 +353,8 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 0) {
             UsageRows(
                 records: Array(records.prefix(sectionRowLimit)),
-                onSelect: openAppDetail
+                onSelect: openAppDetail,
+                subtitle: model.subtitle(for:)
             )
             if records.count > sectionRowLimit {
                 Button("在主窗口查看全部 \(records.count) \(noun)") {
@@ -551,6 +553,7 @@ private struct CollapsibleSectionCard<Content: View>: View {
 private struct UsageRows: View {
     let records: [DailyUsageRecord]
     let onSelect: (String) -> Void
+    var subtitle: (DailyUsageRecord) -> String? = { _ in nil }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -567,7 +570,8 @@ private struct UsageRows: View {
                         share: largest > 0
                             ? Double(UsageRowView.totalBytes(of: record)) / Double(largest)
                             : 0,
-                        showsPathHint: duplicateNames.contains(record.displayName)
+                        showsPathHint: duplicateNames.contains(record.displayName),
+                        subtitle: subtitle(record)
                     )
                 }
                 .buttonStyle(.plain)
@@ -586,6 +590,7 @@ private struct UsageRowView: View {
     let record: DailyUsageRecord
     let share: Double
     var showsPathHint: Bool = false
+    var subtitle: String?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -614,6 +619,12 @@ private struct UsageRowView: View {
                     .fixedSize()
                 }
 
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
                 if showsPathHint, let path = record.bundlePath ?? record.executablePath {
                     Text(ByteTraceViewModel.abbreviatedPath(path))
                         .font(.caption)

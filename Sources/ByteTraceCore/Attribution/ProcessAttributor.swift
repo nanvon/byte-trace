@@ -17,6 +17,8 @@ public struct AttributedProcess: Equatable, Sendable {
     public let executablePath: String?
     public let bundleID: String?
     public let bundlePath: String?
+    /// 无应用包的命令行进程由谁启动（如「终端」「claude」），仅用于展示，不参与 appKey。
+    public let launcherName: String?
 
     public init(
         appKey: String,
@@ -27,8 +29,10 @@ public struct AttributedProcess: Equatable, Sendable {
         nettopProcessName: String,
         executablePath: String?,
         bundleID: String?,
-        bundlePath: String?
+        bundlePath: String?,
+        launcherName: String? = nil
     ) {
+        self.launcherName = launcherName
         self.appKey = appKey
         self.displayName = displayName
         self.category = category
@@ -103,8 +107,42 @@ public struct ProcessAttributor: Sendable {
             nettopProcessName: identity.nettopProcessName,
             executablePath: executablePath,
             bundleID: host.bundleID,
-            bundlePath: host.bundlePath
+            bundlePath: host.bundlePath,
+            launcherName: host.bundleID == nil && host.bundlePath == nil
+                ? Self.launcherName(for: identity)
+                : nil
         )
+    }
+
+    private static let transparentLauncherNames: Set<String> = [
+        "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu",
+        "login", "sudo", "env", "nohup", "tmux", "screen", "script", "xargs",
+        "make", "timeout", "time", "launchd"
+    ]
+
+    /// 沿父进程链找最近一个有辨识度的启动者：跳过 shell、launchd、系统目录下的通用工具，
+    /// 以及与自身是同一个可执行文件的父进程。应用取应用名，命令行工具取路径派生名。
+    static func launcherName(for identity: ProcessIdentity) -> String? {
+        let ownPath = canonicalPath(identity.executablePath).map(ExecutablePathNormalizer.normalize)
+        for ancestor in identity.ancestors where ancestor.pid > 1 {
+            let path = canonicalPath(ancestor.executablePath)
+            if let bundlePath = validatedBundlePath(ancestor.bundlePath) {
+                if let name = ancestor.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !name.isEmpty {
+                    return name
+                }
+                return URL(fileURLWithPath: bundlePath).deletingPathExtension().lastPathComponent
+            }
+            guard let path else { continue }
+            let fileName = URL(fileURLWithPath: path).lastPathComponent
+            if transparentLauncherNames.contains(fileName)
+                || isSystemExecutable(path)
+                || ExecutablePathNormalizer.normalize(path) == ownPath {
+                continue
+            }
+            return ExecutablePathNormalizer.displayName(forExecutablePath: path) ?? fileName
+        }
+        return nil
     }
 
     private struct HostCandidate {

@@ -327,7 +327,8 @@ private struct MainUsagePage: View {
                         let breakdown = model.routeBreakdown(for: [record])
                         guard breakdown.hasKnownRoute else { return nil }
                         return breakdown.fraction(of: breakdown.proxiedBytes)
-                    }
+                    },
+                    subtitle: model.subtitle(for:)
                 )
                 if isTruncated {
                     Divider()
@@ -614,6 +615,7 @@ private struct UsageTable: View {
     let records: [DailyUsageRecord]
     let shareBase: Int64
     var proxiedShare: (DailyUsageRecord) -> Double? = { _ in nil }
+    var subtitle: (DailyUsageRecord) -> String? = { _ in nil }
 
     private static let numberColumnWidth: CGFloat = 90
     private static let shareColumnWidth: CGFloat = 150
@@ -649,7 +651,8 @@ private struct UsageTable: View {
                             numberColumnWidth: Self.numberColumnWidth,
                             shareColumnWidth: Self.shareColumnWidth,
                             showsPathHint: duplicateNames.contains(record.displayName),
-                            proxiedShare: proxiedShare(record)
+                            proxiedShare: proxiedShare(record),
+                            subtitle: subtitle(record)
                         )
                     }
                     .buttonStyle(.plain)
@@ -680,6 +683,8 @@ private struct UsageTableRow: View {
     var showsPathHint: Bool = false
     /// 经代理流量占该行的比例；无路径数据或占比不足 1% 时为 nil，不显示标签。
     var proxiedShare: Double?
+    /// 系统进程用途说明或命令行进程的启动者。
+    var subtitle: String?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -702,6 +707,13 @@ private struct UsageTableRow: View {
                                 )
                                 .fixedSize()
                         }
+                    }
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help(subtitle)
                     }
                     if showsPathHint, let path = record.bundlePath ?? record.executablePath {
                         Text(ByteTraceViewModel.abbreviatedPath(path))
@@ -801,6 +813,17 @@ private struct AppDetailView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(record.displayName)
                     .font(.title2.weight(.semibold))
+                if let subtitle = model.subtitle(for: record) {
+                    Text(subtitle)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if record.bundlePath == nil, let path = record.executablePath {
+                    Text(ByteTraceViewModel.abbreviatedPath(path))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                }
                 Text(model.selectedRange.title)
                     .font(.caption)
                     .foregroundStyle(.secondary)

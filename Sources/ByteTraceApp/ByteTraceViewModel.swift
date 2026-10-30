@@ -257,6 +257,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     /// 菜单栏面板的最近 1 小时分钟趋势（不含代理传输）。
     @Published private(set) var menuBarHourTimeline: [UsageTimelinePoint] = []
     @Published private(set) var rangeRecords: [DailyUsageRecord] = []
+    /// 命令行进程最近一次的启动者（appKey → 名称），供列表副标题使用。
+    @Published private(set) var launcherNames: [String: String] = [:]
     @Published private(set) var rangeBars: [UsageChartBar] = []
     @Published private(set) var detailTimeline: [UsageTimelinePoint] = []
     @Published private(set) var bucketStats: UsageBucketStats?
@@ -328,6 +330,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var externalGapRecovery = NettopRestartGapRecovery()
     private var supplementalResidualTracker = SupplementalResidualTracker()
     private var pendingSupplementalProcessTotals: [NettopDelta] = []
+    private var pendingLauncherNames: [String: String] = [:]
     private var mihomoController: MihomoController?
     private var mihomoTimer: Timer?
     private var mihomoFetchInFlight = false
@@ -401,6 +404,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             let store = try UsageStore(databaseURL: databaseURL)
             self.store = store
             aggregator = UsageAggregator(store: store)
+            _launcherNames = Published(initialValue: (try? store.launcherNames()) ?? [:])
         } catch {
             store = nil
             aggregator = nil
@@ -801,6 +805,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         do {
             try store.clearAll()
             aggregator.discardPending()
+            pendingLauncherNames = [:]
+            launcherNames = [:]
             records = []
             menuBarHourTimeline = []
             rangeRecords = []
@@ -913,6 +919,19 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             counts[record.displayName, default: 0] += 1
         }
         return Set(counts.filter { $0.value > 1 }.keys)
+    }
+
+    /// 列表副标题：系统进程的中文用途说明，命令行进程的启动者。
+    func subtitle(for record: DailyUsageRecord) -> String? {
+        var parts: [String] = []
+        if record.category != .userApp,
+           let description = SystemProcessDescriptions.description(forExecutablePath: record.executablePath) {
+            parts.append(description)
+        }
+        if let launcher = launcherNames[record.appKey], launcher != record.displayName {
+            parts.append("由 \(launcher) 启动")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     static func abbreviatedPath(_ path: String) -> String {
@@ -1370,6 +1389,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         if attributed.category == .proxyTransport, let pid = attributed.pid {
             noteProxyProcess(pid: pid)
         }
+        if let launcherName = attributed.launcherName,
+           launcherNames[attributed.appKey] != launcherName {
+            pendingLauncherNames[attributed.appKey] = launcherName
+        }
         guard let aggregator else { return }
 
         do {
@@ -1556,6 +1579,11 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         guard let aggregator else { return }
         do {
             _ = try aggregator.flush()
+            if !pendingLauncherNames.isEmpty, let store {
+                try store.recordLaunchers(pendingLauncherNames)
+                launcherNames.merge(pendingLauncherNames) { _, new in new }
+                pendingLauncherNames = [:]
+            }
             refreshIfNeeded(force: forceRefresh)
         } catch {
             lastError = "数据库写入失败：\(error.localizedDescription)"

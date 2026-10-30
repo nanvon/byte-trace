@@ -93,6 +93,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 - `hostCandidate()` 会沿父进程链（最多 8 层）向上找「可执行文件位于其 `.app/Contents/` 内、且 bundlePath 最短」的祖先。这是 helper 进程（如浏览器子进程）能归属到主应用的原因。
 - `ProcessAttributionCache` 以 `(pid, processStartTime)` 为键，规避 pid 复用。
+- **展示辅助（不参与 appKey）**：没有宿主应用的进程由 `ProcessAttributor.launcherName(for:)` 沿父进程链找启动者（跳过 shell、launchd、系统目录工具和同一可执行文件），列表副标题显示「由 X 启动」；常见系统守护进程的中文用途在 `SystemProcessDescriptions`（按可执行文件名匹配，mDNSResponder 标为「局域网/Bonjour」）。进程在被解析前就退出时拿不到路径和父进程，这两项都为空。
 - 分类 `AppCategory`：`userApp` / `systemProcess`（可执行文件位于 `/System/`、`/usr/bin/` 等前缀）/ `proxyTransport` / `unclassified`。
 - 新增代理进程：在 `ProxyClassifier.defaultClassifier` 加一条 `ProxyRule`（可按 bundleID / 可执行路径 / 进程名匹配）。静态规则之外，补充通道里本地端点等于系统代理端点的 lo0 连接所属进程（代理监听端）会被自动登记为代理（`TrafficFilter.proxyListenerProcessTokens` → `ProcessAttributionCache.registerDetectedProxy`），路径持久化在 `UserDefaults` 键 `ByteTrace.detectedProxyExecutables`；代理内核常以 root 运行，lsof 看不到它的监听套接字，所以用 nettop 数据识别。代理流量**单独展示、不做反向抵扣、不计入应用总量**——UI 各处统一用 `category != .proxyTransport` 过滤，新增汇总逻辑时必须沿用。
 
@@ -100,11 +101,11 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 自己封装的 `SQLiteDatabase`（直接调 SQLite3 C API，无第三方依赖），WAL + `busy_timeout=5000` + `foreign_keys=ON`。路径：`~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3`。
 
-五张表：`apps`、`daily_usage`（键 `accounting_version`+`day`+`app_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`，分钟粒度）、`daily_route_usage`（键 `accounting_version`+`day`+`app_key`+`route`）、`collector_events`。
+六张表：`apps`、`daily_usage`（键 `accounting_version`+`day`+`app_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`，分钟粒度）、`daily_route_usage`（键 `accounting_version`+`day`+`app_key`+`route`）、`app_launchers`（键 `app_key`，命令行进程最近一次的启动者，覆盖写入、仅用于展示）、`collector_events`。
 
 **流量路径**（`TrafficRoute`）：外部通道的非代理进程记 `direct`；补充通道（系统代理 lo0 / TUN utun）记 `proxied`，读到 mihomo 连接表时细分为 `proxy_node` / `proxy_rule_direct`。路径只写 `daily_route_usage` 一张旁表，`daily_usage` / `usage_buckets` 的总量与口径不变；代理传输不记路径。路径上线前的历史没有路径行，界面把「日汇总 − 路径合计」显示为「未区分」。「最近 1 小时」没有分钟级路径，按今天的拆分近似并注明。
 
-**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 8`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径；版本 8 新增 `daily_route_usage`。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
+**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 9`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径；版本 8 新增 `daily_route_usage`；版本 9 新增 `app_launchers`。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
 
 **写入是累加而非幂等**：所有 upsert 都是 `ON CONFLICT ... DO UPDATE SET x = x + excluded.x`。同一批聚合重复 flush 会双计。`flush()` 成功后必须清空 pending（现有代码已如此）。
 
