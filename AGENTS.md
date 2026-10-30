@@ -52,7 +52,7 @@ ByteTrace 按 nettop 接口类型拆分成两个常驻通道，避免高功耗�
 
 设置「代理分流」默认开启时，`ByteTraceViewModel` 每 2 秒读取一次 mihomo 的 `/connections`，用应用侧本地端点（`metadata.sourceIP:sourcePort`，系统代理为 `127.0.0.1:端口`，TUN 为 `198.18.0.1:端口`）匹配补充通道的连接，按 `chains[0]` 把经代理流量细分为「代理节点」与「规则直连」（`DIRECT`）。只在最近 30 秒见过补充通道流量时才运行定时器：超过 30 秒没有补充通道流量就停掉定时器，下一帧补充通道流量到来时再启动，空闲时不产生唤醒。连接表只在内存里保留 120 秒，不落库、不展示域名。`--routes` 实测（ClashBar，TUN 开启）：直连 curl 经 TUN 走节点、经系统代理走节点、经系统代理命中 `cn_domain` 规则直连三个用例，字节比值 1.002–1.006，路径分类 100% 命中。
 
-- 控制器发现顺序：已识别代理进程的启动参数（`-ext-ctl` / `-ext-ctl-unix` / `-secret`，以及 `-f` / `-d` 指向配置的顶层 `external-controller` / `secret`）→ `/tmp/verge/verge-mihomo.sock` → `127.0.0.1:9090`；找不到时每 30 秒重试。代理内核常以 root 运行，参数通过 `KERN_PROCARGS2` 读取。
+- 控制器发现顺序：已识别代理进程的启动参数（`-ext-ctl` / `-ext-ctl-unix` / `-secret`，以及 `-f` / `-d` 指向配置的顶层 `external-controller` / `secret`）→ `/tmp/verge/verge-mihomo.sock` → `127.0.0.1:9090`；找不到时每 30 秒重试；新识别出代理进程时立即重新查找，避免启动后前 30 秒的经代理流量都记为「出口未知」。代理内核常以 root 运行，参数通过 `KERN_PROCARGS2` 读取。
 - TCP 请求用不走系统代理的 `URLSession`；unix socket 用 POSIX 套接字发 HTTP/1.0，响应兼容 chunked。
 - 读不到连接表时补充通道仍记 `proxied`，总量不受影响。代理外层流量的「节点 / 规则直连」只按应用侧比例估算，仅在代理页展示，不计入应用总量，也不用 mihomo 的总字节数修正 nettop 结果。
 
@@ -106,7 +106,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 六张表：`apps`、`daily_usage`（键 `accounting_version`+`day`+`app_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`，分钟粒度）、`daily_route_usage`（键 `accounting_version`+`day`+`app_key`+`route`）、`app_launchers`（键 `app_key`，命令行进程最近一次的启动者，覆盖写入、仅用于展示）、`collector_events`。
 
-**流量路径**（`TrafficRoute`）：外部通道的非代理进程记 `direct`；补充通道（系统代理 lo0 / TUN utun）记 `proxied`，读到 mihomo 连接表时细分为 `proxy_node` / `proxy_rule_direct`。路径只写 `daily_route_usage` 一张旁表，`daily_usage` / `usage_buckets` 的总量与口径不变；代理传输不记路径。路径上线前的历史没有路径行，界面把「日汇总 − 路径合计」显示为「未区分」。「最近 1 小时」没有分钟级路径，按今天的拆分近似并注明。卡片标题与列表行的「走节点 X%」／「经代理 X%」只在已区分路径的流量里计算，且已区分部分不足全部流量的一半时不显示（`RouteBreakdown.Share.isRepresentative`），避免升级初期被「未区分」压成接近 0；覆盖不足 99% 时标题加「已区分部分中」。
+**流量路径**（`TrafficRoute`）：外部通道的非代理进程记 `direct`；补充通道（系统代理 lo0 / TUN utun）记 `proxied`，读到 mihomo 连接表时细分为 `proxy_node` / `proxy_rule_direct`。路径只写 `daily_route_usage` 一张旁表，`daily_usage` / `usage_buckets` 的总量与口径不变；代理传输不记路径。路径上线前的历史没有路径行，界面把「日汇总 − 路径合计」显示为「未区分」。「最近 1 小时」没有分钟级路径，按今天的拆分近似并注明。卡片标题与列表行的「走节点 X%」／「经代理 X%」只在已区分路径的流量里计算，且已区分部分不足全部流量的一半时不显示（`RouteBreakdown.Share.isRepresentative`），避免升级初期被「未区分」压成接近 0；覆盖不足 99% 时标题加「已区分部分中」。代理页的「代理外层流量去向（估算）」同理：应用侧有路径记录的经代理流量不足代理外层字节的一半时不显示。
 
 **迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 9`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径；版本 8 新增 `daily_route_usage`；版本 9 新增 `app_launchers`。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
 

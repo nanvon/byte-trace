@@ -276,6 +276,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     static let bundleIdentifier = "com.nanvon.ByteTrace"
 
     @Published private(set) var records: [DailyUsageRecord] = []
+    /// 今日应用侧已识别为代理节点的上下行总量。
+    @Published private(set) var todayProxyNodeBytes: Int64 = 0
     @Published private(set) var status: MonitorStatus = .stopped
     @Published private(set) var lastError: String?
     @Published var requestedMainWindowPage: MainWindowPage = .overview
@@ -699,6 +701,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     func refresh() {
         guard let store else {
             records = []
+            todayProxyNodeBytes = 0
             menuBarHourTimeline = []
             rangeRecords = []
             rangeBars = []
@@ -726,6 +729,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     func refreshToday() {
         guard let store else {
             records = []
+            todayProxyNodeBytes = 0
             menuBarHourTimeline = []
             return
         }
@@ -814,12 +818,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     func proxyTransportEstimate(proxyBytes: Int64) -> RouteBreakdown? {
         var node: Int64 = 0
         var ruleDirect: Int64 = 0
+        var unknownExit: Int64 = 0
         for routes in rangeRouteUsage.values {
             node = saturatingAdd(node, routes[.proxyNode] ?? 0)
             ruleDirect = saturatingAdd(ruleDirect, routes[.proxyRuleDirect] ?? 0)
+            unknownExit = saturatingAdd(unknownExit, routes[.proxied] ?? 0)
         }
         let known = saturatingAdd(node, ruleDirect)
         guard proxyBytes > 0, known > 0 else { return nil }
+        // 应用侧有路径记录的经代理流量不足代理外层的一半时（多为更新前的数据），比例代表性不足，不估算。
+        guard Double(saturatingAdd(known, unknownExit)) >= Double(proxyBytes) * 0.5 else { return nil }
         let nodeBytes = Int64(Double(proxyBytes) * Double(node) / Double(known))
         return RouteBreakdown(
             items: [
@@ -843,6 +851,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             pendingLauncherNames = [:]
             launcherNames = [:]
             records = []
+            todayProxyNodeBytes = 0
             menuBarHourTimeline = []
             rangeRecords = []
             rangeRouteUsage = [:]
@@ -1416,8 +1425,13 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     private func noteProxyProcess(pid: Int32) {
         guard proxyProcessPIDs.last != pid else { return }
+        let isNew = !proxyProcessPIDs.contains(pid)
         proxyProcessPIDs.removeAll { $0 == pid }
         proxyProcessPIDs.append(pid)
+        // 新识别出代理内核时立即重新查找控制器，不等 30 秒重试间隔。
+        if isNew, mihomoController == nil {
+            lastMihomoDiscoveryAt = nil
+        }
         if proxyProcessPIDs.count > 8 {
             proxyProcessPIDs.removeFirst(proxyProcessPIDs.count - 8)
         }
@@ -1739,8 +1753,14 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     @discardableResult
     private func loadToday(from store: UsageStore) throws -> [DailyUsageRecord] {
-        let newRecords = try store.dailyUsage(for: dayKey)
+        let today = dayKey
+        let newRecords = try store.dailyUsage(for: today)
+        let appKeys = Set(newRecords.filter { $0.category != .proxyTransport }.map(\.appKey))
+        let nodeBytes = try store.routeUsage(from: today, through: today)
+            .filter { $0.route == .proxyNode && appKeys.contains($0.appKey) }
+            .reduce(Int64(0)) { saturatingAdd($0, $1.totalBytes) }
         if newRecords != records { records = newRecords }
+        if nodeBytes != todayProxyNodeBytes { todayProxyNodeBytes = nodeBytes }
         return newRecords
     }
 
