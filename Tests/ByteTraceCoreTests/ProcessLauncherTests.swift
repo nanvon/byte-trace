@@ -78,7 +78,10 @@ final class ProcessLauncherTests: XCTestCase {
             SystemProcessDescriptions.description(forExecutablePath: "/usr/sbin/mDNSResponder"),
             "局域网/Bonjour：DNS 解析与局域网设备发现"
         )
-        XCTAssertNotNil(SystemProcessDescriptions.description(forExecutablePath: "/usr/libexec/nsurlsessiond"))
+        XCTAssertEqual(
+            SystemProcessDescriptions.description(forExecutablePath: "/usr/libexec/nsurlsessiond"),
+            "系统后台传输服务，替 App Store、iCloud、系统更新及其他应用下载（无法区分具体应用）"
+        )
         XCTAssertNil(SystemProcessDescriptions.description(forExecutablePath: "/usr/bin/curl"))
         XCTAssertNil(SystemProcessDescriptions.description(forExecutablePath: nil))
     }

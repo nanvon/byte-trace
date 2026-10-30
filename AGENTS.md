@@ -22,6 +22,7 @@ swift run ByteTraceApp                       # 开发模式运行菜单栏应用
 ```bash
 swift run ByteTraceProbe --duration 15 # 应用级采集
 swift run ByteTraceProbe --accuracy    # 用 curl 直连／经系统代理各下载 20 MB，对照两个通道的计数（会产生真实下载流量）
+swift run ByteTraceProbe --restart-check  # 两个外部通道同时采集，一个中途重启并做间隙补偿，对照不中断的通道（会产生真实下载流量）
 ```
 
 `package_app.sh` 环境变量：`BYTE_TRACE_SIGNING_IDENTITY`（默认 `-`，ad-hoc）、`BYTE_TRACE_SWIFT_TRIPLE`（仅接受 `arm64` 目标，默认跟随 `Info.plist` 的最低系统版本）。
@@ -73,7 +74,7 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 
 - nettop 每个采样周期重复输出一次以 `time` 开头的表头行；解析器**靠下一个表头到来才结束上一帧**（`beginFrame` 内先调 `completeCurrentFrame`）。因此流中最后一帧只会在 `stop()` / `finish()` 时才吐出。
 - **两个通道分别丢弃首帧**（`deltas = []`，仅置 `hasBaseline = true`）：`-d` 模式下首帧携带的是启动时刻的累计值而非增量。每次重启 nettop（重连、唤醒、网络切换）都会重新经历一次基线帧。
-- **外部通道重启间隙补偿**（`NettopRestartGapRecovery`）：`-P` 基线是进程生命周期累计值，不同 nettop 实例之间一致，解析器在基线帧前发出 `baselineCaptured`，「新基线 − (旧基线 + 期间增量)」即漏记字节。只补上一轮见过的进程、停止到新基线不超过 60 秒、负值按 0、单进程按 10 Gbps 设上限；`start()` 时 `arm()`，`stop()` / `shutdown()` 释放数据目录锁时 `reset()`，避免另一个实例接管期间的流量被重复补记。补充通道的重启间隙仍按已知取舍丢弃。
+- **外部通道重启间隙补偿**（`NettopRestartGapRecovery`）：`-P` 基线是进程生命周期累计值，不同 nettop 实例之间一致，解析器在基线帧前发出 `baselineCaptured`，「新基线 − (旧基线 + 期间增量)」即漏记字节。只补上一轮见过的进程、停止到新基线不超过 60 秒、负值按 0、单进程按 10 Gbps 设上限；`start()` 时 `arm()`，`stop()` / `shutdown()` 释放数据目录锁时 `reset()`，避免另一个实例接管期间的流量被重复补记。`--restart-check` 实测：下载中途重启 3 秒，不补偿缺 63%–66%，补偿后缺 0.7%–1.1%（剩余是两个实例结束时采样时刻错开）。补充通道的重启间隙仍按已知取舍丢弃。
 - 外部通道表头缺少 `time` / `bytes_in` / `bytes_out` / 进程列 → 全部采集停止且不再自动重连，避免写入脏数据。补充通道还要求 `interface`；仅补充格式不兼容时，外部通道继续工作并提示系统代理与 TUN 补充流量暂不可统计。
 - 两个子进程都设置 `NSUnbufferedIO=YES`：`-L 0` 输出到普通 Pipe 时默认会整块缓冲，精简 `-J` 列后低流量场景可能长时间收不到完整帧；禁用子进程 stdio 缓冲可按各自采样周期逐帧交付。
 - 父进程读取 stdout 使用 POSIX `read()`；不要改回 `FileHandle.read(upToCount: 64KB)`，后者在低输出的 `-P` 通道上可能等到大块数据或 EOF 才返回，导致 UI 长时间收不到帧。
@@ -94,6 +95,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 - `hostCandidate()` 会沿父进程链（最多 8 层）向上找「可执行文件位于其 `.app/Contents/` 内、且 bundlePath 最短」的祖先。这是 helper 进程（如浏览器子进程）能归属到主应用的原因。
 - `ProcessAttributionCache` 以 `(pid, processStartTime)` 为键，规避 pid 复用。
 - **展示辅助（不参与 appKey）**：没有宿主应用的进程由 `ProcessAttributor.launcherName(for:)` 沿父进程链找启动者（跳过 shell、launchd、系统目录工具和同一可执行文件），列表副标题显示「由 X 启动」；常见系统守护进程的中文用途在 `SystemProcessDescriptions`（按可执行文件名匹配，mDNSResponder 标为「局域网/Bonjour」）。进程在被解析前就退出时拿不到路径和父进程，这两项都为空。
+- **nsurlsessiond 无法归属到委托应用**：用后台 URLSession 实测，它的套接字 `epid` 是自己的 pid、`euuid` 是自己的二进制 UUID，nettop 不提供委托方信息，因此只显示用途说明，不要再尝试按 epid 拆分。
 - 分类 `AppCategory`：`userApp` / `systemProcess`（可执行文件位于 `/System/`、`/usr/bin/` 等前缀）/ `proxyTransport` / `unclassified`。
 - 新增代理进程：在 `ProxyClassifier.defaultClassifier` 加一条 `ProxyRule`（可按 bundleID / 可执行路径 / 进程名匹配）。静态规则之外，补充通道里本地端点等于系统代理端点的 lo0 连接所属进程（代理监听端）会被自动登记为代理（`TrafficFilter.proxyListenerProcessTokens` → `ProcessAttributionCache.registerDetectedProxy`），路径持久化在 `UserDefaults` 键 `ByteTrace.detectedProxyExecutables`；代理内核常以 root 运行，lsof 看不到它的监听套接字，所以用 nettop 数据识别。代理流量**单独展示、不做反向抵扣、不计入应用总量**——UI 各处统一用 `category != .proxyTransport` 过滤，新增汇总逻辑时必须沿用。
 

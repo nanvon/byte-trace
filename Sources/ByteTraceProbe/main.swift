@@ -7,12 +7,15 @@ private struct Options {
     /// `--accuracy [URL]`：用 curl 分别直连和经系统代理下载已知大小的内容，
     /// 对照 curl 自报的字节数检查两个通道的计数。
     let accuracyURL: String?
+    /// `--restart-check [URL]`：两个外部通道同时采集，一个中途重启并做间隙补偿，对照另一个不中断的通道。
+    let restartCheckURL: String?
 
     static let defaultAccuracyURL = "https://speed.cloudflare.com/__down?bytes=20000000"
 
     init(arguments: [String]) {
         var duration: TimeInterval = 15
         var accuracyURL: String?
+        var restartCheckURL: String?
         var index = 1
 
         while index < arguments.count {
@@ -28,6 +31,14 @@ private struct Options {
                     accuracyURL = Self.defaultAccuracyURL
                     index += 1
                 }
+            } else if arguments[index] == "--restart-check" {
+                if index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") {
+                    restartCheckURL = arguments[index + 1]
+                    index += 2
+                } else {
+                    restartCheckURL = Self.defaultAccuracyURL
+                    index += 1
+                }
             } else {
                 index += 1
             }
@@ -35,6 +46,7 @@ private struct Options {
 
         self.duration = duration
         self.accuracyURL = accuracyURL
+        self.restartCheckURL = restartCheckURL
     }
 }
 
@@ -536,4 +548,113 @@ private func runProbe(options: Options) -> Int32 {
     return 0
 }
 
-exit(runProbe(options: Options(arguments: CommandLine.arguments)))
+/// 重启间隙补偿实测的状态；所有回调都在主线程执行。
+private final class RestartCheckState: @unchecked Sendable {
+    var referenceBytes: Int64 = 0
+    var restartedBytes: Int64 = 0
+    var recoveredBytes: Int64 = 0
+    var recovery = NettopRestartGapRecovery()
+    var referenceByToken: [String: Int64] = [:]
+    var restartedByToken: [String: Int64] = [:]
+    var recoveredByToken: [String: Int64] = [:]
+
+    static func add(_ deltas: [NettopDelta], to map: inout [String: Int64]) {
+        for delta in deltas {
+            map[delta.processName, default: 0] += delta.downloadBytes + delta.uploadBytes
+        }
+    }
+
+    static func total(_ deltas: [NettopDelta]) -> Int64 {
+        deltas.reduce(0) { $0 + $1.downloadBytes + $1.uploadBytes }
+    }
+}
+
+private func runRestartCheck(url: String) -> Int32 {
+    let state = RestartCheckState()
+    state.recovery.arm()
+    let reference = NettopCollector(scope: .externalProcessSummary)
+    let restarted = NettopCollector(scope: .externalProcessSummary)
+
+    reference.onEvent = { event in
+        if case let .parser(.frameCompleted(_, deltas, false)) = event {
+            state.referenceBytes += RestartCheckState.total(deltas)
+            RestartCheckState.add(deltas, to: &state.referenceByToken)
+        }
+    }
+    restarted.onEvent = { event in
+        guard case let .parser(parserEvent) = event else { return }
+        switch parserEvent {
+        case let .baselineCaptured(rows):
+            let recovered = state.recovery.recover(fromBaseline: rows, at: Date())
+            state.recoveredBytes += RestartCheckState.total(recovered)
+            RestartCheckState.add(recovered, to: &state.recoveredByToken)
+        case let .frameCompleted(_, deltas, false):
+            state.recovery.record(deltas, at: Date())
+            state.restartedBytes += RestartCheckState.total(deltas)
+            RestartCheckState.add(deltas, to: &state.restartedByToken)
+        default:
+            break
+        }
+    }
+
+    let monitor = SystemProxyEndpointMonitor()
+    monitor.start()
+    defer { monitor.stop() }
+    let proxy = monitor.currentLoopbackEndpoints.first.map { "http://\(endpointLabel($0))" }
+
+    do {
+        try reference.start()
+        try restarted.start()
+    } catch {
+        print("[restart-check] FAIL: 无法启动 nettop：\(error.localizedDescription)")
+        return 1
+    }
+    RunLoop.main.run(until: Date().addingTimeInterval(11))
+
+    // 限速下载，保证重启窗口内持续有外部流量（开启 TUN 或经系统代理时体现在代理内核上）。
+    let curl = Process()
+    curl.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+    curl.arguments = ["-s", "-o", "/dev/null", "--limit-rate", "2M"]
+        + (proxy.map { ["-x", $0] } ?? ["--noproxy", "*"]) + [url]
+    do {
+        try curl.run()
+    } catch {
+        print("[restart-check] FAIL: 无法启动 curl：\(error.localizedDescription)")
+        return 1
+    }
+    RunLoop.main.run(until: Date().addingTimeInterval(4))
+    restarted.stop()
+    RunLoop.main.run(until: Date().addingTimeInterval(3))
+    do {
+        try restarted.start()
+    } catch {
+        print("[restart-check] FAIL: 重启 nettop 失败：\(error.localizedDescription)")
+        return 1
+    }
+    while curl.isRunning {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    }
+    RunLoop.main.run(until: Date().addingTimeInterval(7))
+    reference.stop()
+    restarted.stop()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+    for (token, bytes) in state.referenceByToken.sorted(by: { $0.value > $1.value }).prefix(6) {
+        print("[restart-check] token=\(token) reference=\(bytes) restarted=\(state.restartedByToken[token] ?? 0) recovered=\(state.recoveredByToken[token] ?? 0)")
+    }
+    let withRecovery = state.restartedBytes + state.recoveredBytes
+    let referenceTotal = Double(max(state.referenceBytes, 1))
+    let missingWithout = Double(state.referenceBytes - state.restartedBytes) / referenceTotal
+    let missingWith = Double(state.referenceBytes - withRecovery) / referenceTotal
+    print("[restart-check] reference_bytes=\(state.referenceBytes) restarted_bytes=\(state.restartedBytes) recovered_bytes=\(state.recoveredBytes)")
+    print("[restart-check] missing_without_recovery=\(String(format: "%.2f%%", missingWithout * 100)) missing_with_recovery=\(String(format: "%.2f%%", missingWith * 100))")
+    let passed = state.recoveredBytes > 0 && abs(missingWith) < 0.02
+    print("[restart-check] result=\(passed ? "PASS" : "FAIL")")
+    return passed ? 0 : 1
+}
+
+private let probeOptions = Options(arguments: CommandLine.arguments)
+if let url = probeOptions.restartCheckURL {
+    exit(runRestartCheck(url: url))
+}
+exit(runProbe(options: probeOptions))

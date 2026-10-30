@@ -4,7 +4,8 @@ import Foundation
 /// 按可执行文件名匹配；只收录会产生网络流量、且名称本身看不出用途的进程。
 public enum SystemProcessDescriptions {
     private static let descriptions: [String: String] = [
-        "nsurlsessiond": "系统后台下载服务，替 App Store、iCloud、系统更新等执行后台传输",
+        // 实测 nsurlsessiond 替应用下载时套接字的 epid/euuid 仍是它自己，nettop 无法区分委托方。
+        "nsurlsessiond": "系统后台传输服务，替 App Store、iCloud、系统更新及其他应用下载（无法区分具体应用）",
         "mDNSResponder": "局域网/Bonjour：DNS 解析与局域网设备发现",
         "netbiosd": "局域网：Windows 网络共享名称服务",
         "rapportd": "局域网：Apple 设备间接力与通用控制",
