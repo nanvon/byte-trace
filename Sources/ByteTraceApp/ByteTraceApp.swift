@@ -54,6 +54,22 @@ final class ByteTraceAppDelegate: NSObject, NSApplicationDelegate {
     static func prepareMainWindow() {
         _ = NSApplication.shared.setActivationPolicy(.regular)
     }
+
+    /// 主窗口与设置窗口打开的数量；全部关闭后才回到纯菜单栏形态，避免关掉其中一个时另一个失去 Dock 图标。
+    private static var visibleWindowCount = 0
+
+    static func windowDidAppear() {
+        visibleWindowCount += 1
+        prepareMainWindow()
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    static func windowDidDisappear() {
+        visibleWindowCount = max(0, visibleWindowCount - 1)
+        if visibleWindowCount == 0 {
+            NSApplication.shared.setActivationPolicy(.accessory)
+        }
+    }
 }
 
 @main
@@ -85,7 +101,33 @@ struct ByteTraceApp: App {
             CommandGroup(after: .appInfo) {
                 Button("检查更新…") { AppUpdater.shared.checkForUpdates() }
             }
+            CommandGroup(replacing: .appSettings) {
+                OpenSettingsCommand()
+            }
         }
+
+        Window("设置", id: "settings") {
+            SettingsView(model: model)
+                .frame(minWidth: 480, idealWidth: 520, minHeight: 520, idealHeight: 640)
+                .onAppear { ByteTraceAppDelegate.windowDidAppear() }
+                .onDisappear { ByteTraceAppDelegate.windowDidDisappear() }
+        }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 520, height: 640)
+    }
+}
+
+/// 菜单「设置…」（⌘,）打开独立的设置窗口。
+private struct OpenSettingsCommand: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("设置…") {
+            ByteTraceAppDelegate.prepareMainWindow()
+            openWindow(id: "settings")
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut(",", modifiers: .command)
     }
 }
 

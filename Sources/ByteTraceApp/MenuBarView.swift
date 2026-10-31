@@ -102,10 +102,10 @@ struct MenuBarView: View {
             Spacer(minLength: 8)
 
             headerButton(symbolName: "macwindow", label: "打开主窗口") {
-                openMainWindow(page: .overview)
+                openMainWindow()
             }
             headerButton(symbolName: "gearshape", label: "设置") {
-                openMainWindow(page: .settings)
+                openSettingsWindow()
             }
             headerButton(symbolName: "power", label: "退出 ByteTrace") {
                 model.shutdown()
@@ -250,7 +250,7 @@ struct MenuBarView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("全部应用") {
-                    openMainWindow(page: .applications)
+                    openMainWindow(section: .applications)
                 }
                 .buttonStyle(.link)
                 .font(.callout)
@@ -272,7 +272,7 @@ struct MenuBarView: View {
                         applications,
                         collapsedLimit: collapsedRowLimit,
                         isExpanded: $showsMoreApplications,
-                        page: .applications,
+                        section: .applications,
                         noun: "个应用"
                     )
                 }
@@ -307,7 +307,7 @@ struct MenuBarView: View {
                             model.systemRecords,
                             collapsedLimit: collapsedSectionRowLimit,
                             isExpanded: $showsMoreSystemProcesses,
-                            page: .system,
+                            section: .system,
                             noun: "个进程"
                         )
                     }
@@ -332,7 +332,7 @@ struct MenuBarView: View {
                             model.proxyRecords,
                             collapsedLimit: collapsedSectionRowLimit,
                             isExpanded: $showsMoreProxyProcesses,
-                            page: .proxy,
+                            section: .proxy,
                             noun: "个代理进程"
                         )
                     }
@@ -350,7 +350,7 @@ struct MenuBarView: View {
         _ records: [DailyUsageRecord],
         collapsedLimit: Int,
         isExpanded: Binding<Bool>,
-        page: MainWindowPage,
+        section: MainWindowSection,
         noun: String
     ) -> some View {
         let canExpand = records.count > collapsedLimit + 1
@@ -367,13 +367,13 @@ struct MenuBarView: View {
             showMoreButton(isExpanded: isExpanded, moreCount: expandedCount - collapsedLimit)
         }
         if canExpand, isExpanded.wrappedValue, records.count > expandedRowLimit {
-            sectionLink(count: records.count, page: page, noun: noun)
+            sectionLink(count: records.count, section: section, noun: noun)
         }
     }
 
-    private func sectionLink(count: Int, page: MainWindowPage, noun: String) -> some View {
+    private func sectionLink(count: Int, section: MainWindowSection, noun: String) -> some View {
         Button("在主窗口查看全部 \(count) \(noun)") {
-            openMainWindow(page: page)
+            openMainWindow(section: section)
         }
         .buttonStyle(.link)
         .font(.callout)
@@ -419,10 +419,16 @@ struct MenuBarView: View {
         }
     }
 
-    private func openMainWindow(page: MainWindowPage) {
-        model.requestedMainWindowPage = page
+    private func openMainWindow(section: MainWindowSection? = nil) {
+        model.requestedMainWindowSection = section
         ByteTraceAppDelegate.prepareMainWindow()
         openWindow(id: "main")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    private func openSettingsWindow() {
+        ByteTraceAppDelegate.prepareMainWindow()
+        openWindow(id: "settings")
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 

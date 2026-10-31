@@ -12,16 +12,6 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("设置")
-                    .font(.headline)
-                Spacer()
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
-
-            Divider()
-
             Form {
                 Section("采集") {
                     Toggle(

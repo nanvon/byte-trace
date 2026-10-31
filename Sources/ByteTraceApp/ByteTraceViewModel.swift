@@ -25,22 +25,19 @@ struct UsageTotals: Equatable {
     }
 }
 
-enum MainWindowPage: String, Hashable, Identifiable {
-    case overview
+/// 主窗口里的分组；菜单栏据此展开并滚动到对应分组。
+enum MainWindowSection: String, Hashable, Identifiable, CaseIterable {
     case applications
-    case proxy
     case system
-    case settings
+    case proxy
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .overview: return "概览"
         case .applications: return "应用"
-        case .proxy: return "代理传输"
         case .system: return "系统进程"
-        case .settings: return "设置"
+        case .proxy: return "代理传输"
         }
     }
 }
@@ -329,8 +326,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var todayRouteSplit: RouteSplit = .empty
     @Published private(set) var status: MonitorStatus = .stopped
     @Published private(set) var lastError: String?
-    @Published var requestedMainWindowPage: MainWindowPage = .overview
-    /// 从菜单栏点击某个应用后，主窗口概览页据此把导航栈推到该应用详情。
+    /// 菜单栏请求主窗口展开并滚动到的分组；主窗口处理后置回 nil。
+    @Published var requestedMainWindowSection: MainWindowSection?
+    /// 从菜单栏点击某个应用后，主窗口据此选中该行并打开详情栏；处理后置回 nil。
     @Published var pendingAppDetailKey: String?
     @Published var selectedRange: UsageTimeRange = .today {
         didSet {
@@ -551,7 +549,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     func openAppDetail(_ appKey: String) {
-        requestedMainWindowPage = .overview
         pendingAppDetailKey = appKey
     }
 

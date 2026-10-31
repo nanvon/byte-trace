@@ -8,6 +8,8 @@ struct CollapsibleUsageSection<Content: View>: View {
     let symbolName: String
     let tint: Color
     @Binding var isExpanded: Bool
+    /// 标题行右侧的汇总说明，如合计与代理占比。
+    var detail: String?
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -29,6 +31,13 @@ struct CollapsibleUsageSection<Content: View>: View {
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.tertiary)
                     Spacer(minLength: 0)
+                    if let detail {
+                        Text(detail)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    }
                     Image(systemName: "chevron.right")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)

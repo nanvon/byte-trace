@@ -3,190 +3,53 @@ import Charts
 import ByteTraceCore
 import SwiftUI
 
+/// 主窗口单页：顶部统计卡与趋势图，下面按应用 / 系统进程 / 代理传输分组列出全部记录，
+/// 点击一行在右侧详情栏查看该应用，不离开列表。
 struct MainWindowView: View {
     @ObservedObject var model: ByteTraceViewModel
-    @State private var selection: MainWindowPage = .overview
-    /// 窗口打开时把键盘焦点交给侧边栏，否则 AppKit 会落到工具栏的折叠按钮上并画出蓝色焦点底。
-    @FocusState private var isSidebarFocused: Bool
-    var body: some View {
-        NavigationSplitView {
-            List(selection: $selection) {
-                Section("统计") {
-                    sidebarLabel("概览", systemImage: "chart.xyaxis.line", page: .overview)
-                        .tag(MainWindowPage.overview)
-                    sidebarLabel("应用", systemImage: "macwindow", page: .applications)
-                        .badge(count(of: .applications))
-                        .tag(MainWindowPage.applications)
-                    sidebarLabel("代理传输", systemImage: "arrow.triangle.branch", page: .proxy)
-                        .badge(count(of: .proxy))
-                        .tag(MainWindowPage.proxy)
-                    if model.showsSystemProcesses {
-                        sidebarLabel("系统进程", systemImage: "terminal", page: .system)
-                            .badge(count(of: .system))
-                            .tag(MainWindowPage.system)
-                    }
-                }
-                Section {
-                    sidebarLabel("设置", systemImage: "gearshape", page: .settings)
-                        .tag(MainWindowPage.settings)
-                }
-            }
-            .listStyle(.sidebar)
-            .focused($isSidebarFocused)
-            .defaultFocus($isSidebarFocused, true)
-            .safeAreaInset(edge: .bottom) { statusBox }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 212)
-            .navigationTitle("ByteTrace")
-        } detail: {
-            switch selection {
-            case .settings:
-                SettingsView(model: model)
-            default:
-                MainUsagePage(model: model, page: selection) {
-                    selection = .applications
-                }
-                .id(selection)
-            }
-        }
-        .frame(minWidth: 900, idealWidth: 1100, minHeight: 620, idealHeight: 780)
-        .onAppear {
-            selection = model.requestedMainWindowPage
-            ByteTraceAppDelegate.prepareMainWindow()
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            if selection.showsUsage {
-                model.beginObservingUsage(.mainOverview)
-            }
-        }
-        .onDisappear {
-            model.endObservingUsage(.mainOverview)
-            NSApplication.shared.setActivationPolicy(.accessory)
-        }
-        .onChange(of: selection) { oldPage, newPage in
-            if oldPage.showsUsage, !newPage.showsUsage {
-                model.endObservingUsage(.mainOverview)
-            }
-            if newPage.showsUsage {
-                model.beginObservingUsage(.mainOverview)
-            }
-        }
-        .onChange(of: model.requestedMainWindowPage) { _, page in
-            selection = page
-        }
-    }
-
-    private func sidebarLabel(_ title: String, systemImage: String, page: MainWindowPage) -> some View {
-        Label(title, systemImage: systemImage)
-            .labelStyle(MainSidebarLabelStyle(isSelected: selection == page))
-    }
-
-    private func count(of page: MainWindowPage) -> Int {
-        model.rangeRecords.filter(page.includes).count
-    }
-
-    private var statusBox: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(model.status.tint)
-                    .frame(width: 7, height: 7)
-                Text(model.status.title)
-                    .font(.subheadline.weight(.medium))
-            }
-            Text(model.lastError ?? model.status.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .padding(10)
-    }
-}
-
-private struct MainSidebarLabelStyle: LabelStyle {
-    let isSelected: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 8) {
-            configuration.icon
-                .font(.system(size: 12, weight: .regular))
-                .imageScale(.medium)
-                .symbolVariant(.none)
-                .symbolRenderingMode(.monochrome)
-                .frame(width: 14, height: 14)
-                .foregroundStyle(isSelected ? Color.white : Color.secondary)
-            configuration.title
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(isSelected ? Color.white : Color.primary)
-        }
-    }
-}
-
-private extension MainWindowPage {
-    var showsUsage: Bool {
-        self != .settings
-    }
-
-    /// 各统计页展示的记录分类；概览页的表格只列应用。
-    func includes(_ record: DailyUsageRecord) -> Bool {
-        switch self {
-        case .overview, .applications:
-            return record.category == .userApp || record.category == .unclassified
-        case .proxy:
-            return record.category == .proxyTransport
-        case .system:
-            return record.category == .systemProcess
-        case .settings:
-            return false
-        }
-    }
-}
-
-private struct MainUsagePage: View {
-    @ObservedObject var model: ByteTraceViewModel
-    let page: MainWindowPage
-    let onShowAllApplications: () -> Void
+    @Environment(\.openWindow) private var openWindow
 
     @State private var searchText = ""
-    @State private var path = NavigationPath()
+    @State private var expandedSections: Set<MainWindowSection> = [.applications]
+    @State private var selectedAppKey: String?
+    @State private var isInspectorPresented = false
     @State private var exportError: String?
 
-    private let overviewRowLimit = 10
-
-    private var pageRecords: [DailyUsageRecord] {
-        let records = model.rangeRecords.filter(page.includes)
-        guard !searchText.isEmpty else { return records }
-        return records.filter { $0.displayName.localizedCaseInsensitiveContains(searchText) }
-    }
-
-    /// 占比的分母：代理传输页用代理总量，其余用不含代理的总量。
-    private var shareBase: Int64 {
-        page == .proxy
-            ? model.selectedRangeProxyTotals.totalBytes
-            : model.selectedRangeTotals.totalBytes
-    }
-
     var body: some View {
-        NavigationStack(path: $path) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if page == .overview {
+        NavigationStack {
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
                         summaryCards
                         TrendChartCard(
                             bars: model.rangeBars,
                             range: model.selectedRange
                         )
+                        if visibleSections.isEmpty {
+                            emptyCard("没有匹配“\(searchText)”的项目")
+                        }
+                        ForEach(visibleSections) { section in
+                            sectionView(section)
+                                .id(section)
+                        }
                     }
-                    routeSection
-                    tableSection
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 20)
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 20)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .safeAreaInset(edge: .bottom, spacing: 0) { statusBar }
+                .onAppear {
+                    // 首次打开时等布局完成再滚动，否则 scrollTo 找不到目标。
+                    Task { @MainActor in handlePendingRequests(scrollProxy) }
+                }
+                .onChange(of: model.requestedMainWindowSection) { _, section in
+                    if section != nil { handlePendingRequests(scrollProxy) }
+                }
+                .onChange(of: model.pendingAppDetailKey) { _, key in
+                    if key != nil { handlePendingRequests(scrollProxy) }
+                }
             }
-            .background(Color(nsColor: .windowBackgroundColor))
-            .navigationTitle(page.title)
+            .navigationTitle("ByteTrace")
             .searchable(text: $searchText, placement: .toolbar, prompt: "按名称搜索")
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
@@ -197,21 +60,32 @@ private struct MainUsagePage: View {
                         Label("导出", systemImage: "square.and.arrow.up")
                     }
                     .help("导出当前范围 JSON")
+                    Button {
+                        openWindow(id: "settings")
+                    } label: {
+                        Label("设置", systemImage: "gearshape")
+                    }
+                    .help("设置")
+                    Button {
+                        isInspectorPresented.toggle()
+                    } label: {
+                        Label("详情", systemImage: "sidebar.trailing")
+                    }
+                    .help(isInspectorPresented ? "隐藏详情栏" : "显示详情栏")
                 }
             }
-            .navigationDestination(for: String.self) { appKey in
-                AppDetailView(appKey: appKey, model: model)
-            }
-            .onChange(of: model.pendingAppDetailKey) { _, newValue in
-                guard let newValue else { return }
-                path.append(newValue)
-                model.pendingAppDetailKey = nil
-            }
-            .onAppear {
-                if let key = model.pendingAppDetailKey {
-                    path.append(key)
-                    model.pendingAppDetailKey = nil
+            .inspector(isPresented: $isInspectorPresented) {
+                Group {
+                    if let selectedAppKey {
+                        AppDetailView(appKey: selectedAppKey, model: model)
+                            .id(selectedAppKey)
+                    } else {
+                        Text("在列表中选择一项查看详情")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
+                .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
             }
             .alert(
                 "导出失败",
@@ -225,7 +99,155 @@ private struct MainUsagePage: View {
                 Text(exportError ?? "")
             }
         }
+        .frame(minWidth: 900, idealWidth: 1100, minHeight: 620, idealHeight: 780)
+        .onAppear {
+            ByteTraceAppDelegate.windowDidAppear()
+            model.beginObservingUsage(.mainOverview)
+        }
+        .onDisappear {
+            model.endObservingUsage(.mainOverview)
+            ByteTraceAppDelegate.windowDidDisappear()
+        }
     }
+
+    // MARK: - 分组
+
+    private var visibleSections: [MainWindowSection] {
+        MainWindowSection.allCases.filter { section in
+            if section == .system, !model.showsSystemProcesses { return false }
+            // 应用组始终显示，没有流量时给出空状态；其余分组没有记录就隐藏。
+            if section == .applications, searchText.isEmpty { return true }
+            return !records(in: section).isEmpty
+        }
+    }
+
+    private func records(in section: MainWindowSection) -> [DailyUsageRecord] {
+        let records = model.rangeRecords.filter { section.includes($0.category) }
+        guard !searchText.isEmpty else { return records }
+        return records.filter { $0.displayName.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    /// 搜索时所有分组都展开，避免匹配项藏在收起的分组里。
+    private func expansion(of section: MainWindowSection) -> Binding<Bool> {
+        Binding(
+            get: { !searchText.isEmpty || expandedSections.contains(section) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedSections.insert(section)
+                } else {
+                    expandedSections.remove(section)
+                }
+            }
+        )
+    }
+
+    private func sectionView(_ section: MainWindowSection) -> some View {
+        let records = records(in: section)
+        return CollapsibleUsageSection(
+            title: section.title,
+            count: records.count,
+            symbolName: section.symbolName,
+            tint: section == .proxy ? TrafficColor.proxy : .secondary,
+            isExpanded: expansion(of: section),
+            detail: sectionDetail(section, records: records)
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                if section == .proxy, searchText.isEmpty,
+                   let estimate = model.proxyTransportEstimate(
+                       proxyBytes: model.selectedRangeProxyTotals.totalBytes
+                   ) {
+                    RouteSplitCard(
+                        title: "代理外层流量去向（估算）",
+                        split: estimate,
+                        note: "按应用侧直连 / 代理的字节比例估算，不计入应用总量。",
+                        showsProxyShare: false
+                    )
+                }
+                if records.isEmpty {
+                    emptyCard("当前时间范围内暂无应用流量")
+                } else {
+                    UsageTable(
+                        records: records,
+                        // 占比的分母：代理传输用代理总量，其余用不含代理的总量。
+                        shareBase: section == .proxy
+                            ? model.selectedRangeProxyTotals.totalBytes
+                            : model.selectedRangeTotals.totalBytes,
+                        selectedAppKey: selectedAppKey,
+                        onSelect: selectApp,
+                        // 路径只有日粒度，「最近 1 小时」逐行比例没有意义，整列不显示。
+                        showsProxyColumn: section != .proxy && !model.routeBreakdownUsesToday,
+                        proxyShare: { record in
+                            let split = model.routeSplit(for: [record])
+                            return split.isRepresentative ? split.proxyFraction : nil
+                        },
+                        subtitle: model.subtitle(for:)
+                    )
+                    .cardSurface()
+                }
+            }
+        }
+    }
+
+    /// 分组标题右侧：合计，应用与系统进程再加代理占比（样本不足时不显示）。
+    private func sectionDetail(_ section: MainWindowSection, records: [DailyUsageRecord]) -> String? {
+        guard !records.isEmpty else { return nil }
+        let total = records.reduce(Int64(0)) { partial, record in
+            let result = partial.addingReportingOverflow(UsageTableRow.totalBytes(of: record))
+            return result.overflow ? Int64.max : result.partialValue
+        }
+        var parts = ["合计 \(ByteTraceViewModel.formatBytes(total))"]
+        if section == .proxy {
+            parts.append("不计入总量")
+        } else if searchText.isEmpty {
+            let split = model.routeSplit(for: records)
+            if split.isRepresentative {
+                let percent = split.proxyFraction.formatted(.percent.precision(.fractionLength(1)))
+                parts.append(model.routeBreakdownUsesToday ? "代理约 \(percent)" : "代理 \(percent)")
+            }
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func emptyCard(_ message: String) -> some View {
+        Text(message)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .cardSurface()
+    }
+
+    // MARK: - 选择与菜单栏跳转
+
+    private func selectApp(_ appKey: String) {
+        selectedAppKey = appKey
+        isInspectorPresented = true
+    }
+
+    /// 处理菜单栏发来的「展开某分组」「打开某应用详情」请求，处理后置回 nil，同一请求可以再次触发。
+    private func handlePendingRequests(_ scrollProxy: ScrollViewProxy) {
+        if let appKey = model.pendingAppDetailKey {
+            model.pendingAppDetailKey = nil
+            model.requestedMainWindowSection = nil
+            searchText = ""
+            selectApp(appKey)
+            guard let record = model.rangeRecords.first(where: { $0.appKey == appKey }),
+                  let section = MainWindowSection.allCases.first(where: { $0.includes(record.category) })
+            else { return }
+            expandedSections.insert(section)
+            withAnimation(.smooth) {
+                scrollProxy.scrollTo(appKey, anchor: .center)
+            }
+        } else if let section = model.requestedMainWindowSection {
+            model.requestedMainWindowSection = nil
+            searchText = ""
+            expandedSections.insert(section)
+            withAnimation(.smooth) {
+                scrollProxy.scrollTo(section, anchor: .top)
+            }
+        }
+    }
+
+    // MARK: - 工具栏与状态
 
     private var rangePicker: some View {
         Picker("时间范围", selection: $model.selectedRange) {
@@ -238,8 +260,31 @@ private struct MainUsagePage: View {
         .fixedSize()
     }
 
+    private var statusBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(model.status.tint)
+                    .frame(width: 7, height: 7)
+                Text(model.status.title)
+                    .font(.caption.weight(.medium))
+                Text(model.lastError ?? model.status.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(model.lastError ?? model.status.detail)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 7)
+        }
+        .background(.bar)
+    }
+
     /// 总量 | 代理流量 | 直连。当前范围没有任何路径记录时，后两张换成上行 / 下行。
-    /// 代理内核的外层收发（含规则直连）只在「代理传输」页展示，不放在这里，避免和代理流量混淆。
+    /// 代理内核的外层收发（含规则直连）只在「代理传输」分组展示，不放在这里，避免和代理流量混淆。
     private var summaryCards: some View {
         let totals = model.selectedRangeTotals
         let split = model.routeSplit(for: model.rangeRecords)
@@ -272,82 +317,6 @@ private struct MainUsagePage: View {
         }
     }
 
-    /// 概览的直连 / 代理已在顶部卡片里；应用页与系统页按本页记录拆分，代理传输页估算外层去向。
-    @ViewBuilder
-    private var routeSection: some View {
-        if page == .proxy, searchText.isEmpty,
-           let estimate = model.proxyTransportEstimate(
-               proxyBytes: model.selectedRangeProxyTotals.totalBytes
-           ) {
-            RouteSplitCard(
-                title: "代理外层流量去向（估算）",
-                split: estimate,
-                note: "按应用侧直连 / 代理的字节比例估算，不计入应用总量。",
-                showsProxyShare: false
-            )
-        } else if page == .applications || page == .system, searchText.isEmpty {
-            let split = model.routeSplit(for: model.rangeRecords.filter(page.includes))
-            if split.hasKnownRoute {
-                RouteSplitCard(
-                    title: "直连与代理",
-                    split: split,
-                    note: model.routeBreakdownUsesToday ? "「最近 1 小时」按今天的比例估算。" : nil,
-                    help: RouteSplitCard.help(for: split)
-                )
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var tableSection: some View {
-        let records = pageRecords
-        let isTruncated = page == .overview && searchText.isEmpty && records.count > overviewRowLimit
-        let visible = isTruncated ? Array(records.prefix(overviewRowLimit)) : records
-
-        if records.isEmpty {
-            Text(emptyMessage)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(16)
-                .cardSurface()
-        } else {
-            VStack(spacing: 0) {
-                UsageTable(
-                    records: visible,
-                    shareBase: shareBase,
-                    // 路径只有日粒度，「最近 1 小时」逐行比例没有意义，整列不显示。
-                    showsProxyColumn: page != .proxy && !model.routeBreakdownUsesToday,
-                    proxyShare: { record in
-                        let split = model.routeSplit(for: [record])
-                        return split.isRepresentative ? split.proxyFraction : nil
-                    },
-                    subtitle: model.subtitle(for:)
-                )
-                if isTruncated {
-                    Divider()
-                    Button("查看全部 \(records.count) 个应用", action: onShowAllApplications)
-                        .buttonStyle(.link)
-                        .font(.callout)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 9)
-                        .pointingHandCursor()
-                }
-            }
-            .cardSurface()
-        }
-    }
-
-    private var emptyMessage: String {
-        if !searchText.isEmpty {
-            return "没有匹配“\(searchText)”的项目"
-        }
-        switch page {
-        case .proxy: return "当前时间范围内暂无代理传输流量"
-        case .system: return "当前时间范围内暂无系统进程流量"
-        default: return "当前时间范围内暂无应用流量"
-        }
-    }
-
     private func exportCurrentRange() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
@@ -360,6 +329,25 @@ private struct MainUsagePage: View {
             } catch {
                 exportError = error.localizedDescription
             }
+        }
+    }
+}
+
+private extension MainWindowSection {
+    var symbolName: String {
+        switch self {
+        case .applications: return "macwindow"
+        case .system: return "terminal"
+        case .proxy: return "arrow.triangle.branch"
+        }
+    }
+
+    /// 应用组包含无法识别的进程；各组互斥，合起来覆盖全部分类。
+    func includes(_ category: AppCategory) -> Bool {
+        switch self {
+        case .applications: return category == .userApp || category == .unclassified
+        case .system: return category == .systemProcess
+        case .proxy: return category == .proxyTransport
         }
     }
 }
@@ -482,7 +470,7 @@ private struct TrendChartCard: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: 180)
+                .frame(height: 160)
             } else {
                 chart
             }
@@ -572,7 +560,7 @@ private struct TrendChartCard: View {
                 }
             }
         }
-        .frame(height: 200)
+        .frame(height: 160)
     }
 
     private func opacity(for bar: UsageChartBar) -> Double {
@@ -654,6 +642,9 @@ private struct TrendChartCard: View {
 private struct UsageTable: View {
     let records: [DailyUsageRecord]
     let shareBase: Int64
+    /// 详情栏正在展示的行，高亮显示。
+    var selectedAppKey: String?
+    var onSelect: (String) -> Void = { _ in }
     var showsProxyColumn = false
     /// 经代理节点转发的流量占比；没有足够的路径记录时为 nil。
     var proxyShare: (DailyUsageRecord) -> Double? = { _ in nil }
@@ -692,7 +683,9 @@ private struct UsageTable: View {
 
             LazyVStack(spacing: 0) {
                 ForEach(records, id: \.appKey) { record in
-                    NavigationLink(value: record.appKey) {
+                    Button {
+                        onSelect(record.appKey)
+                    } label: {
                         UsageTableRow(
                             record: record,
                             share: share(of: record),
@@ -705,8 +698,12 @@ private struct UsageTable: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .background(
+                        record.appKey == selectedAppKey ? Color.accentColor.opacity(0.12) : Color.clear
+                    )
                     .interactiveHoverHighlight(cornerRadius: 0, opacity: 0.04)
                     .pointingHandCursor()
+                    .id(record.appKey)
                     if record.appKey != records.last?.appKey {
                         Divider()
                             .padding(.leading, 18)
@@ -810,6 +807,7 @@ private struct UsageTableRow: View {
     }
 }
 
+/// 主窗口右侧详情栏的内容。
 private struct AppDetailView: View {
     let appKey: String
     @ObservedObject var model: ByteTraceViewModel
@@ -831,11 +829,8 @@ private struct AppDetailView: View {
                         .padding(.top, 24)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 20)
+            .padding(16)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .navigationTitle(record?.displayName ?? "应用详情")
         .onAppear {
             model.beginObservingAppDetail(appKey)
         }
@@ -845,12 +840,13 @@ private struct AppDetailView: View {
     }
 
     private func appHeader(_ record: DailyUsageRecord) -> some View {
-        HStack(spacing: 14) {
-            AppIconView(record: record, size: 48)
+        HStack(alignment: .top, spacing: 12) {
+            AppIconView(record: record, size: 40)
             VStack(alignment: .leading, spacing: 4) {
                 Text(record.displayName)
-                    .font(.title2.weight(.semibold))
-                if let subtitle = model.subtitle(for: record) {
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(2)
+                if let subtitle = model.detailSubtitle(for: record) {
                     Text(subtitle)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -860,6 +856,7 @@ private struct AppDetailView: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Text(model.selectedRange.title)
                     .font(.caption)
@@ -869,11 +866,11 @@ private struct AppDetailView: View {
         }
     }
 
-    /// 合计 | 直连 | 代理；代理传输或没有足够的路径记录时，后两张换成上行 / 下行。
+    /// 合计 | 代理 | 直连，详情栏较窄，纵向排列；代理传输或没有足够的路径记录时，后两张换成上行 / 下行。
     private func appStats(_ record: DailyUsageRecord) -> some View {
         let total = totalBytes(for: record)
         let split = record.category == .proxyTransport ? RouteSplit.empty : model.routeSplit(for: [record])
-        return HStack(spacing: 12) {
+        return VStack(spacing: 8) {
             SummaryCard(
                 title: "合计",
                 swatch: nil,
@@ -901,8 +898,8 @@ private struct AppDetailView: View {
 
     private var appTimeline: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 16) {
-                Text("应用趋势")
+            HStack(spacing: 12) {
+                Text("趋势")
                     .font(.headline)
                 Spacer()
                 timelineLegend(color: TrafficColor.upload, title: "上行")
@@ -937,10 +934,10 @@ private struct AppDetailView: View {
                         }
                     }
                 }
-                .frame(height: 240)
+                .frame(height: 180)
             }
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 14)
         .padding(.vertical, 14)
         .cardSurface()
     }
