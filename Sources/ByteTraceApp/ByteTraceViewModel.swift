@@ -983,17 +983,25 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     /// 列表副标题：系统进程的中文用途说明，命令行进程的启动者。
     func subtitle(for record: DailyUsageRecord) -> String? {
         var parts: [String] = []
-        // 解析前就退出的进程只剩 nettop 进程名，没有路径可作区分提示。
-        if record.appKey.hasPrefix("process:"),
-           record.bundlePath == nil, record.executablePath == nil {
-            parts.append("进程已退出，未能识别来源")
-        }
         if record.category != .userApp,
            let description = SystemProcessDescriptions.description(forExecutablePath: record.executablePath) {
             parts.append(description)
         }
         if let launcher = launcherNames[record.appKey], launcher != record.displayName {
             parts.append("由 \(launcher) 启动")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// 详情页副标题：在列表副标题前注明解析前就退出、没有路径的进程。
+    func detailSubtitle(for record: DailyUsageRecord) -> String? {
+        var parts: [String] = []
+        if record.appKey.hasPrefix("process:"),
+           record.bundlePath == nil, record.executablePath == nil {
+            parts.append("进程已退出，未能识别来源")
+        }
+        if let subtitle = subtitle(for: record) {
+            parts.append(subtitle)
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }

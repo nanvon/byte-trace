@@ -316,7 +316,7 @@ struct MenuBarView: View {
             }
             if !model.proxyRecords.isEmpty, model.showsSystemProcesses, !model.systemRecords.isEmpty {
                 Divider()
-                    .padding(.leading, 44)
+                    .padding(.leading, 50)
             }
             if !model.proxyRecords.isEmpty {
                 CollapsibleSectionCard(
@@ -612,14 +612,22 @@ private struct CollapsibleSectionCard<Content: View>: View {
                     isExpanded.toggle()
                 }
             } label: {
+                // 图标尺寸、内边距和两行间距与 UsageRowView 一致，标题、合计与下方进程行对齐且等高；
+                // 展开箭头跟在标题后面，不占用右侧合计列。
                 HStack(spacing: 10) {
                     Image(systemName: symbolName)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(tint)
-                        .frame(width: 22, height: 22)
-                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(title)
+                        .frame(width: 28, height: 28)
+                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(title)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        }
                         Text(subtitle)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -629,13 +637,9 @@ private struct CollapsibleSectionCard<Content: View>: View {
                     Text(ByteTraceViewModel.formatBytes(bytes))
                         .fontWeight(.semibold)
                         .monospacedDigit()
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.vertical, 7)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -699,15 +703,30 @@ private struct UsageRowView: View {
             AppIconView(record: record, size: 28)
 
             VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                // 说明跟在名称后面而不单独占一行，所有行保持同样高度；空间不够时先截断说明。
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(record.displayName)
                         .lineLimit(1)
+                        .layoutPriority(1)
+                    if showsPathHint, let path = record.bundlePath ?? record.executablePath {
+                        Text(ByteTraceViewModel.abbreviatedPath(path))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                    } else if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 6)
                     // 与主窗口列表同理，逐行数字滚动动画会让整个面板持续重绘；
                     // 顶部总量只有一个，仍保留动画。
                     Text(ByteTraceViewModel.formatBytes(Self.totalBytes(of: record)))
                         .fontWeight(.semibold)
                         .monospacedDigit()
+                        .fixedSize()
                 }
 
                 HStack(spacing: 8) {
@@ -725,20 +744,6 @@ private struct UsageRowView: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .fixedSize()
-                }
-
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                if showsPathHint, let path = record.bundlePath ?? record.executablePath {
-                    Text(ByteTraceViewModel.abbreviatedPath(path))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
                 }
             }
         }
