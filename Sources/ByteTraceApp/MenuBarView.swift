@@ -9,7 +9,7 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("ByteTrace.menuBar.proxySectionExpanded") private var isProxyExpanded = false
-    @AppStorage("ByteTrace.menuBar.systemSectionExpanded") private var isSystemExpanded = true
+    @AppStorage("ByteTrace.menuBar.systemSectionExpanded") private var isSystemExpanded = false
     @State private var showsMoreApplications = false
     @State private var showsMoreSystemProcesses = false
     @State private var showsMoreProxyProcesses = false
@@ -171,7 +171,7 @@ struct MenuBarView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 HStack(spacing: 4) {
-                    Text("代理流量")
+                    Text("经代理")
                         .foregroundStyle(.secondary)
                     Text(ByteTraceViewModel.formatBytes(model.todayRouteSplit.proxyBytes))
                         .fontWeight(.semibold)
@@ -440,18 +440,15 @@ struct MenuBarView: View {
     }
 }
 
-/// 上行与下行的占比条（上行在左）。今日卡片填满整条；列表行按 `fraction`（相对第一名）截取长度，
-/// 同一行里仍按上行橙、下行蓝拆分，方向不用读数字也能看出来。
+/// 今日卡片的上行与下行占比条（上行在左），上行橙、下行蓝。
 private struct DirectionShareBar: View {
     let downloadBytes: Int64
     let uploadBytes: Int64
-    /// 0...1，填充部分占轨道的比例。
-    var fraction: Double = 1
     var height: CGFloat = 6
 
     var body: some View {
         GeometryReader { geometry in
-            let filledWidth = geometry.size.width * clampedFraction
+            let filledWidth = totalBytes > 0 ? geometry.size.width : 0
             let gap: CGFloat = downloadBytes > 0 && uploadBytes > 0 && filledWidth > 4 ? 1.5 : 0
             let available = max(0, filledWidth - gap)
             ZStack(alignment: .leading) {
@@ -475,11 +472,6 @@ private struct DirectionShareBar: View {
     private var totalBytes: Int64 {
         let result = downloadBytes.addingReportingOverflow(uploadBytes)
         return result.overflow ? Int64.max : result.partialValue
-    }
-
-    private var clampedFraction: Double {
-        guard totalBytes > 0, fraction.isFinite else { return 0 }
-        return min(max(fraction, 0), 1)
     }
 
     private var uploadFraction: Double {
@@ -509,7 +501,7 @@ private struct HourSparkline: View {
         let peak = values.max() ?? 0
         VStack(spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
-                Text("最近 1 小时 · 每分钟")
+                Text("最近 1 小时")
                 Spacer(minLength: 8)
                 if let hoveredIndex, values.indices.contains(hoveredIndex) {
                     Text("\(minuteLabel(at: hoveredIndex, currentMinute: currentMinute)) · \(ByteTraceViewModel.formatBytes(values[hoveredIndex]))")
@@ -546,14 +538,6 @@ private struct HourSparkline: View {
                     hoveredIndex = nil
                 }
             }
-
-            HStack {
-                Text("60 分钟前")
-                Spacer()
-                Text("现在")
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("最近 1 小时每分钟流量")
@@ -671,7 +655,6 @@ private struct UsageRows: View {
 
     var body: some View {
         let duplicateNames = ByteTraceViewModel.duplicateDisplayNames(in: records)
-        let largest = records.map(UsageRowView.totalBytes(of:)).max() ?? 0
         VStack(spacing: 0) {
             ForEach(records, id: \.appKey) { record in
                 Button {
@@ -679,52 +662,48 @@ private struct UsageRows: View {
                 } label: {
                     UsageRowView(
                         record: record,
-                        share: largest > 0
-                            ? Double(UsageRowView.totalBytes(of: record)) / Double(largest)
-                            : 0,
-                        showsPathHint: duplicateNames.contains(record.displayName),
-                        subtitle: subtitle(record)
+                        showsPathHint: duplicateNames.contains(record.displayName)
                     )
                 }
                 .buttonStyle(.plain)
                 .interactiveHoverHighlight(cornerRadius: 6)
                 .pointingHandCursor()
-                .help("在主窗口查看 \(record.displayName)")
+                // 「由 X 启动」和进程用途不占行内空间，悬停时与跳转提示一起显示。
+                .help(help(for: record))
             }
         }
         .padding(.horizontal, 4)
         // 只在行集合本身变化（排名变动、增删应用）时做布局动画，字节数变化不触发。
         .animation(reduceMotion ? nil : .smooth, value: records.map(\.appKey))
     }
+
+    private func help(for record: DailyUsageRecord) -> String {
+        let action = "在主窗口查看 \(record.displayName)"
+        guard let detail = subtitle(record) else { return action }
+        return "\(detail)\n\(action)"
+    }
 }
 
 private struct UsageRowView: View {
     let record: DailyUsageRecord
-    let share: Double
     var showsPathHint: Bool = false
-    var subtitle: String?
 
     var body: some View {
         HStack(spacing: 10) {
             AppIconView(record: record, size: 28)
 
             VStack(alignment: .leading, spacing: 4) {
-                // 说明跟在名称后面而不单独占一行，所有行保持同样高度；空间不够时先截断说明。
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(record.displayName)
                         .lineLimit(1)
                         .layoutPriority(1)
+                    // 同名进程只能靠路径区分，仍跟在名称后面显示。
                     if showsPathHint, let path = record.bundlePath ?? record.executablePath {
                         Text(ByteTraceViewModel.abbreviatedPath(path))
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .truncationMode(.head)
-                    } else if let subtitle {
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
                     }
                     Spacer(minLength: 6)
                     // 与主窗口列表同理，逐行数字滚动动画会让整个面板持续重绘；
@@ -735,22 +714,15 @@ private struct UsageRowView: View {
                         .fixedSize()
                 }
 
-                HStack(spacing: 8) {
-                    DirectionShareBar(
-                        downloadBytes: record.downloadBytes,
-                        uploadBytes: record.uploadBytes,
-                        fraction: share,
-                        height: 4
-                    )
-                    // 箭头沿用占比条的方向配色，对应关系一眼可见。
-                    Text(
-                        "\(Text("↑").foregroundStyle(TrafficColor.upload)) \(ByteTraceViewModel.formatBytes(record.uploadBytes))  \(Text("↓").foregroundStyle(TrafficColor.download)) \(ByteTraceViewModel.formatBytes(record.downloadBytes))"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .fixedSize()
-                }
+                // 不再画占比条：每行一条长条在列表里叠成条纹，上下行数字已能说明方向。
+                // 箭头沿用今日卡片占比条的方向配色。
+                Text(
+                    "\(Text("↑").foregroundStyle(TrafficColor.upload)) \(ByteTraceViewModel.formatBytes(record.uploadBytes))  \(Text("↓").foregroundStyle(TrafficColor.download)) \(ByteTraceViewModel.formatBytes(record.downloadBytes))"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
             }
         }
         .padding(.horizontal, 8)
