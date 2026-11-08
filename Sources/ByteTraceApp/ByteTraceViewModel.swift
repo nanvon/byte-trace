@@ -189,6 +189,8 @@ struct HostProgramShare: Identifiable, Equatable {
     let name: String
     let iconRecord: DailyUsageRecord
     let bytes: Int64
+    /// 系统进程的中文用途（如「系统软件更新下载」）；其他程序为空。
+    let description: String?
 
     var id: String { programKey }
     var isApplicationItself: Bool { programKey.isEmpty }
@@ -845,11 +847,15 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     /// 宿主下的程序排行（含应用本身），按流量排序。
     func programs(forHost record: DailyUsageRecord) -> [HostProgramShare] {
         (rangeProgramsByHost[record.appKey] ?? []).map { program in
-            HostProgramShare(
+            let iconRecord = program.programKey.isEmpty ? record : Self.iconRecord(for: program)
+            return HostProgramShare(
                 programKey: program.programKey,
                 name: program.programKey.isEmpty ? "应用本身" : program.programName ?? program.programKey,
-                iconRecord: program.programKey.isEmpty ? record : Self.iconRecord(for: program),
-                bytes: program.totalBytes
+                iconRecord: iconRecord,
+                bytes: program.totalBytes,
+                description: iconRecord.category == .userApp
+                    ? nil
+                    : SystemProcessDescriptions.description(forExecutablePath: iconRecord.executablePath)
             )
         }
     }

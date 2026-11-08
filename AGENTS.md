@@ -141,7 +141,7 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 - **「今天」是双数据源**：汇总数字来自 `daily_usage`，趋势图来自 `usage_buckets`（`usesBucketSummary` 与 `usesFineGrainedTimeline` 两个开关分别控制）。「最近 10 分钟 / 1 小时」两者都用分钟桶，「本周 / 本月」两者都用日汇总。
 - **nettop 的时间字段只有时钟没有日期**，`NettopSampleClock.date(for:)` 把「今天」的年月日嫁接上去；结果比当前时间晚 1 小时以上时回退一天，零点前采样、零点后处理的帧仍记入前一天。
 - 设置持久化：`UserDefaults` 键 `ByteTrace.usageRetentionPolicy`（默认 90 天）、`ByteTrace.readsMihomoConnections`（默认开启）、`ByteTrace.detectedProxyExecutables`（运行时识别出的代理内核路径）；登录时启动用 `SMAppService.mainApp`。
-- **主窗口只有一个应用列表**（按宿主），默认显示前 20 个（`collapsedRowLimit`），其余折叠到「显示其余 N 个」，只多出一两个时直接全部列出；菜单栏面板默认 10 个。没有单独的程序列表：点击应用行在行下展开详情（趋势、下行/上行、路径、排名），宿主里运行过其他程序时再列出程序排行（前 8 个，其余合并为「其他 N 个」，「应用本身」单独一项）。菜单栏与主窗口的行副标题写「含 X、Y 等 N 个程序」。虚拟宿主用 SF Symbols 图标（`AppIconView`）。
+- **主窗口只有一个应用列表**（按宿主），默认显示前 20 个（`collapsedRowLimit`），其余折叠到「显示其余 N 个」，只多出一两个时直接全部列出；菜单栏面板默认 10 个。没有单独的程序列表：点击应用行在行下展开详情：趋势小图、一行上行/下行与直连/代理图例（与顶部总览共用 `LegendLabel`），宿主里运行过其他程序时再列出程序排行（前 8 个，其余合并为「其他 N 个」，「应用本身」单独一项；列宽与应用行对齐），最后是用途说明与路径。只有程序这类实体用列表行，比例用图例。界面各处上行在前、下行在后。菜单栏与主窗口的行副标题写「含 X、Y 等 N 个程序」。虚拟宿主用 SF Symbols 图标（`AppIconView`）。
 - 导出 `formatVersion` 硬编码在 `exportCurrentRange(to:)`，结构变更时需同步 bump；当前为 5，含 `programUsage`。
 
 ## 代码风格约定

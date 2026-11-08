@@ -112,7 +112,7 @@ struct MainWindowView: View {
 
     private var appList: some View {
         let records = filteredRecords
-        // 排名按搜索前的完整列表计算，搜索时不变。
+        // 同名判断按搜索前的完整列表计算，搜索时不变。
         let ranked = model.rangeApplicationRecords
         let listsAll = listsAllRows(count: records.count)
         let visible = listsAll ? records : Array(records.prefix(Self.collapsedRowLimit))
@@ -132,8 +132,6 @@ struct MainWindowView: View {
                             record,
                             share: share(of: record, base: shareBase),
                             note: rowNote(for: record, duplicateNames: duplicateNames),
-                            rank: (ranked.firstIndex { $0.appKey == record.appKey } ?? 0) + 1,
-                            rankCount: ranked.count,
                             showsDivider: record.appKey != visible.last?.appKey
                         )
                         .id(record.appKey)
@@ -207,8 +205,6 @@ struct MainWindowView: View {
         _ record: DailyUsageRecord,
         share: Double,
         note: String?,
-        rank: Int,
-        rankCount: Int,
         showsDivider: Bool
     ) -> some View {
         let isExpanded = expandedAppKey == record.appKey
@@ -234,8 +230,6 @@ struct MainWindowView: View {
             if isExpanded {
                 AppDetailPanel(
                     record: record,
-                    rank: rank,
-                    rankCount: rankCount,
                     model: model
                 )
                 .transition(.opacity)
@@ -506,15 +500,15 @@ private struct OverviewHeader: View {
                     }
                 }
                 .help(RouteSplitCard.help(for: split))
-                Text("↓ \(ByteTraceViewModel.formatBytes(totals.downloadBytes))　↑ \(ByteTraceViewModel.formatBytes(totals.uploadBytes))")
+                Text("↑ \(ByteTraceViewModel.formatBytes(totals.uploadBytes))　↓ \(ByteTraceViewModel.formatBytes(totals.downloadBytes))")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     DirectionBar(download: totals.downloadBytes, upload: totals.uploadBytes)
                     HStack(spacing: 14) {
-                        legend(color: TrafficColor.download, title: "下行", bytes: totals.downloadBytes)
                         legend(color: TrafficColor.upload, title: "上行", bytes: totals.uploadBytes)
+                        legend(color: TrafficColor.download, title: "下行", bytes: totals.downloadBytes)
                     }
                 }
             }
@@ -560,17 +554,7 @@ private struct OverviewHeader: View {
     }
 
     private func legend(color: Color, title: String, bytes: Int64) -> some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text(title)
-                .foregroundStyle(.secondary)
-            Text(ByteTraceViewModel.formatBytes(bytes))
-        }
-        .font(.callout)
-        .lineLimit(1)
-        .accessibilityElement(children: .combine)
+        LegendLabel(color: color, title: title, value: ByteTraceViewModel.formatBytes(bytes))
     }
 }
 
@@ -598,7 +582,7 @@ private struct ByteAmountText: View {
     }
 }
 
-/// 没有路径记录时代替直连 / 代理条，显示下行与上行的比例。
+/// 没有路径记录时代替直连 / 代理条，显示上行与下行的比例（上行在左，与菜单栏面板一致）。
 private struct DirectionBar: View {
     let download: Int64
     let upload: Int64
@@ -606,16 +590,16 @@ private struct DirectionBar: View {
     var body: some View {
         GeometryReader { geometry in
             let total = Double(download) + Double(upload)
-            let downloadFraction = total > 0 ? Double(download) / total : 0
+            let uploadFraction = total > 0 ? Double(upload) / total : 0
             HStack(spacing: 1) {
-                if download > 0 {
-                    Rectangle()
-                        .fill(TrafficColor.download)
-                        .frame(width: max(0, geometry.size.width * downloadFraction - (upload > 0 ? 1 : 0)))
-                }
                 if upload > 0 {
                     Rectangle()
                         .fill(TrafficColor.upload)
+                        .frame(width: max(0, geometry.size.width * uploadFraction - (download > 0 ? 1 : 0)))
+                }
+                if download > 0 {
+                    Rectangle()
+                        .fill(TrafficColor.download)
                 }
             }
         }
@@ -834,35 +818,46 @@ private struct UsageRow: View {
     }
 }
 
-/// 行下展开的详情：趋势小图、下行 / 上行、直连 / 代理、排名与路径。
+/// 行下详情的排版参数，与 `UsageRow` 的列对齐。
+private enum DetailLayout {
+    /// 父行名称的起点：行内边距 8 + 图标 22 + 间距 10。
+    static let rowLeading: CGFloat = 40
+    /// 子行图标宽度，与父行图标一致，行高也一致。
+    static let markerWidth: CGFloat = 22
+    /// 子行名称的起点，分隔线从这里开始。
+    static let textLeading: CGFloat = rowLeading + markerWidth + 10
+    /// 父行右侧占比列的终点到行尾：箭头 12 + 间距 10 + 行内边距 8。
+    static let trailingToShareColumn: CGFloat = 30
+}
+
+/// 行下展开的详情：趋势小图，一行上行 / 下行与直连 / 代理图例，宿主里的程序排行，最后是用途说明与路径。
+/// 只有程序这类实体用列表行；比例用图例，与顶部总览同一写法。
 private struct AppDetailPanel: View {
     let record: DailyUsageRecord
-    let rank: Int
-    let rankCount: Int
     @ObservedObject var model: ByteTraceViewModel
 
+    private static let programLimit = 8
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
             DetailTimelineChart(points: model.timeline(for: record.appKey), window: model.rangeWindow)
+                .padding(.trailing, DetailLayout.trailingToShareColumn)
+                .padding(.bottom, 8)
+                .padding(.leading, DetailLayout.rowLeading)
 
-            HStack(alignment: .top, spacing: 16) {
-                stat("下行 / 上行") {
-                    Text("\(ByteTraceViewModel.formatBytes(record.downloadBytes)) / \(ByteTraceViewModel.formatBytes(record.uploadBytes))")
-                }
-                routeStat
-                stat("排名") {
-                    Text("第 \(rank) / \(rankCount)")
-                }
-            }
+            legendLine
+                .padding(.leading, DetailLayout.rowLeading)
+                .padding(.trailing, 8)
 
-            programRanking
+            programSection
 
-            infoLines
+            footnote
+                .padding(.leading, DetailLayout.rowLeading)
+                .padding(.trailing, DetailLayout.trailingToShareColumn)
+                .padding(.top, 10)
         }
-        .padding(.leading, 40)
-        .padding(.trailing, 12)
         .padding(.top, 2)
-        .padding(.bottom, 12)
+        .padding(.bottom, 10)
         .onAppear {
             model.beginObservingAppDetail(record.appKey)
         }
@@ -871,102 +866,238 @@ private struct AppDetailPanel: View {
         }
     }
 
+    // MARK: 上行 / 下行、直连 / 代理
+
+    /// 上行在前，与菜单栏面板一致。直连 / 代理的比例只在已区分路径的流量里计算，
+    /// 覆盖不足一半时只给字节数；没有路径记录时不显示这一组。出口未知与未区分放在悬停说明里。
+    private var legendLine: some View {
+        let split = model.routeSplit(for: [record])
+        return HStack(spacing: 14) {
+            LegendLabel(color: TrafficColor.upload, title: "上行", value: ByteTraceViewModel.formatBytes(record.uploadBytes))
+            LegendLabel(color: TrafficColor.download, title: "下行", value: ByteTraceViewModel.formatBytes(record.downloadBytes))
+            if split.hasKnownRoute {
+                HStack(spacing: 14) {
+                    LegendLabel(color: RouteColor.direct, title: "直连", value: routeValue(split.directBytes, in: split))
+                    LegendLabel(color: RouteColor.proxy, title: "代理", value: routeValue(split.proxyBytes, in: split))
+                }
+                .padding(.leading, 10)
+                .help(RouteSplitCard.help(for: split))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func routeValue(_ bytes: Int64, in split: RouteSplit) -> String {
+        split.isRepresentative
+            ? percentText(split.fraction(of: bytes))
+            : ByteTraceViewModel.formatBytes(bytes)
+    }
+
     // MARK: 程序排行
 
     /// 宿主里运行过其他程序时列出排行；只有应用自身时不显示。
     @ViewBuilder
-    private var programRanking: some View {
+    private var programSection: some View {
         let programs = model.programs(forHost: record)
         if programs.contains(where: { !$0.isApplicationItself }) {
-            let hostBytes = totalBytes(of: record)
-            ShareList(
-                title: "程序",
-                items: programs.map { program in
-                    let split = model.routeSplit(
-                        forHost: record.appKey,
-                        programKey: program.programKey,
-                        totalBytes: program.bytes
-                    )
-                    return ShareList.Item(
-                        id: program.programKey.isEmpty ? record.appKey : program.programKey,
-                        iconRecord: program.iconRecord,
-                        name: program.name,
-                        bytes: program.bytes,
-                        detail: split.isRepresentative
-                            ? "代理 \(percentText(split.proxyFraction))"
-                            : nil
-                    )
-                },
-                totalBytes: hostBytes
-            )
-        }
-    }
-
-    // MARK: 路径
-
-    @ViewBuilder
-    private var routeStat: some View {
-        let split = model.routeSplit(for: [record])
-        stat("直连 / 代理") {
-            if split.hasKnownRoute {
-                VStack(alignment: .leading, spacing: 5) {
-                    RouteSegmentBar(split: split, height: 5)
-                    Text(routeText(split))
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Text("程序")
+                        .foregroundStyle(.secondary)
+                    Text("\(programs.count)")
+                        .foregroundStyle(.tertiary)
                 }
-            } else {
-                Text("暂无路径记录")
-                    .foregroundStyle(.secondary)
+                .font(.caption)
+                .monospacedDigit()
+                .padding(.leading, DetailLayout.rowLeading)
+                .padding(.top, 14)
+                .padding(.bottom, 2)
+
+                DetailRowGroup(rows: programRows(programs))
             }
         }
-        .help(split.hasKnownRoute ? RouteSplitCard.help(for: split) : "")
     }
 
-    /// 覆盖足够时给比例；大部分流量没有路径记录时只给字节数。
-    private func routeText(_ split: RouteSplit) -> String {
-        if split.isRepresentative {
-            return "直连 \(percentText(split.fraction(of: split.directBytes))) · 代理 \(percentText(split.fraction(of: split.proxyBytes)))"
+    /// 前几项之外合成「其他 N 个」；只多出一项时直接列出。占比按宿主总量计算。
+    private func programRows(_ programs: [HostProgramShare]) -> [DetailRow.Item] {
+        let hostBytes = totalBytes(of: record)
+        var rows = programs.map { program in
+            let split = model.routeSplit(
+                forHost: record.appKey,
+                programKey: program.programKey,
+                totalBytes: program.bytes
+            )
+            // 说明写法同应用行：系统进程的用途在前，代理占比在后。
+            let note = [
+                program.description,
+                split.isRepresentative ? "代理 \(percentText(split.proxyFraction))" : nil
+            ].compactMap { $0 }.joined(separator: " · ")
+            return DetailRow.Item(
+                id: program.programKey.isEmpty ? record.appKey : program.programKey,
+                marker: .icon(program.iconRecord),
+                name: program.name,
+                note: note.isEmpty ? nil : note,
+                bytes: program.bytes,
+                share: fraction(program.bytes, of: hostBytes)
+            )
         }
-        return "直连 \(ByteTraceViewModel.formatBytes(split.directBytes)) · 代理 \(ByteTraceViewModel.formatBytes(split.proxyBytes))"
+        if rows.count > Self.programLimit + 1 {
+            let rest = rows.dropFirst(Self.programLimit)
+            let restBytes = rest.reduce(Int64(0)) { saturatingAdd($0, $1.bytes) }
+            rows = Array(rows.prefix(Self.programLimit))
+            rows.append(DetailRow.Item(
+                id: "otherPrograms",
+                marker: .symbol("ellipsis"),
+                name: "其他 \(rest.count) 个",
+                note: nil,
+                bytes: restBytes,
+                share: fraction(restBytes, of: hostBytes)
+            ))
+        }
+        return rows
     }
 
-    // MARK: 说明与路径
+    // MARK: 用途说明与路径
 
     @ViewBuilder
-    private var infoLines: some View {
+    private var footnote: some View {
         let subtitle = model.detailSubtitle(for: record)
         let path = record.bundlePath ?? record.executablePath
         if subtitle != nil || path != nil {
             VStack(alignment: .leading, spacing: 3) {
                 if let subtitle {
+                    // 虚拟宿主的说明较长，允许换行。
                     Text(subtitle)
-                        .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let path {
                     Text(ByteTraceViewModel.abbreviatedPath(path))
-                        .font(.caption)
                         .foregroundStyle(.tertiary)
                         .textSelection(.enabled)
-                        .lineLimit(2)
+                        .lineLimit(1)
                         .truncationMode(.middle)
+                        .help(path)
                 }
             }
+            .font(.caption)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    private func stat<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private func fraction(_ bytes: Int64, of total: Int64) -> Double {
+        guard total > 0 else { return 0 }
+        return min(1, Double(bytes) / Double(total))
+    }
+}
+
+/// 圆点 + 浅色标题 + 数值，顶部总览与行下详情共用。
+private struct LegendLabel: View {
+    let color: Color
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
             Text(title)
-                .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-            content()
-                .font(.callout)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
+            Text(value)
+        }
+        .font(.callout)
+        .monospacedDigit()
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// 一组详情行，行间分隔线从名称处开始，与应用列表一致。
+private struct DetailRowGroup: View {
+    let rows: [DetailRow.Item]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(rows) { item in
+                DetailRow(item: item)
+                    .overlay(alignment: .bottom) {
+                        if item.id != rows.last?.id {
+                            Divider()
+                                .padding(.leading, DetailLayout.textLeading)
+                        }
+                    }
+            }
+        }
+    }
+}
+
+/// 详情里的一行，列与 `UsageRow` 对齐：缩进到父行名称处 | 标记 | 名称与浅色说明 | 字节 | 占比 | 箭头占位。
+private struct DetailRow: View {
+    enum Marker {
+        case icon(DailyUsageRecord)
+        case symbol(String)
+    }
+
+    struct Item: Identifiable {
+        let id: String
+        let marker: Marker
+        let name: String
+        let note: String?
+        let bytes: Int64
+        let share: Double
+    }
+
+    let item: Item
+
+    var body: some View {
+        HStack(spacing: 10) {
+            marker
+                .frame(width: DetailLayout.markerWidth, height: DetailLayout.markerWidth)
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(item.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
+                if let note = item.note {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(ByteTraceViewModel.formatBytes(item.bytes))
+            Text(percentText(item.share))
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .frame(width: 36, alignment: .trailing)
+            // 父行箭头列的占位，保证字节与占比两列对齐。
+            Color.clear
+                .frame(width: 12, height: 1)
         }
         .monospacedDigit()
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, DetailLayout.rowLeading)
+        .padding(.trailing, 8)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .help(item.note ?? "")
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var marker: some View {
+        switch item.marker {
+        case .icon(let record):
+            AppIconView(record: record, size: DetailLayout.markerWidth)
+        case .symbol(let name):
+            Image(systemName: name)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
     }
 }
 
@@ -1010,78 +1141,5 @@ private struct DetailTimelineChart: View {
             bins[start] = saturatingAdd(bins[start] ?? 0, point.totalBytes)
         }
         return bins.keys.sorted().map { ($0, bins[$0] ?? 0) }
-    }
-}
-
-/// 应用详情里的程序占比列表。前几项之外合成「其他」。
-private struct ShareList: View {
-    struct Item: Identifiable {
-        let id: String
-        let iconRecord: DailyUsageRecord?
-        let name: String
-        let bytes: Int64
-        let detail: String?
-    }
-
-    let title: String
-    let items: [Item]
-    let totalBytes: Int64
-
-    private static let visibleLimit = 8
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 2)
-            let visible = items.count > Self.visibleLimit + 1 ? Array(items.prefix(Self.visibleLimit)) : items
-            ForEach(visible) { item in
-                row(item)
-            }
-            if visible.count < items.count {
-                let rest = items.dropFirst(visible.count)
-                row(Item(
-                    id: "other",
-                    iconRecord: nil,
-                    name: "其他 \(rest.count) 个",
-                    bytes: rest.reduce(Int64(0)) { saturatingAdd($0, $1.bytes) },
-                    detail: nil
-                ))
-            }
-        }
-    }
-
-    private func row(_ item: Item) -> some View {
-        HStack(spacing: 8) {
-            Group {
-                if let iconRecord = item.iconRecord {
-                    AppIconView(record: iconRecord, size: 16)
-                } else {
-                    Image(systemName: "ellipsis")
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .frame(width: 16, height: 16)
-            Text(item.name)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if let detail = item.detail {
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-            Text(ByteTraceViewModel.formatBytes(item.bytes))
-            Text(percentText(totalBytes > 0 ? min(1, Double(item.bytes) / Double(totalBytes)) : 0))
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .frame(width: 36, alignment: .trailing)
-        }
-        .font(.callout)
-        .monospacedDigit()
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
     }
 }
