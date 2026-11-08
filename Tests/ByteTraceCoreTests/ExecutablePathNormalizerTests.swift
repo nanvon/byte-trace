@@ -50,4 +50,30 @@ final class ExecutablePathNormalizerTests: XCTestCase {
             "curl"
         )
     }
+
+    func testCommandNameMergesToolsInBinDirectories() {
+        let merged: [(String, String)] = [
+            ("/usr/bin/curl", "curl"),
+            ("/opt/homebrew/Cellar/curl/8.23.0/bin/curl", "curl"),
+            ("/usr/sbin/mDNSResponder", "mDNSResponder"),
+            ("/Users/u/.local/share/mise/installs/node/24.17.0/bin/node", "node"),
+            ("/Users/u/.local/share/fnm/node-versions/v24.17.0/installation/bin/node", "node"),
+            ("/Users/u/.local/bin/mise", "mise")
+        ]
+        for (path, name) in merged {
+            XCTAssertEqual(ExecutablePathNormalizer.commandName(forExecutablePath: path), name, path)
+        }
+
+        let kept = [
+            "/usr/libexec/nsurlsessiond",
+            "/Users/u/.local/share/claude/versions/2.1.314",
+            "/Applications/Raycast.app/Contents/Resources/node-v22.22.2/bin/node",
+            "/Users/u/Library/Application Support/com.raycast.macos/node/runtime/node-v22-darwin-arm64/bin/node",
+            "/Users/u/.cache/magpie/bin/magpie-bun",
+            "/opt/homebrew/Cellar/git/2.50.0/libexec/git-core/git-remote-http"
+        ]
+        for path in kept {
+            XCTAssertNil(ExecutablePathNormalizer.commandName(forExecutablePath: path), path)
+        }
+    }
 }

@@ -4,7 +4,8 @@ import Foundation
 /// 自更新 CLI（Claude Code、codex、cursor-agent…）的各个版本归到同一个 `exec:` appKey。
 ///
 /// 规则变化会改变已有 appKey，修改时必须在 `UsageStore.migrate()` 追加迁移，
-/// 把旧 appKey 的历史行合并过去（当前规则对应 schemaVersion 7）。
+/// 把旧 appKey 的历史行合并过去（路径归一化对应 schemaVersion 7；`commandName` 的合并
+/// 在 `UsageStore.mergeCommandLineToolKeys()`，每次打开数据库都会执行）。
 public enum ExecutablePathNormalizer {
     public static let wildcard = "*"
 
@@ -19,6 +20,29 @@ public enum ExecutablePathNormalizer {
             .split(separator: "/", omittingEmptySubsequences: false)
             .map { normalizeComponent(String($0)) }
             .joined(separator: "/")
+    }
+
+    /// 位于 `bin` / `sbin` 目录下的命令行工具返回文件名，同名工具不论装在哪里
+    /// （`/usr/bin/curl`、Homebrew 的 curl、mise / fnm 的各个 node）都归到同一个 `command:` appKey。
+    /// 应用附带的工具（`.app/` 内、`~/Library/Application Support/`、`.cache/` 下）不在此列，
+    /// 它们按目录归到所属应用；文件名含通配（版本号就是文件名）时也不按名称合并。
+    public static func commandName(forExecutablePath path: String) -> String? {
+        let normalized = normalize(path)
+        guard normalized.hasPrefix("/"),
+              !normalized.contains(".app/"),
+              !normalized.contains("/Library/Application Support/"),
+              !normalized.contains("/.cache/") else {
+            return nil
+        }
+        let components = normalized.split(separator: "/").map(String.init)
+        guard components.count >= 2,
+              let name = components.last,
+              !name.isEmpty,
+              !name.contains(wildcard),
+              ["bin", "sbin"].contains(components[components.count - 2]) else {
+            return nil
+        }
+        return name
     }
 
     /// 路径派生的展示名。可执行文件名本身就是版本号（如

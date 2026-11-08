@@ -213,7 +213,7 @@ final class UsageStoreMigrationTests: XCTestCase {
             3
         )
         XCTAssertEqual(
-            try migrated.scalarInt64("SELECT download_bytes FROM daily_usage WHERE app_key = 'exec:/usr/bin/curl';"),
+            try migrated.scalarInt64("SELECT download_bytes FROM daily_usage WHERE app_key = 'command:curl';"),
             7
         )
         XCTAssertEqual(try migrated.scalarInt64("PRAGMA user_version;"), UsageStore.schemaVersion)
@@ -288,12 +288,125 @@ final class UsageStoreMigrationTests: XCTestCase {
         XCTAssertEqual(try download("bundle:com.google.GoogleUpdater"), 9)
         XCTAssertEqual(try download("bundle:com.yetone.magpie"), 46)
         XCTAssertEqual(try download("exec:/Users/u/.local/share/claude/versions/*"), 32)
-        XCTAssertEqual(try download("process:curl"), 8)
+        // 两个 curl 按名称合并成一条后，解析前就退出的 process:curl 也能确定归属。
+        XCTAssertEqual(try download("process:curl"), -1)
+        XCTAssertEqual(try download("command:curl"), 8)
+        XCTAssertEqual(try appCount("exec:/usr/bin/curl"), 0)
+        XCTAssertEqual(try appCount("exec:/opt/homebrew/Cellar/curl/*/bin/curl"), 0)
         XCTAssertEqual(
             try migrated.scalarInt64("SELECT SUM(download_bytes) FROM daily_usage;"),
             338
         )
         XCTAssertEqual(try migrated.scalarInt64("PRAGMA user_version;"), UsageStore.schemaVersion)
+    }
+
+    func testRecordsWrittenAfterVersionTenMergeOnNextOpen() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("byte-trace-late-merge-\(UUID().uuidString).sqlite3")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + "-wal")
+            try? FileManager.default.removeItem(atPath: url.path + "-shm")
+        }
+
+        _ = try UsageStore(databaseURL: url)
+        let database = try SQLiteDatabase(url: url)
+        try database.execute(
+            """
+            INSERT INTO apps VALUES ('bundle:org.python.python', 'org.python.python', '/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app', '/Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python', 'Python', 'user_app', '1754000100.000000', '1754000100.000000');
+            INSERT INTO apps VALUES ('exec:/usr/bin/curl', NULL, NULL, '/usr/bin/curl', 'curl', 'system_process', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('exec:/opt/homebrew/Cellar/curl/*/bin/curl', NULL, NULL, '/opt/homebrew/Cellar/curl/8.0/bin/curl', 'curl', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('process:Python', NULL, NULL, NULL, 'Python', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('process:curl', NULL, NULL, NULL, 'curl', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'bundle:org.python.python', 100, 10, 1, '1754000100.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'process:Python', 7, 1, 1, '1754000000.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'process:curl', 5, 0, 1, '1754000000.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'exec:/usr/bin/curl', 20, 1, 1, '1754000000.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'exec:/opt/homebrew/Cellar/curl/*/bin/curl', 30, 2, 1, '1754000000.000000');
+            INSERT INTO app_launchers VALUES ('exec:/usr/bin/curl', 'opencode', '1754000200.000000');
+            INSERT INTO app_launchers VALUES ('exec:/opt/homebrew/Cellar/curl/*/bin/curl', 'ruby', '1754000100.000000');
+            """
+        )
+
+        // 打开两次：第二次没有可合并的记录，字节不能重复累加。
+        _ = try UsageStore(databaseURL: url)
+        _ = try UsageStore(databaseURL: url)
+
+        func download(_ appKey: String) throws -> Int64 {
+            try database.scalarInt64(
+                "SELECT COALESCE(SUM(download_bytes), -1) FROM daily_usage WHERE app_key = '\(appKey)';"
+            )
+        }
+        XCTAssertEqual(try download("bundle:org.python.python"), 107)
+        XCTAssertEqual(try download("process:Python"), -1)
+        XCTAssertEqual(try database.scalarInt64("SELECT COUNT(*) FROM apps WHERE app_key = 'process:Python';"), 0)
+        // 系统自带与 Homebrew 的 curl 按名称合并，process:curl 随之并入；不再算系统进程。
+        XCTAssertEqual(try download("process:curl"), -1)
+        XCTAssertEqual(try download("command:curl"), 55)
+        XCTAssertEqual(try database.scalarInt64("SELECT COUNT(*) FROM apps WHERE display_name = 'curl';"), 1)
+        XCTAssertEqual(
+            try database.scalarInt64("SELECT COUNT(*) FROM apps WHERE app_key = 'command:curl' AND category = 'unclassified';"),
+            1
+        )
+        XCTAssertEqual(
+            try database.scalarInt64("SELECT COUNT(*) FROM app_launchers WHERE app_key = 'command:curl' AND launcher_name = 'opencode';"),
+            1
+        )
+        XCTAssertEqual(try database.scalarInt64("SELECT COUNT(*) FROM app_launchers;"), 1)
+        XCTAssertEqual(try database.scalarInt64("PRAGMA user_version;"), UsageStore.schemaVersion)
+    }
+
+    func testBundledToolsMergeIntoTheApplicationOwningTheirDirectory() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("byte-trace-tool-merge-\(UUID().uuidString).sqlite3")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + "-wal")
+            try? FileManager.default.removeItem(atPath: url.path + "-shm")
+        }
+
+        _ = try UsageStore(databaseURL: url)
+        let database = try SQLiteDatabase(url: url)
+        let support = "/Users/u/Library/Application Support"
+        try database.execute(
+            """
+            INSERT INTO apps VALUES ('bundle:com.raycast.macos', 'com.raycast.macos', '/Applications/Raycast.app', '/Applications/Raycast.app/Contents/MacOS/Raycast', 'Raycast', 'user_app', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('bundle:com.yetone.magpie', 'com.yetone.magpie', '/Applications/magpie.app', '/Applications/magpie.app/Contents/MacOS/magpie', 'magpie', 'user_app', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('bundle:com.microsoft.VSCode', 'com.microsoft.VSCode', '/Applications/Visual Studio Code.app', '/Applications/Visual Studio Code.app/Contents/MacOS/Code', 'Code', 'user_app', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('exec:\(support)/com.raycast.macos/node/runtime/node-*-darwin-arm64/bin/node', NULL, NULL, '\(support)/com.raycast.macos/node/runtime/node-v22-darwin-arm64/bin/node', 'node', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('exec:/Users/u/.cache/magpie/bun/*/magpie-bun', NULL, NULL, '/Users/u/.cache/magpie/bun/1.2/magpie-bun', 'magpie-bun', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('exec:/var/folders/x/T/magpie-preview-1/.cache/magpie/bun/*/magpie-bun', NULL, NULL, '/var/folders/x/T/magpie-preview-1/.cache/magpie/bun/1.2/magpie-bun', 'magpie-bun', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('exec:\(support)/Code/agent-host/claude', NULL, NULL, '\(support)/Code/agent-host/claude', 'claude', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'bundle:com.raycast.macos', 10, 0, 1, '1754000000.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'exec:\(support)/com.raycast.macos/node/runtime/node-*-darwin-arm64/bin/node', 5, 0, 1, '1754000000.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'exec:/Users/u/.cache/magpie/bun/*/magpie-bun', 7, 0, 1, '1754000000.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'exec:/var/folders/x/T/magpie-preview-1/.cache/magpie/bun/*/magpie-bun', 2, 0, 1, '1754000000.000000');
+            INSERT INTO daily_usage (accounting_version, day, app_key, download_bytes, upload_bytes, sample_count, updated_at)
+                VALUES (3, '2026-11-08', 'exec:\(support)/Code/agent-host/claude', 3, 0, 1, '1754000000.000000');
+            """
+        )
+
+        _ = try UsageStore(databaseURL: url)
+
+        func download(_ appKey: String) throws -> Int64 {
+            try database.scalarInt64(
+                "SELECT COALESCE(SUM(download_bytes), -1) FROM daily_usage WHERE app_key = '\(appKey)';"
+            )
+        }
+        XCTAssertEqual(try download("bundle:com.raycast.macos"), 15)
+        XCTAssertEqual(try download("bundle:com.yetone.magpie"), 9)
+        // Application Support 下只认 bundle ID 目录，按应用名的目录不合并。
+        XCTAssertEqual(try download("exec:\(support)/Code/agent-host/claude"), 3)
+        XCTAssertEqual(try download("bundle:com.microsoft.VSCode"), -1)
     }
 
     private func seedLegacyCCBarUsage(at url: URL, sampleDate: Date) throws {

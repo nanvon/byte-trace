@@ -127,7 +127,7 @@ final class ProcessAttributorTests: XCTestCase {
 
         XCTAssertEqual(viaApp.appKey, "bundle:com.yetone.magpie")
         XCTAssertEqual(viaApp.category, .userApp)
-        XCTAssertEqual(viaTerminal.appKey, "exec:/Users/u/.local/bin/mise")
+        XCTAssertEqual(viaTerminal.appKey, "command:mise")
         XCTAssertEqual(viaTerminal.category, .unclassified)
     }
 
@@ -314,8 +314,28 @@ final class ProcessAttributorTests: XCTestCase {
         XCTAssertEqual(first.appKey, "exec:/Users/u/.local/share/claude/versions/*")
         XCTAssertEqual(second.appKey, first.appKey)
         XCTAssertEqual(first.displayName, "claude")
-        XCTAssertEqual(node.appKey, "exec:/Users/u/.local/share/mise/installs/node/*/bin/node")
+        XCTAssertEqual(node.appKey, "command:node")
         XCTAssertEqual(node.displayName, "node")
+    }
+
+    func testSameCommandFromSystemAndHomebrewSharesOneKey() {
+        let attributor = ProcessAttributor()
+        let system = attributor.attribute(
+            ProcessIdentity(pid: 35, nettopProcessName: "curl", executablePath: "/usr/bin/curl")
+        )
+        let homebrew = attributor.attribute(
+            ProcessIdentity(pid: 36, nettopProcessName: "curl", executablePath: "/opt/homebrew/Cellar/curl/8.23.0/bin/curl")
+        )
+        let daemon = attributor.attribute(
+            ProcessIdentity(pid: 37, nettopProcessName: "mDNSResponder", executablePath: "/usr/sbin/mDNSResponder")
+        )
+
+        XCTAssertEqual(system.appKey, "command:curl")
+        XCTAssertEqual(homebrew.appKey, system.appKey)
+        XCTAssertEqual(system.displayName, "curl")
+        XCTAssertEqual(system.category, .unclassified)
+        XCTAssertEqual(homebrew.category, .unclassified)
+        XCTAssertEqual(daemon.category, .systemProcess)
     }
 
     func testTruncatedProcessNameUsesExecutableFileName() {
@@ -408,7 +428,7 @@ final class ProcessAttributorTests: XCTestCase {
 
         XCTAssertEqual(
             attributed.appKey,
-            "exec:/Users/nanvon/.local/share/fnm/node-versions/*/installation/bin/node"
+            "command:node"
         )
         XCTAssertNotEqual(attributed.category, .userApp)
     }

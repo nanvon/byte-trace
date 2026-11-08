@@ -24,7 +24,7 @@ final class ProcessLauncherTests: XCTestCase {
         )
         let attributed = ProcessAttributor().attribute(identity)
         XCTAssertEqual(attributed.launcherName, "claude")
-        XCTAssertEqual(attributed.appKey, "exec:/usr/bin/curl")
+        XCTAssertEqual(attributed.appKey, "command:curl")
     }
 
     func testLauncherUsesAppNameAndIgnoresSameExecutableAndLaunchd() {

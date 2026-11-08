@@ -986,6 +986,8 @@ public final class UsageStore: @unchecked Sendable {
 
         if currentVersion <= 9 {
             try migrateHostApplicationKeys()
+        } else {
+            mergeLateHostApplicationKeys()
         }
     }
 
@@ -998,6 +1000,10 @@ public final class UsageStore: @unchecked Sendable {
 
         var isApplication: Bool {
             appKey.hasPrefix("bundle:") || appKey.hasPrefix("app:")
+        }
+
+        var bundleID: String? {
+            appKey.hasPrefix("bundle:") ? String(appKey.dropFirst("bundle:".count)) : nil
         }
 
         var executableFileName: String? {
@@ -1013,54 +1019,158 @@ public final class UsageStore: @unchecked Sendable {
     private func migrateHostApplicationKeys() throws {
         try database.execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
-            var apps: [String: MigrationApp] = [:]
-            let statement = try database.prepare(
-                "SELECT app_key, bundle_path, executable_path, display_name, first_seen_at FROM apps;"
-            )
-            defer { sqlite3_finalize(statement) }
-            while true {
-                let result = sqlite3_step(statement)
-                if result == SQLITE_DONE { break }
-                guard result == SQLITE_ROW else {
-                    throw SQLiteDatabaseError.stepFailed(database.errorMessage)
-                }
-                guard let appKey = database.columnString(statement, at: 0) else { continue }
-                apps[appKey] = MigrationApp(
-                    appKey: appKey,
-                    bundlePath: database.columnString(statement, at: 1),
-                    executablePath: database.columnString(statement, at: 2),
-                    displayName: database.columnString(statement, at: 3) ?? "",
-                    firstSeenAt: database.columnString(statement, at: 4) ?? "0.000000"
-                )
-            }
-
-            let redirects = Self.hostApplicationRedirects(for: Array(apps.values))
-            for (oldKey, newKey) in redirects.sorted(by: { $0.key < $1.key }) {
-                guard let target = apps[newKey] else { continue }
-                try mergeUsageRows(in: "daily_usage", timeColumn: "day", from: oldKey, to: newKey)
-                try mergeUsageRows(in: "usage_buckets", timeColumn: "bucket_start", from: oldKey, to: newKey)
-                try mergeRouteUsageRows(from: oldKey, to: newKey)
-                try deleteRows(in: "app_launchers", for: oldKey)
-
-                let updateTarget = try database.prepare(
-                    "UPDATE apps SET first_seen_at = MIN(first_seen_at, ?) WHERE app_key = ?;"
-                )
-                defer { sqlite3_finalize(updateTarget) }
-                try database.bind(apps[oldKey]?.firstSeenAt ?? target.firstSeenAt, at: 1, in: updateTarget)
-                try database.bind(newKey, at: 2, in: updateTarget)
-                try database.stepDone(updateTarget)
-
-                let deleteApp = try database.prepare("DELETE FROM apps WHERE app_key = ?;")
-                defer { sqlite3_finalize(deleteApp) }
-                try database.bind(oldKey, at: 1, in: deleteApp)
-                try database.stepDone(deleteApp)
-            }
+            try mergeHostApplicationKeys()
             try database.execute("PRAGMA user_version = 10;")
             try database.execute("COMMIT;")
         } catch {
             try? database.execute("ROLLBACK;")
             throw error
         }
+    }
+
+    /// 已是版本 10 的库每次打开时按同一规则再合并一次：迁移之后写入的记录
+    /// （旧版本应用写入的、重启后名称缓存未命中拆出的 `process:` 记录）同样并入宿主。
+    /// 只搬移行，重复执行不会重复计数；失败时回滚并保持原样，不影响打开数据库。
+    private func mergeLateHostApplicationKeys() {
+        do {
+            try database.execute("BEGIN IMMEDIATE TRANSACTION;")
+        } catch {
+            return
+        }
+        do {
+            try mergeHostApplicationKeys()
+            try database.execute("COMMIT;")
+        } catch {
+            try? database.execute("ROLLBACK;")
+        }
+    }
+
+    /// 调用方负责事务。
+    private func mergeHostApplicationKeys() throws {
+        try mergeCommandLineToolKeys()
+
+        var apps: [String: MigrationApp] = [:]
+        let statement = try database.prepare(
+            "SELECT app_key, bundle_path, executable_path, display_name, first_seen_at FROM apps;"
+        )
+        defer { sqlite3_finalize(statement) }
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            guard let appKey = database.columnString(statement, at: 0) else { continue }
+            apps[appKey] = MigrationApp(
+                appKey: appKey,
+                bundlePath: database.columnString(statement, at: 1),
+                executablePath: database.columnString(statement, at: 2),
+                displayName: database.columnString(statement, at: 3) ?? "",
+                firstSeenAt: database.columnString(statement, at: 4) ?? "0.000000"
+            )
+        }
+
+        let redirects = Self.hostApplicationRedirects(for: Array(apps.values))
+        for (oldKey, newKey) in redirects.sorted(by: { $0.key < $1.key }) {
+            guard let target = apps[newKey] else { continue }
+            try mergeUsageRows(in: "daily_usage", timeColumn: "day", from: oldKey, to: newKey)
+            try mergeUsageRows(in: "usage_buckets", timeColumn: "bucket_start", from: oldKey, to: newKey)
+            try mergeRouteUsageRows(from: oldKey, to: newKey)
+            try deleteRows(in: "app_launchers", for: oldKey)
+
+            let updateTarget = try database.prepare(
+                "UPDATE apps SET first_seen_at = MIN(first_seen_at, ?) WHERE app_key = ?;"
+            )
+            defer { sqlite3_finalize(updateTarget) }
+            try database.bind(apps[oldKey]?.firstSeenAt ?? target.firstSeenAt, at: 1, in: updateTarget)
+            try database.bind(newKey, at: 2, in: updateTarget)
+            try database.stepDone(updateTarget)
+
+            let deleteApp = try database.prepare("DELETE FROM apps WHERE app_key = ?;")
+            defer { sqlite3_finalize(deleteApp) }
+            try database.bind(oldKey, at: 1, in: deleteApp)
+            try database.stepDone(deleteApp)
+        }
+    }
+
+    /// `bin` / `sbin` 目录下的命令行工具按文件名合并：`exec:<路径>` 改为 `command:<名称>`，
+    /// 不同安装位置的同名工具（`/usr/bin/curl` 与 Homebrew 的 curl）并成一条。
+    /// 旧版本应用仍可能写入 `exec:` 记录，所以每次打开都执行；调用方负责事务。
+    private func mergeCommandLineToolKeys() throws {
+        var renames: [(oldKey: String, newKey: String, app: StoredApp, category: String)] = []
+        let statement = try database.prepare(
+            """
+            SELECT app_key, bundle_id, bundle_path, executable_path, display_name,
+                   category, first_seen_at, last_seen_at
+            FROM apps
+            WHERE app_key LIKE 'exec:%';
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            guard let oldKey = database.columnString(statement, at: 0),
+                  let name = ExecutablePathNormalizer.commandName(
+                    forExecutablePath: String(oldKey.dropFirst("exec:".count))
+                  ) else { continue }
+            let executablePath = database.columnString(statement, at: 3)
+            var category = database.columnString(statement, at: 5) ?? AppCategory.unclassified.rawValue
+            // `/usr/bin/`、`/bin/` 下的工具不再算系统进程。
+            if category == AppCategory.systemProcess.rawValue,
+               let executablePath,
+               executablePath.hasPrefix("/usr/bin/") || executablePath.hasPrefix("/bin/") {
+                category = AppCategory.unclassified.rawValue
+            }
+            renames.append((
+                oldKey,
+                "command:\(name)",
+                StoredApp(
+                    bundleID: database.columnString(statement, at: 1),
+                    bundlePath: database.columnString(statement, at: 2),
+                    executablePath: executablePath,
+                    displayName: name,
+                    firstSeenAt: database.columnString(statement, at: 6) ?? "0.000000",
+                    lastSeenAt: database.columnString(statement, at: 7) ?? "0.000000"
+                ),
+                category
+            ))
+        }
+
+        for rename in renames {
+            try upsertRenamedApp(rename.app, appKey: rename.newKey, category: rename.category)
+            try mergeUsageRows(in: "daily_usage", timeColumn: "day", from: rename.oldKey, to: rename.newKey)
+            try mergeUsageRows(in: "usage_buckets", timeColumn: "bucket_start", from: rename.oldKey, to: rename.newKey)
+            try mergeRouteUsageRows(from: rename.oldKey, to: rename.newKey)
+            try mergeLauncherRow(from: rename.oldKey, to: rename.newKey)
+
+            let deleteApp = try database.prepare("DELETE FROM apps WHERE app_key = ?;")
+            defer { sqlite3_finalize(deleteApp) }
+            try database.bind(rename.oldKey, at: 1, in: deleteApp)
+            try database.stepDone(deleteApp)
+        }
+    }
+
+    /// 启动者只保留最近一次写入的那条。
+    private func mergeLauncherRow(from oldAppKey: String, to newAppKey: String) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO app_launchers (app_key, launcher_name, updated_at)
+            SELECT ?, launcher_name, updated_at FROM app_launchers WHERE app_key = ?
+            ON CONFLICT(app_key) DO UPDATE SET
+                launcher_name = CASE WHEN excluded.updated_at > app_launchers.updated_at
+                    THEN excluded.launcher_name ELSE app_launchers.launcher_name END,
+                updated_at = MAX(app_launchers.updated_at, excluded.updated_at);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try database.bind(newAppKey, at: 1, in: statement)
+        try database.bind(oldAppKey, at: 2, in: statement)
+        try database.stepDone(statement)
+        try deleteRows(in: "app_launchers", for: oldAppKey)
     }
 
     /// 返回「旧 appKey → 最终 appKey」，链式重定向已展开，目标一定是未被重定向的记录。
@@ -1087,6 +1197,31 @@ public final class UsageStore: @unchecked Sendable {
                 $0.displayName == directory
                     && $0.appKey != app.appKey
                     && $0.bundlePath?.contains("/Library/Application Support/") != true
+            }
+            if owners.count == 1 {
+                direct[app.appKey] = owners[0].appKey
+            }
+        }
+
+        // 应用自带的命令行工具按所在目录归到唯一对应的应用：
+        // `~/Library/Application Support/<bundle ID>/…`（如 Raycast 内置的 node），
+        // `.cache/<应用名>/…`（如 magpie 缓存目录里的 bun，含临时目录里的预览副本）。
+        let hostApplications = applications.filter {
+            $0.bundlePath?.contains("/Library/Application Support/") != true
+        }
+        for app in apps where app.appKey.hasPrefix("exec:") {
+            let path = String(app.appKey.dropFirst("exec:".count))
+            let owners: [MigrationApp]
+            if let range = path.range(of: "/Library/Application Support/"),
+               let directory = path[range.upperBound...].split(separator: "/").first.map(String.init) {
+                owners = hostApplications.filter { $0.bundleID == directory }
+            } else if let range = path.range(of: "/.cache/"),
+                      let directory = path[range.upperBound...].split(separator: "/").first.map(String.init) {
+                owners = hostApplications.filter {
+                    $0.displayName.caseInsensitiveCompare(directory) == .orderedSame
+                }
+            } else {
+                continue
             }
             if owners.count == 1 {
                 direct[app.appKey] = owners[0].appKey

@@ -76,6 +76,9 @@ public struct ProcessAttributor: Sendable {
             appKey = "bundle:\(bundleID)"
         } else if let bundlePath = host.bundlePath {
             appKey = "app:\(bundlePath)"
+        } else if let executablePath,
+                  let commandName = ExecutablePathNormalizer.commandName(forExecutablePath: executablePath) {
+            appKey = "command:\(commandName)"
         } else if let executablePath {
             appKey = "exec:\(ExecutablePathNormalizer.normalize(executablePath))"
         } else if !identity.nettopProcessName.isEmpty {
@@ -140,7 +143,7 @@ public struct ProcessAttributor: Sendable {
             guard let path else { continue }
             let fileName = URL(fileURLWithPath: path).lastPathComponent
             if transparentLauncherNames.contains(fileName)
-                || isSystemExecutable(path)
+                || isInSystemDirectory(path)
                 || ExecutablePathNormalizer.normalize(path) == ownPath {
                 continue
             }
@@ -342,18 +345,25 @@ public struct ProcessAttributor: Sendable {
         return canonical
     }
 
+    /// 系统守护进程与后台服务。`/usr/bin/`、`/bin/` 下是用户运行的命令行工具（curl、ssh、git），
+    /// 不算系统进程，与 Homebrew 等位置的同名工具归为同一类。
     private static func isSystemExecutable(_ executablePath: String?) -> Bool {
         guard let executablePath else { return false }
         let prefixes = [
             "/System/",
-            "/usr/bin/",
             "/usr/lib/",
             "/usr/libexec/",
             "/usr/sbin/",
-            "/bin/",
             "/sbin/"
         ]
         return prefixes.contains { executablePath.hasPrefix($0) }
+    }
+
+    /// 系统自带的全部目录（含 `/usr/bin/`、`/bin/` 的通用工具），找启动者时跳过。
+    private static func isInSystemDirectory(_ executablePath: String) -> Bool {
+        isSystemExecutable(executablePath)
+            || executablePath.hasPrefix("/usr/bin/")
+            || executablePath.hasPrefix("/bin/")
     }
 
     private static func canonicalPath(_ path: String?) -> String? {
