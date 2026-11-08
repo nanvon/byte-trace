@@ -37,6 +37,8 @@ public struct ProcessAncestor: Equatable, Sendable {
     public let bundlePath: String?
     public let displayName: String?
     public let parentPID: Int32?
+    /// 脚本解释器（node、ruby、python…）运行的脚本对应的程序名，见 `ExecutablePathNormalizer.scriptProgramName`。
+    public let scriptName: String?
 
     public init(
         pid: Int32,
@@ -45,7 +47,8 @@ public struct ProcessAncestor: Equatable, Sendable {
         bundleID: String? = nil,
         bundlePath: String? = nil,
         displayName: String? = nil,
-        parentPID: Int32? = nil
+        parentPID: Int32? = nil,
+        scriptName: String? = nil
     ) {
         self.pid = pid
         self.processStartTime = processStartTime
@@ -54,6 +57,7 @@ public struct ProcessAncestor: Equatable, Sendable {
         self.bundlePath = bundlePath
         self.displayName = displayName
         self.parentPID = parentPID
+        self.scriptName = scriptName
     }
 }
 
@@ -63,11 +67,18 @@ public struct ContainingApplication: Equatable, Sendable {
     public let bundleID: String?
     public let bundlePath: String
     public let displayName: String?
+    public let executablePath: String?
 
-    public init(bundleID: String?, bundlePath: String, displayName: String?) {
+    public init(
+        bundleID: String?,
+        bundlePath: String,
+        displayName: String?,
+        executablePath: String? = nil
+    ) {
         self.bundleID = bundleID
         self.bundlePath = bundlePath
         self.displayName = displayName
+        self.executablePath = executablePath
     }
 }
 
@@ -82,6 +93,12 @@ public struct ProcessIdentity: Equatable, Sendable {
     public let parentPID: Int32?
     public let ancestors: [ProcessAncestor]
     public let containingApplication: ContainingApplication?
+    /// 已知附属应用的主应用（如 GoogleUpdater → Google Chrome）。
+    public let delegatingApplication: ContainingApplication?
+    /// 系统记录的负责进程所属的应用（`responsibility_get_pid_responsible_for_pid`）：
+    /// XPC 服务的委托方（「Raycast Networking」→ Raycast），终端里被 launchd 收养的子进程 → 终端。
+    public let responsibleApplication: ContainingApplication?
+    public let scriptName: String?
 
     public init(
         pid: Int32?,
@@ -93,7 +110,10 @@ public struct ProcessIdentity: Equatable, Sendable {
         displayName: String? = nil,
         parentPID: Int32? = nil,
         ancestors: [ProcessAncestor] = [],
-        containingApplication: ContainingApplication? = nil
+        containingApplication: ContainingApplication? = nil,
+        delegatingApplication: ContainingApplication? = nil,
+        responsibleApplication: ContainingApplication? = nil,
+        scriptName: String? = nil
     ) {
         self.pid = pid
         self.processStartTime = processStartTime
@@ -105,6 +125,9 @@ public struct ProcessIdentity: Equatable, Sendable {
         self.parentPID = parentPID
         self.ancestors = ancestors
         self.containingApplication = containingApplication
+        self.delegatingApplication = delegatingApplication
+        self.responsibleApplication = responsibleApplication
+        self.scriptName = scriptName
     }
 }
 
@@ -212,7 +235,8 @@ public struct SystemProcessIdentityResolver: Sendable {
                     bundleID: parent.bundleID,
                     bundlePath: parent.bundlePath,
                     displayName: parent.displayName,
-                    parentPID: parent.parentPID
+                    parentPID: parent.parentPID,
+                    scriptName: parent.scriptName
                 )
             )
             nextPID = parent.parentPID
@@ -231,8 +255,78 @@ public struct SystemProcessIdentityResolver: Sendable {
             containingApplication: Self.containingApplication(
                 for: current.executablePath,
                 ownBundlePath: current.bundlePath
-            )
+            ),
+            delegatingApplication: delegatingApplication(for: current),
+            responsibleApplication: responsibleApplication(for: pid, ancestors: ancestors),
+            scriptName: current.scriptName
         )
+    }
+
+    /// 系统记录的负责进程（活动监视器同款）。父进程链里已有它时直接复用，否则补一次快照；
+    /// root 进程查不到（返回 -1），自己负责自己的进程不算。
+    private func responsibleApplication(for pid: Int32, ancestors: [ProcessAncestor]) -> ContainingApplication? {
+        guard let responsiblePID = Self.responsiblePID(for: pid),
+              responsiblePID > 1,
+              responsiblePID != pid else { return nil }
+        let bundleID: String?
+        let bundlePath: String?
+        let displayName: String?
+        let executablePath: String?
+        if let ancestor = ancestors.first(where: { $0.pid == responsiblePID }) {
+            (bundleID, bundlePath, displayName, executablePath) = (
+                ancestor.bundleID, ancestor.bundlePath, ancestor.displayName, ancestor.executablePath
+            )
+        } else {
+            let responsible = snapshot(for: responsiblePID, fallbackName: nil)
+            (bundleID, bundlePath, displayName, executablePath) = (
+                responsible.bundleID, responsible.bundlePath, responsible.displayName, responsible.executablePath
+            )
+        }
+        guard let bundlePath, URL(fileURLWithPath: bundlePath).pathExtension.lowercased() == "app" else {
+            return nil
+        }
+        return ContainingApplication(
+            bundleID: bundleID,
+            bundlePath: bundlePath,
+            displayName: displayName,
+            executablePath: executablePath
+        )
+    }
+
+    /// 已知附属应用按 bundle ID 找主应用。
+    private func delegatingApplication(for current: Snapshot) -> ContainingApplication? {
+        guard let bundleID = current.bundleID,
+              let hostBundleID = ProcessAttributor.auxiliaryApplicationHosts[bundleID],
+              let hostURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: hostBundleID) else {
+            return nil
+        }
+        let bundle = Bundle(url: hostURL)
+        return ContainingApplication(
+            bundleID: hostBundleID,
+            bundlePath: Self.canonicalPath(hostURL.path) ?? hostURL.path,
+            displayName: bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                ?? bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
+                ?? hostURL.deletingPathExtension().lastPathComponent,
+            executablePath: Self.canonicalPath(bundle?.executableURL?.path)
+        )
+    }
+
+    private typealias ResponsibilityFunction = @convention(c) (pid_t) -> pid_t
+
+    /// `responsibility_get_pid_responsible_for_pid` 是 libquarantine 的非公开接口（活动监视器同款），
+    /// 运行时按符号查找，找不到时不做委托归属。
+    private static let responsibilityFunction: ResponsibilityFunction? = {
+        guard let handle = dlopen(nil, RTLD_NOW),
+              let symbol = dlsym(handle, "responsibility_get_pid_responsible_for_pid") else {
+            return nil
+        }
+        return unsafeBitCast(symbol, to: ResponsibilityFunction.self)
+    }()
+
+    private static func responsiblePID(for pid: Int32) -> Int32? {
+        guard let function = responsibilityFunction else { return nil }
+        let responsible = function(pid)
+        return responsible > 0 ? responsible : nil
     }
 
     static func containingApplication(
@@ -264,6 +358,7 @@ public struct SystemProcessIdentityResolver: Sendable {
         let bundlePath: String?
         let displayName: String?
         let parentPID: Int32?
+        let scriptName: String?
     }
 
     private func snapshot(for pid: Int32, fallbackName: String?) -> Snapshot {
@@ -282,13 +377,21 @@ public struct SystemProcessIdentityResolver: Sendable {
             ?? fallbackName
 
         let processInfo = Self.processInfo(for: pid)
+        // 只为脚本解释器读启动参数，其他进程不多一次 sysctl。
+        var scriptName: String?
+        if let executablePath,
+           ExecutablePathNormalizer.isInterpreter(URL(fileURLWithPath: executablePath).lastPathComponent),
+           let arguments = MihomoControllerDiscovery.processArguments(pid: pid) {
+            scriptName = ExecutablePathNormalizer.scriptProgramName(arguments: arguments)
+        }
         return Snapshot(
             processStartTime: processInfo?.startTime,
             executablePath: executablePath,
             bundleID: bundleID,
             bundlePath: bundlePath,
             displayName: displayName,
-            parentPID: processInfo?.parentPID
+            parentPID: processInfo?.parentPID,
+            scriptName: scriptName
         )
     }
 

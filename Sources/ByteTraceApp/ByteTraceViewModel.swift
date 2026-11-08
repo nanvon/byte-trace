@@ -26,79 +26,94 @@ struct UsageTotals: Equatable {
 }
 
 enum UsageTimeRange: String, CaseIterable, Identifiable {
-    case lastHour
     case today
     case thisWeek
     case thisMonth
+    case lastMonth
+    case all
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .lastHour: return "最近 1 小时"
-        case .today: return "今天"
+        case .today: return "今日"
         case .thisWeek: return "本周"
         case .thisMonth: return "本月"
+        case .lastMonth: return "上月"
+        case .all: return "全部"
         }
     }
 
-    var usesBucketSummary: Bool {
-        switch self {
-        case .lastHour: return true
-        case .today, .thisWeek, .thisMonth: return false
-        }
-    }
+    var usesFineGrainedTimeline: Bool { self == .today }
 
-    var usesFineGrainedTimeline: Bool {
+    /// 日汇总使用包含末日的日期范围；分钟桶与导出使用实际起止时间。
+    func window(relativeTo now: Date, calendar: Calendar, earliestDate: Date? = nil) -> UsageRangeWindow {
+        let today = calendar.startOfDay(for: now)
+        let dayEnd = calendar.dateInterval(of: .day, for: now)?.end ?? now
+        let month = calendar.dateInterval(of: .month, for: now)
+        let start: Date
+        let end: Date
+        let lastDay: Date
+        let chartEnd: Date
         switch self {
-        case .lastHour, .today: return true
-        case .thisWeek, .thisMonth: return false
-        }
-    }
-
-    func startDate(relativeTo now: Date, calendar: Calendar) -> Date {
-        switch self {
-        case .lastHour:
-            return now.addingTimeInterval(-60 * 60)
         case .today:
-            return calendar.startOfDay(for: now)
+            start = today
+            end = now
+            lastDay = today
+            chartEnd = dayEnd
         case .thisWeek:
-            return calendar.dateInterval(of: .weekOfYear, for: now)?.start
-                ?? calendar.startOfDay(for: now)
+            let week = calendar.dateInterval(of: .weekOfYear, for: now)
+            start = week?.start ?? today
+            end = now
+            lastDay = today
+            chartEnd = week?.end ?? dayEnd
         case .thisMonth:
-            return calendar.dateInterval(of: .month, for: now)?.start
-                ?? calendar.startOfDay(for: now)
+            start = month?.start ?? today
+            end = now
+            lastDay = today
+            chartEnd = month?.end ?? dayEnd
+        case .lastMonth:
+            end = month?.start ?? today
+            start = calendar.date(byAdding: .month, value: -1, to: end) ?? end
+            lastDay = calendar.date(byAdding: .day, value: -1, to: end) ?? start
+            chartEnd = end
+        case .all:
+            start = min(earliestDate.map { calendar.startOfDay(for: $0) } ?? today, today)
+            end = now
+            lastDay = today
+            chartEnd = dayEnd
         }
-    }
 
-    /// 主窗口趋势图横轴的终点：今天、本周、本月画满整个周期，未来时段留空。
-    func chartEndDate(relativeTo now: Date, calendar: Calendar) -> Date {
-        switch self {
-        case .lastHour:
-            return now
-        case .today:
-            return calendar.dateInterval(of: .day, for: now)?.end ?? now
-        case .thisWeek:
-            return calendar.dateInterval(of: .weekOfYear, for: now)?.end ?? now
-        case .thisMonth:
-            return calendar.dateInterval(of: .month, for: now)?.end ?? now
+        let chartUnit: Calendar.Component
+        if self == .today {
+            chartUnit = .hour
+        } else if self == .all {
+            let days = calendar.dateComponents([.day], from: start, to: chartEnd).day ?? 0
+            let months = calendar.dateComponents([.month], from: start, to: chartEnd).month ?? 0
+            chartUnit = days <= 62 ? .day : (months < 36 ? .month : .year)
+        } else {
+            chartUnit = .day
         }
+        return UsageRangeWindow(
+            start: start, end: end, lastDay: lastDay, chartEnd: chartEnd, chartUnit: chartUnit
+        )
     }
+}
 
-    /// 主窗口趋势图每根柱子的时长。
-    var chartUnit: Calendar.Component {
-        switch self {
-        case .lastHour: return .minute
-        case .today: return .hour
-        case .thisWeek, .thisMonth: return .day
-        }
-    }
+/// 本次查询共用的日期边界和趋势粒度，避免图表与导出各自重新计算时间。
+struct UsageRangeWindow: Equatable {
+    let start: Date
+    let end: Date
+    let lastDay: Date
+    let chartEnd: Date
+    let chartUnit: Calendar.Component
 
     var chartUnitTitle: String {
-        switch self {
-        case .lastHour: return "每分钟"
-        case .today: return "每小时"
-        case .thisWeek, .thisMonth: return "每天"
+        switch chartUnit {
+        case .hour: return "每小时"
+        case .month: return "每月"
+        case .year: return "每年"
+        default: return "每天"
         }
     }
 }
@@ -162,6 +177,23 @@ struct UsageChartBar: Identifiable, Equatable {
     }
 }
 
+/// 宿主下的一个程序；`programKey` 为空表示应用本身。
+struct ProgramSlot: Hashable {
+    let appKey: String
+    let programKey: String
+}
+
+/// 宿主展开后程序排行里的一行。
+struct HostProgramShare: Identifiable, Equatable {
+    let programKey: String
+    let name: String
+    let iconRecord: DailyUsageRecord
+    let bytes: Int64
+
+    var id: String { programKey }
+    var isApplicationItself: Bool { programKey.isEmpty }
+}
+
 enum UsageObservationSurface: Hashable {
     case menuBar
     case mainOverview
@@ -223,7 +255,7 @@ struct RouteSplit: Equatable {
             let routes = usage.routes
             let recorded = routes.values.reduce(0.0) { $0 + Double($1) }
             guard recorded > 0 else { continue }
-            // 「最近 1 小时」用的是今天的路径数据，可能大于该时段总量，按比例收敛到总量。
+            // 路径拆分限制在该应用的总量内。
             let scale = min(1, Double(usage.totalBytes) / recorded)
             let node = Double(routes[.proxyNode] ?? 0) * scale
             let ruleDirect = Double(routes[.proxyRuleDirect] ?? 0) * scale
@@ -323,11 +355,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             }
         }
     }
+    @Published private(set) var rangeWindow = UsageTimeRange.today.window(
+        relativeTo: Date(), calendar: Calendar.autoupdatingCurrent
+    )
     /// 菜单栏面板的最近 1 小时分钟趋势（不含代理传输）。
     @Published private(set) var menuBarHourTimeline: [UsageTimelinePoint] = []
     @Published private(set) var rangeRecords: [DailyUsageRecord] = []
-    /// 命令行进程最近一次的启动者（appKey → 名称），供列表副标题使用。
-    @Published private(set) var launcherNames: [String: String] = [:]
+    /// 当前时间范围内每个宿主下每个程序的流量（每个宿主 + 程序一行）。
+    @Published private(set) var rangePrograms: [ProgramUsageRecord] = []
+    /// 当前时间范围内每个宿主 + 程序按路径汇总的字节数（日粒度）。
+    @Published private(set) var rangeProgramRoutes: [ProgramSlot: [TrafficRoute: Int64]] = [:]
     @Published private(set) var rangeBars: [UsageChartBar] = []
     @Published private(set) var detailTimeline: [UsageTimelinePoint] = []
     @Published private(set) var bucketStats: UsageBucketStats?
@@ -336,6 +373,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     /// `rangeRouteUsage` 按路径合并后的总量，作为出口未知流量的分摊参照。
     private var rangeRouteReference: [TrafficRoute: Int64] = [:]
     private var dailyRangeRecords: [DailyUsageRecord] = []
+    /// 今天每个宿主下的程序，按流量排序，供菜单栏副标题使用。
+    private var todayProgramsByHost: [String: [ProgramUsageRecord]] = [:]
+    private var rangeProgramsByHost: [String: [ProgramUsageRecord]] = [:]
+
     private var activeDetailAppKey: String?
     @Published private(set) var launchAtLoginEnabled: Bool
     @Published var usageRetentionPolicy: UsageRetentionPolicy {
@@ -392,7 +433,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var externalGapRecovery = NettopRestartGapRecovery()
     private var supplementalResidualTracker = SupplementalResidualTracker()
     private var pendingSupplementalProcessTotals: [NettopDelta] = []
-    private var pendingLauncherNames: [String: String] = [:]
+    /// nettop 进程名 → 最近一次解析到的宿主与程序，落库后供重启时预填名称缓存。
+    private var recordedProcessNames: [String: ProcessNameAttribution] = [:]
+    private var pendingProcessNames: [String: ProcessNameAttribution] = [:]
     private var mihomoController: MihomoController?
     private var mihomoTimer: Timer?
     private var mihomoFetchInFlight = false
@@ -461,7 +504,15 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             let store = try UsageStore(databaseURL: databaseURL)
             self.store = store
             aggregator = UsageAggregator(store: store)
-            _launcherNames = Published(initialValue: (try? store.launcherNames()) ?? [:])
+            if let remembered = try? store.rememberedProcessAttributions() {
+                attributionCache.seed(remembered)
+                recordedProcessNames = Dictionary(
+                    remembered.map {
+                        ($0.processName, ProcessNameAttribution(appKey: $0.appKey, programKey: $0.program?.key ?? ""))
+                    },
+                    uniquingKeysWith: { first, _ in first }
+                )
+            }
         } catch {
             store = nil
             aggregator = nil
@@ -532,7 +583,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     func beginObservingAppDetail(_ appKey: String) {
         activeDetailAppKey = appKey
-        refreshDetailTimeline(for: appKey)
+        refreshDetailTimeline()
     }
 
     func endObservingAppDetail(_ appKey: String) {
@@ -778,11 +829,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         refreshOverview()
     }
 
-    /// 路径数据按日汇总；「最近 1 小时」只能用今天的拆分近似。
-    var routeBreakdownUsesToday: Bool {
-        selectedRange == .lastHour
-    }
-
     func routeSplit(for records: [DailyUsageRecord]) -> RouteSplit {
         RouteSplit(
             usages: records.filter { $0.category != .proxyTransport }.map {
@@ -796,18 +842,60 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         activeDetailAppKey == appKey ? detailTimeline : []
     }
 
+    /// 宿主下的程序排行（含应用本身），按流量排序。
+    func programs(forHost record: DailyUsageRecord) -> [HostProgramShare] {
+        (rangeProgramsByHost[record.appKey] ?? []).map { program in
+            HostProgramShare(
+                programKey: program.programKey,
+                name: program.programKey.isEmpty ? "应用本身" : program.programName ?? program.programKey,
+                iconRecord: program.programKey.isEmpty ? record : Self.iconRecord(for: program),
+                bytes: program.totalBytes
+            )
+        }
+    }
+
+    /// 宿主下某个程序的直连 / 代理拆分。
+    func routeSplit(forHost appKey: String, programKey: String, totalBytes: Int64) -> RouteSplit {
+        RouteSplit(
+            usages: [(totalBytes, rangeProgramRoutes[ProgramSlot(appKey: appKey, programKey: programKey)] ?? [:])],
+            reference: rangeRouteReference
+        )
+    }
+
+    /// 程序没有应用包，用它的可执行文件找图标（命令行工具显示终端，Claude Code 显示 Claude）。
+    static func iconRecord(for program: ProgramUsageRecord) -> DailyUsageRecord {
+        DailyUsageRecord(
+            day: program.day,
+            appKey: program.programKey,
+            displayName: program.programName ?? program.programKey,
+            category: program.programCategory ?? .unclassified,
+            bundleID: program.programKey.hasPrefix("bundle:")
+                ? String(program.programKey.dropFirst("bundle:".count))
+                : nil,
+            bundlePath: nil,
+            executablePath: program.programExecutablePath,
+            downloadBytes: program.downloadBytes,
+            uploadBytes: program.uploadBytes,
+            sampleCount: 0
+        )
+    }
+
     func clearAllData() {
         guard let store, let aggregator else { return }
 
         do {
             try store.clearAll()
             aggregator.discardPending()
-            pendingLauncherNames = [:]
-            launcherNames = [:]
+            pendingProcessNames = [:]
+            recordedProcessNames = [:]
             records = []
             todayRouteSplit = .empty
             menuBarHourTimeline = []
             rangeRecords = []
+            rangePrograms = []
+            rangeProgramRoutes = [:]
+            todayProgramsByHost = [:]
+            rangeProgramsByHost = [:]
             rangeRouteUsage = [:]
             rangeRouteReference = [:]
             rangeBars = []
@@ -817,6 +905,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 latestBucket: nil
             )
             dailyRangeRecords = []
+            rangeWindow = selectedRange.window(relativeTo: Date(), calendar: Calendar.autoupdatingCurrent)
             detailTimeline = []
             activeDetailAppKey = nil
             lastRetentionCleanupDay = nil
@@ -832,25 +921,21 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             let today = selectedRange == .today ? try loadToday(from: store) : nil
             try loadRange(from: store, cachedToday: today)
         }
-        let end = Date()
-        let start = selectedRange.startDate(
-            relativeTo: end,
-            calendar: Calendar.autoupdatingCurrent
-        )
+        let exportedAt = Date()
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
         let document = ByteTraceExportDocument(
-            formatVersion: 4,
+            formatVersion: 5,
             accountingVersion: UsageStore.accountingVersion,
             product: "ByteTrace",
-            exportedAt: end,
+            exportedAt: exportedAt,
             range: ByteTraceExportDocument.Range(
                 id: selectedRange.rawValue,
                 title: selectedRange.title,
-                start: start,
-                end: end
+                start: rangeWindow.start,
+                end: rangeWindow.end
             ),
             applicationUsage: rangeRecords.map {
                 ByteTraceExportDocument.ApplicationUsage(
@@ -869,6 +954,24 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                         uniqueKeysWithValues: (rangeRouteUsage[$0.appKey] ?? [:]).map {
                             ($0.key.rawValue, $0.value)
                         }
+                    )
+                )
+            },
+            programUsage: rangePrograms.map { program in
+                ByteTraceExportDocument.ProgramUsage(
+                    appKey: program.appKey,
+                    programKey: program.programKey,
+                    displayName: program.programKey.isEmpty
+                        ? rangeRecords.first { $0.appKey == program.appKey }?.displayName ?? program.appKey
+                        : program.programName ?? program.programKey,
+                    executablePath: program.programExecutablePath,
+                    downloadBytes: program.downloadBytes,
+                    uploadBytes: program.uploadBytes,
+                    totalBytes: program.totalBytes,
+                    routeBytes: Dictionary(
+                        uniqueKeysWithValues: (rangeProgramRoutes[
+                            ProgramSlot(appKey: program.appKey, programKey: program.programKey)
+                        ] ?? [:]).map { ($0.key.rawValue, $0.value) }
                     )
                 )
             }
@@ -920,30 +1023,41 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         return Set(counts.filter { $0.value > 1 }.keys)
     }
 
-    /// 列表副标题：系统进程的中文用途说明，命令行进程的启动者。
+    /// 菜单栏列表副标题（今天）：系统进程的中文用途说明，宿主里运行过的程序。
     func subtitle(for record: DailyUsageRecord) -> String? {
+        hostSubtitle(for: record, programs: todayProgramsByHost[record.appKey] ?? [])
+    }
+
+    /// 主窗口列表副标题（当前时间范围），口径同 `subtitle(for:)`。
+    func rangeSubtitle(for record: DailyUsageRecord) -> String? {
+        hostSubtitle(for: record, programs: rangeProgramsByHost[record.appKey] ?? [])
+    }
+
+    private func hostSubtitle(for record: DailyUsageRecord, programs: [ProgramUsageRecord]) -> String? {
         var parts: [String] = []
-        if record.category != .userApp,
+        if record.category != .userApp, !VirtualHost.isVirtual(record.appKey),
            let description = SystemProcessDescriptions.description(forExecutablePath: record.executablePath) {
             parts.append(description)
         }
-        if let launcher = launcherNames[record.appKey], launcher != record.displayName {
-            parts.append("由 \(launcher) 启动")
+        let names = programs.filter { !$0.programKey.isEmpty }.map { $0.programName ?? $0.programKey }
+        if !names.isEmpty {
+            let shown = names.prefix(2).joined(separator: "、")
+            parts.append(names.count > 2 ? "含 \(shown) 等 \(names.count) 个程序" : "含 \(shown)")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    /// 详情页副标题：在列表副标题前注明解析前就退出、没有路径的进程。
+    /// 详情里的说明：虚拟宿主的含义，系统应用的用途。
     func detailSubtitle(for record: DailyUsageRecord) -> String? {
-        var parts: [String] = []
-        if record.appKey.hasPrefix("process:"),
-           record.bundlePath == nil, record.executablePath == nil {
-            parts.append("进程已退出，未能识别来源")
+        switch record.appKey {
+        case VirtualHost.systemKey:
+            return "系统目录下的守护进程与服务"
+        case VirtualHost.otherKey:
+            return "不在任何应用里运行的命令行工具：由 launchd 直接启动的后台程序、按应用区分程序之前记录的命令行流量，以及解析前就退出、无法识别来源的进程"
+        default:
+            guard record.category != .userApp else { return nil }
+            return SystemProcessDescriptions.description(forExecutablePath: record.executablePath)
         }
-        if let subtitle = subtitle(for: record) {
-            parts.append(subtitle)
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     static func abbreviatedPath(_ path: String) -> String {
@@ -1417,9 +1531,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         if attributed.category == .proxyTransport, let pid = attributed.pid {
             noteProxyProcess(pid: pid)
         }
-        if let launcherName = attributed.launcherName,
-           launcherNames[attributed.appKey] != launcherName {
-            pendingLauncherNames[attributed.appKey] = launcherName
+        if identity.executablePath != nil || identity.bundlePath != nil,
+           !attributed.nettopProcessName.isEmpty,
+           attributed.category != .proxyTransport {
+            let attribution = ProcessNameAttribution(
+                appKey: attributed.appKey,
+                programKey: attributed.program?.key ?? ""
+            )
+            if recordedProcessNames[attributed.nettopProcessName] != attribution {
+                pendingProcessNames[attributed.nettopProcessName] = attribution
+            }
         }
         guard let aggregator else { return }
 
@@ -1435,7 +1556,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                     executablePath: attributed.executablePath,
                     downloadBytes: delta.downloadBytes,
                     uploadBytes: delta.uploadBytes,
-                    route: attributed.category == .proxyTransport ? nil : route
+                    route: attributed.category == .proxyTransport ? nil : route,
+                    program: attributed.program
                 )
             )
         } catch {
@@ -1607,10 +1729,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         guard let aggregator else { return }
         do {
             _ = try aggregator.flush()
-            if !pendingLauncherNames.isEmpty, let store {
-                try store.recordLaunchers(pendingLauncherNames)
-                launcherNames.merge(pendingLauncherNames) { _, new in new }
-                pendingLauncherNames = [:]
+            if !pendingProcessNames.isEmpty, let store {
+                try store.recordProcessNames(pendingProcessNames)
+                recordedProcessNames.merge(pendingProcessNames) { _, new in new }
+                pendingProcessNames = [:]
             }
             refreshIfNeeded(force: forceRefresh)
         } catch {
@@ -1738,39 +1860,69 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             usages: appRecords.map { (totalBytes(for: $0), appRoutes[$0.appKey] ?? [:]) },
             reference: reference
         )
+        todayPrograms = try store.programUsage(from: today, through: today)
+        todayProgramsByHost = Self.programsByHost(todayPrograms)
         if newRecords != records { records = newRecords }
         if routeSplit != todayRouteSplit { todayRouteSplit = routeSplit }
         return newRecords
     }
 
+    /// 最近一次 `loadToday` 读到的今天的程序流量（每个宿主 + 程序一行）。
+    private var todayPrograms: [ProgramUsageRecord] = []
+
+    private static func programsByHost(_ programs: [ProgramUsageRecord]) -> [String: [ProgramUsageRecord]] {
+        Dictionary(grouping: programs, by: \.appKey).mapValues { rows in
+            rows.sorted {
+                $0.totalBytes != $1.totalBytes ? $0.totalBytes > $1.totalBytes : $0.programKey < $1.programKey
+            }
+        }
+    }
+
+    /// 按宿主 + 程序合并多天的行；名称等取最近一天有值的。
+    private static func aggregatePrograms(_ programs: [ProgramUsageRecord]) -> [ProgramUsageRecord] {
+        var order: [ProgramSlot] = []
+        var merged: [ProgramSlot: ProgramUsageRecord] = [:]
+        for program in programs.sorted(by: { $0.day < $1.day }) {
+            let slot = ProgramSlot(appKey: program.appKey, programKey: program.programKey)
+            guard let existing = merged[slot] else {
+                order.append(slot)
+                merged[slot] = program
+                continue
+            }
+            merged[slot] = ProgramUsageRecord(
+                day: existing.day,
+                appKey: program.appKey,
+                programKey: program.programKey,
+                programName: program.programName ?? existing.programName,
+                programCategory: program.programCategory ?? existing.programCategory,
+                programExecutablePath: program.programExecutablePath ?? existing.programExecutablePath,
+                downloadBytes: saturating(existing.downloadBytes, program.downloadBytes),
+                uploadBytes: saturating(existing.uploadBytes, program.uploadBytes)
+            )
+        }
+        return order.compactMap { merged[$0] }
+    }
+
+    private static func saturating(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let result = lhs.addingReportingOverflow(rhs)
+        return result.overflow ? Int64.max : result.partialValue
+    }
+
+    /// 设置程序数据并按宿主分组，供应用详情与副标题使用。
+    private func setRangePrograms(_ programs: [ProgramUsageRecord]) {
+        let sorted = programs.sorted {
+            $0.totalBytes != $1.totalBytes ? $0.totalBytes > $1.totalBytes : $0.programIdentity < $1.programIdentity
+        }
+        rangeProgramsByHost = Self.programsByHost(sorted)
+        if sorted != rangePrograms { rangePrograms = sorted }
+    }
+
     /// 菜单栏面板的 60 分钟小图只需要分钟总量，一次分钟桶查询即可。
     private func loadMenuBarHourTimeline(from store: UsageStore) throws {
         let end = Date()
-        let start = UsageTimeRange.lastHour.startDate(
-            relativeTo: end,
-            calendar: Calendar.autoupdatingCurrent
-        )
+        let start = end.addingTimeInterval(-60 * 60)
         let newTimeline = makeTimeline(from: try store.bucketTimeline(from: start, to: end))
         if newTimeline != menuBarHourTimeline { menuBarHourTimeline = newTimeline }
-    }
-
-    private static func dailyRecords(
-        from summaries: [UsageBucketSummaryRecord]
-    ) -> [DailyUsageRecord] {
-        summaries.map {
-            DailyUsageRecord(
-                day: dayKey(for: $0.firstBucketStart),
-                appKey: $0.appKey,
-                displayName: $0.displayName,
-                category: $0.category,
-                bundleID: $0.bundleID,
-                bundlePath: $0.bundlePath,
-                executablePath: $0.executablePath,
-                downloadBytes: $0.downloadBytes,
-                uploadBytes: $0.uploadBytes,
-                sampleCount: $0.sampleCount
-            )
-        }
     }
 
     private func loadRange(
@@ -1778,30 +1930,31 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         cachedToday: [DailyUsageRecord]? = nil
     ) throws {
         let calendar = Calendar.autoupdatingCurrent
-        let end = Date()
-        let start = selectedRange.startDate(relativeTo: end, calendar: calendar)
-
-        try loadRangeRoutes(from: store, start: start, end: end)
-        if selectedRange.usesBucketSummary {
-            let summaries = try store.bucketUsageSummary(from: start, to: end)
-            dailyRangeRecords = []
-            setRangeRecords(Self.dailyRecords(from: summaries))
-            try loadBucketRangeBars(from: store, start: start, end: end, calendar: calendar)
-            try loadActiveDetailTimeline(from: store, start: start, end: end)
-            return
+        let now = Date()
+        var window = selectedRange.window(relativeTo: now, calendar: calendar)
+        // 全部记录直接从日汇总查询；不能用可能已清理的分钟桶推导历史起点。
+        let startDay = selectedRange == .all ? "0001-01-01" : Self.dayKey(for: window.start)
+        let endDay = Self.dayKey(for: window.lastDay)
+        let validTodayCache = cachedToday.flatMap { rows in
+            selectedRange == .today && rows.allSatisfy { $0.day == endDay } ? rows : nil
         }
-
-        let daily: [DailyUsageRecord]
-        if let cachedToday {
-            daily = cachedToday
-        } else {
-            daily = try store.dailyUsage(
-                from: Self.dayKey(for: start),
-                through: Self.dayKey(for: end)
+        let daily = try validTodayCache ?? store.dailyUsage(from: startDay, through: endDay)
+        if selectedRange == .all {
+            let firstDay = daily.lazy.map(\.day).min()
+            window = selectedRange.window(
+                relativeTo: now, calendar: calendar, earliestDate: firstDay.flatMap(Self.date(from:))
             )
         }
+        let start = window.start
+        let end = window.end
+        if window != rangeWindow { rangeWindow = window }
+        try loadRangeRoutes(from: store, startDay: startDay, endDay: endDay)
         dailyRangeRecords = daily
         setRangeRecords(aggregateRecords(daily))
+        let dailyPrograms = try validTodayCache != nil
+            ? todayPrograms
+            : store.programUsage(from: startDay, through: endDay)
+        setRangePrograms(Self.aggregatePrograms(dailyPrograms))
         if selectedRange == .today {
             try loadBucketRangeBars(from: store, start: start, end: end, calendar: calendar)
         } else {
@@ -1825,18 +1978,30 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         try loadActiveDetailTimeline(from: store, start: start, end: end)
     }
 
-    /// 路径只按日汇总；「最近 1 小时」退化为今天的拆分，界面会注明。
-    private func loadRangeRoutes(from store: UsageStore, start: Date, end: Date) throws {
+    /// 路径与日汇总使用相同的首日、末日（均包含）。
+    private func loadRangeRoutes(from store: UsageStore, startDay: String, endDay: String) throws {
         var usage: [String: [TrafficRoute: Int64]] = [:]
         for record in try store.routeUsage(
-            from: Self.dayKey(for: start),
-            through: Self.dayKey(for: end)
+            from: startDay,
+            through: endDay
         ) {
             usage[record.appKey, default: [:]][record.route] = saturatingAdd(
                 usage[record.appKey]?[record.route] ?? 0,
                 record.totalBytes
             )
         }
+        var programRoutes: [ProgramSlot: [TrafficRoute: Int64]] = [:]
+        for record in try store.programRouteUsage(
+            from: startDay,
+            through: endDay
+        ) {
+            let slot = ProgramSlot(appKey: record.appKey, programKey: record.programKey)
+            programRoutes[slot, default: [:]][record.route] = saturatingAdd(
+                programRoutes[slot]?[record.route] ?? 0,
+                record.totalBytes
+            )
+        }
+        if programRoutes != rangeProgramRoutes { rangeProgramRoutes = programRoutes }
         if usage != rangeRouteUsage {
             rangeRouteUsage = usage
             var reference: [TrafficRoute: Int64] = [:]
@@ -1849,7 +2014,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
-    /// 「最近 1 小时」与「今天」的柱子来自分钟桶。头部应用按 15 分钟槽查询再并入
+    /// 「今日」的柱子来自分钟桶。头部应用按 15 分钟槽查询再并入
     /// 本地小时：槽按 Unix 纪元对齐，15 分钟是所有时区偏移的公约数，并入后不会跨小时；
     /// 直接按分钟逐应用读取一整天会返回数万行。
     private func loadBucketRangeBars(
@@ -1858,7 +2023,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         end: Date,
         calendar: Calendar
     ) throws {
-        let slotSeconds: Int64 = selectedRange == .lastHour ? 60 : 15 * 60
+        let slotSeconds: Int64 = 15 * 60
         let timeline = try store.bucketTimeline(from: start, to: end)
         let appSlots = try store.bucketTimelineByApp(
             from: start,
@@ -1876,13 +2041,13 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
     }
 
-    /// 按 `selectedRange.chartUnit` 把总量与逐应用流量并入柱子；只产出有数据的时段。
+    /// 按当前时间范围的粒度合并总量与逐应用流量；只产出有数据的时段。
     private func makeBars(
         totals: [(start: Date, download: Int64, upload: Int64)],
         appBytes: [(start: Date, appKey: String, bytes: Int64)],
         calendar: Calendar
     ) -> [UsageChartBar] {
-        let unit = selectedRange.chartUnit
+        let unit = rangeWindow.chartUnit
         func slot(for date: Date) -> DateInterval {
             calendar.dateInterval(of: unit, for: date) ?? DateInterval(start: date, duration: 60)
         }
@@ -1929,18 +2094,15 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func refreshDetailTimeline(for appKey: String) {
+    private func refreshDetailTimeline() {
         guard let store else {
             detailTimeline = []
             return
         }
-        let calendar = Calendar.autoupdatingCurrent
-        let end = Date()
-        let start = selectedRange.startDate(relativeTo: end, calendar: calendar)
         do {
-            try loadDetailTimeline(for: appKey, from: store, start: start, end: end)
+            try loadActiveDetailTimeline(from: store, start: rangeWindow.start, end: rangeWindow.end)
         } catch {
-            lastError = "读取应用趋势失败：\(error.localizedDescription)"
+            lastError = "读取趋势失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
         }
     }
@@ -1950,13 +2112,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         start: Date,
         end: Date
     ) throws {
-        guard let activeDetailAppKey else { return }
-        try loadDetailTimeline(
-            for: activeDetailAppKey,
-            from: store,
-            start: start,
-            end: end
-        )
+        guard let appKey = activeDetailAppKey else { return }
+        try loadDetailTimeline(for: appKey, from: store, start: start, end: end)
     }
 
     private func loadDetailTimeline(

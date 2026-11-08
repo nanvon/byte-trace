@@ -19,6 +19,7 @@ public final class UsageAggregator: @unchecked Sendable {
         let day: String
         let bucketStart: Date
         let appKey: String
+        let programKey: String
     }
 
     private struct Pending {
@@ -29,6 +30,7 @@ public final class UsageAggregator: @unchecked Sendable {
     private struct RouteKey: Hashable {
         let day: String
         let appKey: String
+        let programKey: String
         let route: TrafficRoute
     }
 
@@ -72,13 +74,13 @@ public final class UsageAggregator: @unchecked Sendable {
 
         let day = dayKey(for: delta.sampledAt)
         let bucketStart = bucketStart(for: delta.sampledAt)
-        let key = Key(day: day, bucketStart: bucketStart, appKey: delta.appKey)
+        let key = Key(day: day, bucketStart: bucketStart, appKey: delta.appKey, programKey: delta.programKey)
 
         lock.lock()
         defer { lock.unlock() }
 
         if let route = delta.route {
-            let routeKey = RouteKey(day: day, appKey: delta.appKey, route: route)
+            let routeKey = RouteKey(day: day, appKey: delta.appKey, programKey: delta.programKey, route: route)
             if pendingRoutes[routeKey] == nil, pendingRoutes.count >= maxPendingEntries {
                 throw UsageAggregatorError.pendingLimitExceeded
             }
@@ -112,7 +114,8 @@ public final class UsageAggregator: @unchecked Sendable {
                 lastSeenAt: delta.sampledAt,
                 downloadBytes: delta.downloadBytes,
                 uploadBytes: delta.uploadBytes,
-                sampleCount: 1
+                sampleCount: 1,
+                program: delta.program
             ),
             bucket: UsageBucketAggregate(
                 bucketStart: bucketStart,
@@ -126,7 +129,8 @@ public final class UsageAggregator: @unchecked Sendable {
                 lastSeenAt: delta.sampledAt,
                 downloadBytes: delta.downloadBytes,
                 uploadBytes: delta.uploadBytes,
-                sampleCount: 1
+                sampleCount: 1,
+                program: delta.program
             )
         )
     }
@@ -158,6 +162,7 @@ public final class UsageAggregator: @unchecked Sendable {
             return RouteUsageAggregate(
                 day: key.day,
                 appKey: key.appKey,
+                programKey: key.programKey,
                 route: key.route,
                 lastSeenAt: delta.sampledAt,
                 downloadBytes: delta.downloadBytes,
@@ -172,6 +177,7 @@ public final class UsageAggregator: @unchecked Sendable {
         return RouteUsageAggregate(
             day: aggregate.day,
             appKey: aggregate.appKey,
+            programKey: aggregate.programKey,
             route: aggregate.route,
             lastSeenAt: max(aggregate.lastSeenAt, delta.sampledAt),
             downloadBytes: downloadResult.partialValue,
@@ -202,7 +208,8 @@ public final class UsageAggregator: @unchecked Sendable {
             lastSeenAt: max(aggregate.lastSeenAt, delta.sampledAt),
             downloadBytes: downloadResult.partialValue,
             uploadBytes: uploadResult.partialValue,
-            sampleCount: sampleResult.partialValue
+            sampleCount: sampleResult.partialValue,
+            program: delta.program ?? aggregate.program
         )
     }
 
@@ -229,7 +236,8 @@ public final class UsageAggregator: @unchecked Sendable {
             lastSeenAt: max(aggregate.lastSeenAt, delta.sampledAt),
             downloadBytes: downloadResult.partialValue,
             uploadBytes: uploadResult.partialValue,
-            sampleCount: sampleResult.partialValue
+            sampleCount: sampleResult.partialValue,
+            program: delta.program ?? aggregate.program
         )
     }
 

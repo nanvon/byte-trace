@@ -58,7 +58,13 @@ final class ExecutablePathNormalizerTests: XCTestCase {
             ("/usr/sbin/mDNSResponder", "mDNSResponder"),
             ("/Users/u/.local/share/mise/installs/node/24.17.0/bin/node", "node"),
             ("/Users/u/.local/share/fnm/node-versions/v24.17.0/installation/bin/node", "node"),
-            ("/Users/u/.local/bin/mise", "mise")
+            ("/Users/u/.local/bin/mise", "mise"),
+            ("/Users/u/.local/share/claude/versions/2.1.314", "claude"),
+            ("/Users/u/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/node", "cursor-agent"),
+            ("/opt/homebrew/Caskroom/claude-code/2.1.292/claude", "claude"),
+            ("/Users/u/.claude/downloads/claude-2.1.300-darwin-arm64", "claude"),
+            ("/opt/homebrew/Cellar/git/2.50.0/libexec/git-core/git-remote-http", "git"),
+            ("/Library/Developer/CommandLineTools/usr/libexec/git-core/git-remote-https", "git")
         ]
         for (path, name) in merged {
             XCTAssertEqual(ExecutablePathNormalizer.commandName(forExecutablePath: path), name, path)
@@ -66,14 +72,53 @@ final class ExecutablePathNormalizerTests: XCTestCase {
 
         let kept = [
             "/usr/libexec/nsurlsessiond",
-            "/Users/u/.local/share/claude/versions/2.1.314",
+            "/Users/u/Library/Application Support/Cursor/User/globalStorage/agent-cli/.local/share/cursor-agent/versions/2026.10.22/node",
+            "/Applications/Fork.app/Contents/Resources/git-instance/libexec/git-core/git-remote-http",
+            "/opt/homebrew/Caskroom/some-app/1.0/Some.app/Contents/MacOS/Some",
             "/Applications/Raycast.app/Contents/Resources/node-v22.22.2/bin/node",
             "/Users/u/Library/Application Support/com.raycast.macos/node/runtime/node-v22-darwin-arm64/bin/node",
-            "/Users/u/.cache/magpie/bin/magpie-bun",
-            "/opt/homebrew/Cellar/git/2.50.0/libexec/git-core/git-remote-http"
+            "/Users/u/.cache/magpie/bin/magpie-bun"
         ]
         for path in kept {
             XCTAssertNil(ExecutablePathNormalizer.commandName(forExecutablePath: path), path)
+        }
+    }
+
+    func testProgramNameCoversInterpretersAndBundledTools() {
+        let named: [(String, String)] = [
+            ("/usr/bin/curl", "curl"),
+            ("/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift", "swift"),
+            ("/opt/homebrew/Cellar/python@3.13/3.13.0/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python", "python"),
+            ("/Users/u/Library/Application Support/Claude/claude-code/2.1.317/abc/claude.app/Contents/MacOS/claude", "claude"),
+            ("/Users/u/.vscode/extensions/ms-python.python-2026.1.0/dist/lsp-server", "lsp-server")
+        ]
+        for (path, name) in named {
+            XCTAssertEqual(ExecutablePathNormalizer.programName(forExecutablePath: path), name, path)
+        }
+        XCTAssertNil(ExecutablePathNormalizer.programName(forExecutablePath: "/usr/libexec/nsurlsessiond"))
+        XCTAssertNil(ExecutablePathNormalizer.programName(forExecutablePath: "/Users/u/.marscode/ai-chat/binary/1.0/modules/ai-agent/ai-agent"))
+
+        XCTAssertTrue(ExecutablePathNormalizer.isInterpreter("python3.13"))
+        XCTAssertTrue(ExecutablePathNormalizer.isInterpreter("node"))
+        XCTAssertFalse(ExecutablePathNormalizer.isInterpreter("python-config"))
+        XCTAssertFalse(ExecutablePathNormalizer.isInterpreter("bun"))
+    }
+
+    func testScriptProgramNameFollowsTheScriptArgument() {
+        let cases: [([String], String?)] = [
+            (["/opt/homebrew/Library/Homebrew/vendor/portable-ruby/current/bin/ruby", "-W1", "--disable=gems", "/opt/homebrew/Library/Homebrew/brew.rb", "update"], "brew"),
+            (["python3", "-m", "pip.__main__", "install", "x"], "pip"),
+            (["python3", "-c", "print(1)"], nil),
+            (["node", "-e", "1"], nil),
+            (["node", "--require", "/tmp/hook.js", "/opt/homebrew/bin/npx", "figma-developer-mcp"], "npx"),
+            (["node", "/Users/u/.npm/_npx/abc/node_modules/figma-developer-mcp/dist/cli.js", "--stdio"], "figma-developer-mcp"),
+            (["node", "/Users/u/.npm/node_modules/@anthropic-ai/claude-code/cli.js"], "claude-code"),
+            (["node", "/Users/u/work/tool/dist/index.js"], "tool"),
+            (["node", "worker.mjs"], "worker"),
+            (["node"], nil)
+        ]
+        for (arguments, name) in cases {
+            XCTAssertEqual(ExecutablePathNormalizer.scriptProgramName(arguments: arguments), name, arguments.joined(separator: " "))
         }
     }
 }

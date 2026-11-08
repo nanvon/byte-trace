@@ -30,6 +30,7 @@ public enum TrafficRoute: String, CaseIterable, Codable, Equatable, Hashable, Se
 public struct RouteUsageAggregate: Equatable, Sendable {
     public let day: String
     public let appKey: String
+    public let programKey: String
     public let route: TrafficRoute
     public let lastSeenAt: Date
     public let downloadBytes: Int64
@@ -38,6 +39,7 @@ public struct RouteUsageAggregate: Equatable, Sendable {
     public init(
         day: String,
         appKey: String,
+        programKey: String = "",
         route: TrafficRoute,
         lastSeenAt: Date,
         downloadBytes: Int64,
@@ -45,6 +47,7 @@ public struct RouteUsageAggregate: Equatable, Sendable {
     ) {
         self.day = day
         self.appKey = appKey
+        self.programKey = programKey
         self.route = route
         self.lastSeenAt = lastSeenAt
         self.downloadBytes = downloadBytes
@@ -69,5 +72,24 @@ public struct RouteUsageRecord: Equatable, Sendable {
     public var totalBytes: Int64 {
         let result = downloadBytes.addingReportingOverflow(uploadBytes)
         return result.overflow ? Int64.max : result.partialValue
+    }
+}
+
+/// 一个宿主下一个程序在一段日期内按路径汇总的流量。
+public struct ProgramRouteUsageRecord: Equatable, Sendable {
+    public let appKey: String
+    public let programKey: String
+    public let route: TrafficRoute
+    public let totalBytes: Int64
+
+    public init(appKey: String, programKey: String, route: TrafficRoute, totalBytes: Int64) {
+        self.appKey = appKey
+        self.programKey = programKey
+        self.route = route
+        self.totalBytes = totalBytes
+    }
+
+    public var programIdentity: String {
+        programKey.isEmpty ? appKey : programKey
     }
 }

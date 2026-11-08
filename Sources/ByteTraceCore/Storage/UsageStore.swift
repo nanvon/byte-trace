@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 10
+    public static let schemaVersion: Int64 = 13
     public static let accountingVersion: Int64 = 3
 
     private let database: SQLiteDatabase
@@ -128,17 +128,42 @@ public final class UsageStore: @unchecked Sendable {
             defer { sqlite3_finalize(bucketStatement) }
             let routeStatement = try prepareRouteUsageUpsert()
             defer { sqlite3_finalize(routeStatement) }
+            let programStatement = try prepareProgramUpsert()
+            defer { sqlite3_finalize(programStatement) }
 
             var apps: [String: AppAggregate] = [:]
+            var programs: [String: (program: AttributedProgram, firstSeenAt: Date, lastSeenAt: Date)] = [:]
+            func noteProgram(_ program: AttributedProgram?, firstSeenAt: Date, lastSeenAt: Date) {
+                guard let program else { return }
+                if let existing = programs[program.key] {
+                    programs[program.key] = (
+                        lastSeenAt >= existing.lastSeenAt ? program : existing.program,
+                        min(existing.firstSeenAt, firstSeenAt),
+                        max(existing.lastSeenAt, lastSeenAt)
+                    )
+                } else {
+                    programs[program.key] = (program, firstSeenAt, lastSeenAt)
+                }
+            }
             for aggregate in aggregates {
                 mergeApp(AppAggregate(aggregate), into: &apps)
+                noteProgram(aggregate.program, firstSeenAt: aggregate.firstSeenAt, lastSeenAt: aggregate.lastSeenAt)
             }
             for aggregate in bucketAggregates {
                 mergeApp(AppAggregate(aggregate), into: &apps)
+                noteProgram(aggregate.program, firstSeenAt: aggregate.firstSeenAt, lastSeenAt: aggregate.lastSeenAt)
             }
 
             for app in apps.values {
                 try upsertApp(app, using: appStatement)
+            }
+            for entry in programs.values {
+                try upsertProgram(
+                    entry.program,
+                    firstSeenAt: entry.firstSeenAt,
+                    lastSeenAt: entry.lastSeenAt,
+                    using: programStatement
+                )
             }
             for aggregate in aggregates {
                 try upsertDailyUsage(aggregate, using: dailyStatement)
@@ -190,11 +215,12 @@ public final class UsageStore: @unchecked Sendable {
             """
             SELECT d.day, d.app_key, a.display_name, a.category,
                    a.bundle_id, a.bundle_path, a.executable_path,
-                   d.download_bytes, d.upload_bytes, d.sample_count
+                   SUM(d.download_bytes), SUM(d.upload_bytes), SUM(d.sample_count)
             FROM daily_usage AS d
             JOIN apps AS a ON a.app_key = d.app_key
             WHERE d.accounting_version = ? AND d.day >= ? AND d.day <= ?
-            ORDER BY d.day ASC, (d.download_bytes + d.upload_bytes) DESC,
+            GROUP BY d.day, d.app_key
+            ORDER BY d.day ASC, (SUM(d.download_bytes) + SUM(d.upload_bytes)) DESC,
                      d.app_key ASC;
             """
         )
@@ -295,11 +321,12 @@ public final class UsageStore: @unchecked Sendable {
             """
             SELECT b.bucket_start, b.app_key, a.display_name, a.category,
                    a.bundle_id, a.bundle_path, a.executable_path,
-                   b.download_bytes, b.upload_bytes, b.sample_count
+                   SUM(b.download_bytes), SUM(b.upload_bytes), SUM(b.sample_count)
             FROM usage_buckets AS b
             JOIN apps AS a ON a.app_key = b.app_key
             WHERE b.accounting_version = ? AND b.bucket_start >= ? AND b.bucket_start < ?
-            ORDER BY b.bucket_start ASC, (b.download_bytes + b.upload_bytes) DESC,
+            GROUP BY b.bucket_start, b.app_key
+            ORDER BY b.bucket_start ASC, (SUM(b.download_bytes) + SUM(b.upload_bytes)) DESC,
                      b.app_key ASC;
             """
         )
@@ -410,10 +437,14 @@ public final class UsageStore: @unchecked Sendable {
         return records
     }
 
+    /// - Parameters:
+    ///   - appKey: 只看这个宿主。
+    ///   - programIdentity: 只看这个程序（跨宿主）；应用自身用宿主 appKey 表示，见 `ProgramUsageRecord.programIdentity`。
     public func bucketTimeline(
         from start: Date,
         to end: Date,
         appKey: String? = nil,
+        programIdentity: String? = nil,
         excludingProxyTransport: Bool = true
     ) throws -> [UsageTimelineRecord] {
         lock.lock()
@@ -423,9 +454,11 @@ public final class UsageStore: @unchecked Sendable {
                 from: start,
                 to: end,
                 appKey: appKey,
+                programIdentity: programIdentity,
                 excludingProxyTransport: excludingProxyTransport
             )
         } catch where Self.isSQLiteIntegerOverflow(error) {
+            guard programIdentity == nil else { throw error }
             return try saturatedBucketTimeline(
                 from: start,
                 to: end,
@@ -439,6 +472,7 @@ public final class UsageStore: @unchecked Sendable {
         from start: Date,
         to end: Date,
         appKey: String?,
+        programIdentity: String?,
         excludingProxyTransport: Bool
     ) throws -> [UsageTimelineRecord] {
         var conditions = [
@@ -448,6 +482,9 @@ public final class UsageStore: @unchecked Sendable {
         ]
         if appKey != nil {
             conditions.append("b.app_key = ?")
+        }
+        if programIdentity != nil {
+            conditions.append("(CASE WHEN b.program_key = '' THEN b.app_key ELSE b.program_key END) = ?")
         }
         if excludingProxyTransport {
             conditions.append("a.category != ?")
@@ -474,6 +511,10 @@ public final class UsageStore: @unchecked Sendable {
         bindingIndex += 1
         if let appKey {
             try database.bind(appKey, at: bindingIndex, in: statement)
+            bindingIndex += 1
+        }
+        if let programIdentity {
+            try database.bind(programIdentity, at: bindingIndex, in: statement)
             bindingIndex += 1
         }
         if excludingProxyTransport {
@@ -791,51 +832,136 @@ public final class UsageStore: @unchecked Sendable {
         return database.changes()
     }
 
-    /// WAL 下 DELETE 不收缩文件；大量删除后按需调用。阻塞操作，勿在主线程执行。
-    /// 命令行进程最近一次的启动者（appKey → 名称），仅用于展示，覆盖写入。
-    public func recordLaunchers(_ launchers: [String: String], at date: Date = Date()) throws {
-        guard !launchers.isEmpty else { return }
+    /// 一段日期内每个宿主下每个程序每天的流量（不含代理传输）。
+    public func programUsage(
+        from startDay: String,
+        through endDay: String
+    ) throws -> [ProgramUsageRecord] {
         lock.lock()
         defer { lock.unlock() }
-        let statement = try database.prepare(
+        return try queryProgramUsage(
             """
-            INSERT INTO app_launchers (app_key, launcher_name, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(app_key) DO UPDATE SET
-                launcher_name = excluded.launcher_name,
-                updated_at = excluded.updated_at;
-            """
+            SELECT d.day, d.app_key, d.program_key, p.display_name, p.category, p.executable_path,
+                   d.download_bytes, d.upload_bytes
+            FROM daily_usage AS d
+            JOIN apps AS a ON a.app_key = d.app_key
+            LEFT JOIN programs AS p ON p.program_key = d.program_key
+            WHERE d.accounting_version = ? AND d.day >= ? AND d.day <= ? AND a.category != ?;
+            """,
+            bind: { statement in
+                try self.database.bind(Self.accountingVersion, at: 1, in: statement)
+                try self.database.bind(startDay, at: 2, in: statement)
+                try self.database.bind(endDay, at: 3, in: statement)
+                try self.database.bind(AppCategory.proxyTransport.rawValue, at: 4, in: statement)
+            },
+            day: { self.database.columnString($0, at: 0) ?? startDay }
         )
-        defer { sqlite3_finalize(statement) }
-        for (appKey, launcherName) in launchers {
-            try database.bind(appKey, at: 1, in: statement)
-            try database.bind(launcherName, at: 2, in: statement)
-            try database.bind(Self.timestamp(date), at: 3, in: statement)
-            try database.stepDone(statement)
-            try database.reset(statement)
-        }
     }
 
-    public func launcherNames() throws -> [String: String] {
+    /// 一段时间内每个宿主下每个程序的流量（分钟桶，整段合成一行，不含代理传输）。
+    public func bucketProgramUsage(from start: Date, to end: Date) throws -> [ProgramUsageRecord] {
         lock.lock()
         defer { lock.unlock() }
-        let statement = try database.prepare("SELECT app_key, launcher_name FROM app_launchers;")
+        return try queryProgramUsage(
+            """
+            SELECT MIN(b.bucket_start), b.app_key, b.program_key, p.display_name, p.category, p.executable_path,
+                   SUM(b.download_bytes), SUM(b.upload_bytes)
+            FROM usage_buckets AS b
+            JOIN apps AS a ON a.app_key = b.app_key
+            LEFT JOIN programs AS p ON p.program_key = b.program_key
+            WHERE b.accounting_version = ? AND b.bucket_start >= ? AND b.bucket_start < ? AND a.category != ?
+            GROUP BY b.app_key, b.program_key;
+            """,
+            bind: { statement in
+                try self.database.bind(Self.accountingVersion, at: 1, in: statement)
+                try self.database.bind(Self.epochSeconds(start), at: 2, in: statement)
+                try self.database.bind(Self.epochSeconds(end), at: 3, in: statement)
+                try self.database.bind(AppCategory.proxyTransport.rawValue, at: 4, in: statement)
+            },
+            day: { Self.dayString(for: Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64($0, 0)))) }
+        )
+    }
+
+    private func queryProgramUsage(
+        _ sql: String,
+        bind: (OpaquePointer) throws -> Void,
+        day: (OpaquePointer) -> String
+    ) throws -> [ProgramUsageRecord] {
+        let statement = try database.prepare(sql)
         defer { sqlite3_finalize(statement) }
-        var names: [String: String] = [:]
+        try bind(statement)
+        var records: [ProgramUsageRecord] = []
         while true {
             let result = sqlite3_step(statement)
             if result == SQLITE_DONE { break }
             guard result == SQLITE_ROW else {
                 throw SQLiteDatabaseError.stepFailed(database.errorMessage)
             }
-            if let appKey = database.columnString(statement, at: 0),
-               let name = database.columnString(statement, at: 1) {
-                names[appKey] = name
-            }
+            records.append(
+                ProgramUsageRecord(
+                    day: day(statement),
+                    appKey: database.columnString(statement, at: 1) ?? "",
+                    programKey: database.columnString(statement, at: 2) ?? "",
+                    programName: database.columnString(statement, at: 3),
+                    programCategory: database.columnString(statement, at: 4).flatMap(AppCategory.init(rawValue:)),
+                    programExecutablePath: database.columnString(statement, at: 5),
+                    downloadBytes: sqlite3_column_int64(statement, 6),
+                    uploadBytes: sqlite3_column_int64(statement, 7)
+                )
+            )
         }
-        return names
+        return records
     }
 
+    /// 一段日期内每个宿主下每个程序按路径汇总的流量。
+    public func programRouteUsage(
+        from startDay: String,
+        through endDay: String
+    ) throws -> [ProgramRouteUsageRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try database.prepare(
+            """
+            SELECT app_key, program_key, route, download_bytes, upload_bytes
+            FROM daily_route_usage
+            WHERE accounting_version = ? AND day >= ? AND day <= ?;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(startDay, at: 2, in: statement)
+        try database.bind(endDay, at: 3, in: statement)
+
+        struct Key: Hashable {
+            let appKey: String
+            let programKey: String
+            let route: TrafficRoute
+        }
+        var order: [Key] = []
+        var totals: [Key: Int64] = [:]
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            guard let appKey = database.columnString(statement, at: 0),
+                  let route = TrafficRoute(rawValue: database.columnString(statement, at: 2) ?? "") else {
+                continue
+            }
+            let key = Key(appKey: appKey, programKey: database.columnString(statement, at: 1) ?? "", route: route)
+            if totals[key] == nil { order.append(key) }
+            let bytes = Self.saturatingAdd(sqlite3_column_int64(statement, 3), sqlite3_column_int64(statement, 4))
+            totals[key] = Self.saturatingAdd(totals[key] ?? 0, bytes)
+        }
+        return order.compactMap { key in
+            totals[key].map {
+                ProgramRouteUsageRecord(appKey: key.appKey, programKey: key.programKey, route: key.route, totalBytes: $0)
+            }
+        }
+    }
+
+    /// WAL 下 DELETE 不收缩文件；大量删除后按需调用。阻塞操作，勿在主线程执行。
     public func vacuum() throws {
         lock.lock()
         defer { lock.unlock() }
@@ -847,10 +973,115 @@ public final class UsageStore: @unchecked Sendable {
         defer { lock.unlock() }
         try database.execute("DELETE FROM usage_buckets;")
         try database.execute("DELETE FROM daily_route_usage;")
-        try database.execute("DELETE FROM app_launchers;")
+        try database.execute("DELETE FROM process_names;")
         try database.execute("DELETE FROM daily_usage;")
+        try database.execute("DELETE FROM programs;")
         try database.execute("DELETE FROM apps;")
         try database.execute("DELETE FROM collector_events;")
+    }
+
+    /// nettop 进程名最近一次解析到的宿主与程序，覆盖写入；只用于重启后预填名称缓存。
+    public func recordProcessNames(_ names: [String: ProcessNameAttribution], at date: Date = Date()) throws {
+        guard !names.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try database.prepare(
+            """
+            INSERT INTO process_names (process_name, app_key, program_key, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(process_name) DO UPDATE SET
+                app_key = excluded.app_key,
+                program_key = excluded.program_key,
+                updated_at = excluded.updated_at;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        for (processName, attribution) in names {
+            try database.bind(processName, at: 1, in: statement)
+            try database.bind(attribution.appKey, at: 2, in: statement)
+            try database.bind(attribution.programKey, at: 3, in: statement)
+            try database.bind(Self.timestamp(date), at: 4, in: statement)
+            try database.stepDone(statement)
+            try database.reset(statement)
+        }
+    }
+
+    /// 启动时预填名称缓存用：已记录的进程名归属，加上按可执行文件名（nettop 最多 15 个字符）
+    /// 推出的归属——应用按自己的可执行文件，程序按最近一次出现时所在的宿主。已记录的优先，同名取最近出现的。
+    public func rememberedProcessAttributions() throws -> [RememberedProcessAttribution] {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try database.prepare(
+            """
+            SELECT n.process_name, a.app_key, a.display_name, a.category,
+                   a.bundle_id, a.bundle_path, a.executable_path,
+                   pr.program_key, pr.display_name, pr.category, pr.executable_path,
+                   NULL, 2, CAST(a.last_seen_at AS REAL)
+            FROM process_names AS n
+            JOIN apps AS a ON a.app_key = n.app_key
+            LEFT JOIN programs AS pr ON pr.program_key = n.program_key AND n.program_key != ''
+            UNION ALL
+            SELECT NULL, a.app_key, a.display_name, a.category,
+                   a.bundle_id, a.bundle_path, a.executable_path,
+                   NULL, NULL, NULL, NULL,
+                   a.executable_path, 1, CAST(a.last_seen_at AS REAL)
+            FROM apps AS a
+            WHERE a.executable_path IS NOT NULL AND a.app_key NOT LIKE 'proxy:%'
+            UNION ALL
+            SELECT NULL, a.app_key, a.display_name, a.category,
+                   a.bundle_id, a.bundle_path, a.executable_path,
+                   pr.program_key, pr.display_name, pr.category, pr.executable_path,
+                   pr.executable_path, 1, CAST(pr.last_seen_at AS REAL)
+            FROM programs AS pr
+            JOIN (
+                SELECT program_key, app_key, MAX(updated_at) FROM daily_usage
+                WHERE program_key != '' GROUP BY program_key
+            ) AS latest ON latest.program_key = pr.program_key
+            JOIN apps AS a ON a.app_key = latest.app_key
+            WHERE pr.executable_path IS NOT NULL AND a.app_key NOT LIKE 'proxy:%'
+            ORDER BY 13 DESC, 14 DESC;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        var result: [RememberedProcessAttribution] = []
+        var seen: Set<String> = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            guard let appKey = database.columnString(statement, at: 1),
+                  let processName = database.columnString(statement, at: 0)
+                    ?? database.columnString(statement, at: 11).map({
+                        String(URL(fileURLWithPath: $0).lastPathComponent.prefix(15))
+                    }),
+                  !processName.isEmpty,
+                  seen.insert(processName).inserted else { continue }
+            var program: AttributedProgram?
+            if let programKey = database.columnString(statement, at: 7), !programKey.isEmpty {
+                program = AttributedProgram(
+                    key: programKey,
+                    displayName: database.columnString(statement, at: 8) ?? programKey,
+                    category: AppCategory(rawValue: database.columnString(statement, at: 9) ?? "") ?? .unclassified,
+                    executablePath: database.columnString(statement, at: 10)
+                )
+            }
+            result.append(
+                RememberedProcessAttribution(
+                    processName: processName,
+                    appKey: appKey,
+                    displayName: database.columnString(statement, at: 2) ?? processName,
+                    category: AppCategory(rawValue: database.columnString(statement, at: 3) ?? "")
+                        ?? .unclassified,
+                    bundleID: database.columnString(statement, at: 4),
+                    bundlePath: database.columnString(statement, at: 5),
+                    executablePath: database.columnString(statement, at: 6),
+                    program: program
+                )
+            )
+        }
+        return result
     }
 
     private func migrate() throws {
@@ -984,19 +1215,36 @@ public final class UsageStore: @unchecked Sendable {
             )
         }
 
-        if currentVersion <= 9 {
-            try migrateHostApplicationKeys()
-        } else {
-            mergeLateHostApplicationKeys()
+        if currentVersion <= 10 {
+            // 先建表：后面的合并会把进程名映射一起改到新 appKey。
+            try database.execute(
+                """
+                CREATE TABLE IF NOT EXISTS process_names (
+                    process_name TEXT PRIMARY KEY,
+                    app_key TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+        }
+
+        if currentVersion <= 11 {
+            try migrateHostsAndPrograms()
+        }
+
+        if currentVersion <= 12 {
+            try mergeLegacyHost()
         }
     }
 
-    private struct MigrationApp {
+    struct MigrationApp {
         let appKey: String
         let bundlePath: String?
         let executablePath: String?
         let displayName: String
+        let category: String
         let firstSeenAt: String
+        let lastSeenAt: String
 
         var isApplication: Bool {
             appKey.hasPrefix("bundle:") || appKey.hasPrefix("app:")
@@ -1005,22 +1253,192 @@ public final class UsageStore: @unchecked Sendable {
         var bundleID: String? {
             appKey.hasPrefix("bundle:") ? String(appKey.dropFirst("bundle:".count)) : nil
         }
-
-        var executableFileName: String? {
-            executablePath.map { URL(fileURLWithPath: $0).lastPathComponent }
-        }
     }
 
-    /// 版本 10：按归属新规则合并能确定宿主的历史记录，所有口径一并合并，写入仍是累加。
-    /// 1. 嵌套在另一个 `.app/Contents/` 里的应用包归到外层应用；
-    /// 2. `~/Library/Application Support/<目录>/` 下的附属应用包，归到展示名等于该目录名的唯一应用；
-    /// 3. 解析前就退出的 `process:<名称>` 记录，同名只对应一个已解析记录时归到它。
-    /// 拿不准的（同名对应多个路径、按启动者推断的）保持原样。
-    private func migrateHostApplicationKeys() throws {
+    /// 旧记录在新结构里的位置：宿主 appKey 与程序（nil 为宿主应用自身）。
+    struct HostProgramTarget: Equatable {
+        let hostKey: String
+        let program: AttributedProgram?
+    }
+
+    /// 版本 12：日汇总、分钟桶、路径表加入 `program_key`，旧记录按「宿主 + 程序」重新落位：
+    /// - 应用记录：宿主就是它，程序为应用自身；嵌套在另一个 `.app` 里的归外层应用；附属应用归主应用、程序为它自己；
+    ///   `~/Library/Application Support` 下的附属包与框架里的 `.app`（Python.app）不是宿主，按程序处理。
+    /// - 命令行记录（`command:` / `exec:` / `process:` / `unknown:`）：程序按新规则重算（`bin` 下的工具按名称合并）；
+    ///   系统目录下的归「macOS 系统」，位于某个应用数据目录里的归该应用自身，编辑器扩展的二进制归编辑器；
+    ///   其余以前没有记下宿主，归「命令行工具」，不按最近一次启动者猜。
+    /// 一次事务内重建三张表并删除 `app_launchers`；字节总量不变。
+    private func migrateHostsAndPrograms() throws {
         try database.execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
-            try mergeHostApplicationKeys()
-            try database.execute("PRAGMA user_version = 10;")
+            let apps = try loadMigrationApps()
+            let plan = Self.hostProgramPlan(for: apps)
+
+            try database.execute(
+                """
+                CREATE TABLE IF NOT EXISTS programs (
+                    program_key TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    executable_path TEXT,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );
+                DROP TABLE IF EXISTS temp.v12_key_map;
+                CREATE TEMP TABLE v12_key_map (
+                    old_key TEXT PRIMARY KEY,
+                    host_key TEXT NOT NULL,
+                    program_key TEXT NOT NULL
+                );
+                """
+            )
+
+            let appsByKey = Dictionary(apps.map { ($0.appKey, $0) }, uniquingKeysWith: { first, _ in first })
+            let mapStatement = try database.prepare(
+                "INSERT INTO v12_key_map (old_key, host_key, program_key) VALUES (?, ?, ?);"
+            )
+            defer { sqlite3_finalize(mapStatement) }
+            let programStatement = try prepareProgramUpsert()
+            defer { sqlite3_finalize(programStatement) }
+            let appStatement = try database.prepare(
+                """
+                INSERT INTO apps (
+                    app_key, bundle_id, bundle_path, executable_path,
+                    display_name, category, first_seen_at, last_seen_at
+                ) VALUES (?, NULL, NULL, NULL, ?, ?, ?, ?)
+                ON CONFLICT(app_key) DO UPDATE SET
+                    first_seen_at = MIN(apps.first_seen_at, excluded.first_seen_at),
+                    last_seen_at = MAX(apps.last_seen_at, excluded.last_seen_at);
+                """
+            )
+            defer { sqlite3_finalize(appStatement) }
+
+            for (oldKey, target) in plan.sorted(by: { $0.key < $1.key }) {
+                guard let app = appsByKey[oldKey] else { continue }
+                try database.bind(oldKey, at: 1, in: mapStatement)
+                try database.bind(target.hostKey, at: 2, in: mapStatement)
+                try database.bind(target.program?.key ?? "", at: 3, in: mapStatement)
+                try database.stepDone(mapStatement)
+                try database.reset(mapStatement)
+
+                if let program = target.program {
+                    try upsertProgram(
+                        program,
+                        firstSeenAt: Self.dateValue(app.firstSeenAt),
+                        lastSeenAt: Self.dateValue(app.lastSeenAt),
+                        using: programStatement
+                    )
+                }
+                // 虚拟宿主建一行；已有应用只放宽首次出现时间。
+                let hostName = VirtualHost.displayName(for: target.hostKey)
+                    ?? appsByKey[target.hostKey]?.displayName
+                    ?? target.hostKey
+                let hostCategory = VirtualHost.isVirtual(target.hostKey)
+                    ? VirtualHost.category(for: target.hostKey).rawValue
+                    : appsByKey[target.hostKey]?.category ?? AppCategory.userApp.rawValue
+                try database.bind(target.hostKey, at: 1, in: appStatement)
+                try database.bind(hostName, at: 2, in: appStatement)
+                try database.bind(hostCategory, at: 3, in: appStatement)
+                try database.bind(app.firstSeenAt, at: 4, in: appStatement)
+                try database.bind(VirtualHost.isVirtual(target.hostKey) ? app.lastSeenAt : "0.000000", at: 5, in: appStatement)
+                try database.stepDone(appStatement)
+                try database.reset(appStatement)
+            }
+
+            try database.execute(
+                """
+                CREATE TABLE daily_usage_v12 (
+                    accounting_version INTEGER NOT NULL CHECK (accounting_version > 0),
+                    day TEXT NOT NULL,
+                    app_key TEXT NOT NULL,
+                    program_key TEXT NOT NULL DEFAULT '',
+                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
+                    sample_count INTEGER NOT NULL DEFAULT 0 CHECK (sample_count >= 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (accounting_version, day, app_key, program_key),
+                    FOREIGN KEY (app_key) REFERENCES apps(app_key)
+                );
+                INSERT INTO daily_usage_v12 (
+                    accounting_version, day, app_key, program_key,
+                    download_bytes, upload_bytes, sample_count, updated_at
+                )
+                SELECT d.accounting_version, d.day, COALESCE(m.host_key, d.app_key), COALESCE(m.program_key, ''),
+                       SUM(d.download_bytes), SUM(d.upload_bytes), SUM(d.sample_count), MAX(d.updated_at)
+                FROM daily_usage AS d
+                LEFT JOIN v12_key_map AS m ON m.old_key = d.app_key
+                GROUP BY 1, 2, 3, 4;
+
+                CREATE TABLE usage_buckets_v12 (
+                    accounting_version INTEGER NOT NULL CHECK (accounting_version > 0),
+                    bucket_start INTEGER NOT NULL,
+                    app_key TEXT NOT NULL,
+                    program_key TEXT NOT NULL DEFAULT '',
+                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
+                    sample_count INTEGER NOT NULL DEFAULT 0 CHECK (sample_count >= 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (accounting_version, bucket_start, app_key, program_key),
+                    FOREIGN KEY (app_key) REFERENCES apps(app_key)
+                );
+                INSERT INTO usage_buckets_v12 (
+                    accounting_version, bucket_start, app_key, program_key,
+                    download_bytes, upload_bytes, sample_count, updated_at
+                )
+                SELECT b.accounting_version, b.bucket_start, COALESCE(m.host_key, b.app_key), COALESCE(m.program_key, ''),
+                       SUM(b.download_bytes), SUM(b.upload_bytes), SUM(b.sample_count), MAX(b.updated_at)
+                FROM usage_buckets AS b
+                LEFT JOIN v12_key_map AS m ON m.old_key = b.app_key
+                GROUP BY 1, 2, 3, 4;
+
+                CREATE TABLE daily_route_usage_v12 (
+                    accounting_version INTEGER NOT NULL CHECK (accounting_version > 0),
+                    day TEXT NOT NULL,
+                    app_key TEXT NOT NULL,
+                    program_key TEXT NOT NULL DEFAULT '',
+                    route TEXT NOT NULL,
+                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (accounting_version, day, app_key, program_key, route),
+                    FOREIGN KEY (app_key) REFERENCES apps(app_key)
+                );
+                INSERT INTO daily_route_usage_v12 (
+                    accounting_version, day, app_key, program_key, route,
+                    download_bytes, upload_bytes, updated_at
+                )
+                SELECT r.accounting_version, r.day, COALESCE(m.host_key, r.app_key), COALESCE(m.program_key, ''),
+                       r.route, SUM(r.download_bytes), SUM(r.upload_bytes), MAX(r.updated_at)
+                FROM daily_route_usage AS r
+                LEFT JOIN v12_key_map AS m ON m.old_key = r.app_key
+                GROUP BY 1, 2, 3, 4, 5;
+
+                DROP INDEX IF EXISTS idx_usage_buckets_start;
+                DROP TABLE daily_usage;
+                DROP TABLE usage_buckets;
+                DROP TABLE daily_route_usage;
+                ALTER TABLE daily_usage_v12 RENAME TO daily_usage;
+                ALTER TABLE usage_buckets_v12 RENAME TO usage_buckets;
+                ALTER TABLE daily_route_usage_v12 RENAME TO daily_route_usage;
+                CREATE INDEX idx_usage_buckets_start
+                    ON usage_buckets(accounting_version, bucket_start);
+
+                ALTER TABLE process_names ADD COLUMN program_key TEXT NOT NULL DEFAULT '';
+                UPDATE process_names SET
+                    program_key = COALESCE(
+                        (SELECT program_key FROM v12_key_map WHERE old_key = process_names.app_key), ''
+                    ),
+                    app_key = COALESCE(
+                        (SELECT host_key FROM v12_key_map WHERE old_key = process_names.app_key), app_key
+                    );
+
+                DELETE FROM apps
+                WHERE app_key IN (SELECT old_key FROM v12_key_map WHERE host_key != old_key);
+                DROP TABLE v12_key_map;
+                DROP TABLE IF EXISTS app_launchers;
+                PRAGMA user_version = 12;
+                """
+            )
             try database.execute("COMMIT;")
         } catch {
             try? database.execute("ROLLBACK;")
@@ -1028,30 +1446,269 @@ public final class UsageStore: @unchecked Sendable {
         }
     }
 
-    /// 已是版本 10 的库每次打开时按同一规则再合并一次：迁移之后写入的记录
-    /// （旧版本应用写入的、重启后名称缓存未命中拆出的 `process:` 记录）同样并入宿主。
-    /// 只搬移行，重复执行不会重复计数；失败时回滚并保持原样，不影响打开数据库。
-    private func mergeLateHostApplicationKeys() {
+    /// 版本 13：开发期的版本 12 曾把没有记下宿主的命令行记录放在单独的 `host:legacy`，
+    /// 现在并入「命令行工具」（`host:other`）；其中可执行文件在系统目录的（系统框架里的 `.app`）归「macOS 系统」。
+    /// 同一位置已有的行累加合并，字节总量不变。
+    private func mergeLegacyHost() throws {
+        let legacyKey = "host:legacy"
+        try database.execute("BEGIN IMMEDIATE TRANSACTION;")
         do {
-            try database.execute("BEGIN IMMEDIATE TRANSACTION;")
-        } catch {
-            return
-        }
-        do {
-            try mergeHostApplicationKeys()
+            var systemPrograms: [String] = []
+            let statement = try database.prepare(
+                """
+                SELECT DISTINCT d.program_key, p.executable_path
+                FROM daily_usage AS d
+                LEFT JOIN programs AS p ON p.program_key = d.program_key
+                WHERE d.app_key = 'host:legacy';
+                """
+            )
+            defer { sqlite3_finalize(statement) }
+            while true {
+                let result = sqlite3_step(statement)
+                if result == SQLITE_DONE { break }
+                guard result == SQLITE_ROW else {
+                    throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+                }
+                guard let programKey = database.columnString(statement, at: 0) else { continue }
+                let path = database.columnString(statement, at: 1)
+                    ?? (programKey.hasPrefix("exec:") ? String(programKey.dropFirst("exec:".count)) : nil)
+                if ProcessAttributor.isSystemExecutable(path) {
+                    systemPrograms.append(programKey)
+                }
+            }
+
+            try database.execute(
+                """
+                DROP TABLE IF EXISTS temp.v13_system_programs;
+                CREATE TEMP TABLE v13_system_programs (program_key TEXT PRIMARY KEY);
+                """
+            )
+            let insertSystem = try database.prepare("INSERT OR IGNORE INTO v13_system_programs VALUES (?);")
+            defer { sqlite3_finalize(insertSystem) }
+            for programKey in systemPrograms {
+                try database.bind(programKey, at: 1, in: insertSystem)
+                try database.stepDone(insertSystem)
+                try database.reset(insertSystem)
+            }
+
+            let target = """
+                CASE WHEN program_key IN (SELECT program_key FROM v13_system_programs)
+                     THEN '\(VirtualHost.systemKey)' ELSE '\(VirtualHost.otherKey)' END
+                """
+            try database.execute(
+                """
+                INSERT INTO apps (
+                    app_key, bundle_id, bundle_path, executable_path,
+                    display_name, category, first_seen_at, last_seen_at
+                )
+                SELECT '\(VirtualHost.systemKey)', NULL, NULL, NULL, 'macOS 系统', 'system_process', first_seen_at, last_seen_at
+                FROM apps WHERE app_key = '\(legacyKey)'
+                UNION ALL
+                SELECT '\(VirtualHost.otherKey)', NULL, NULL, NULL, 'x', 'unclassified', first_seen_at, last_seen_at
+                FROM apps WHERE app_key = '\(legacyKey)'
+                ON CONFLICT(app_key) DO UPDATE SET
+                    first_seen_at = MIN(apps.first_seen_at, excluded.first_seen_at),
+                    last_seen_at = MAX(apps.last_seen_at, excluded.last_seen_at);
+                UPDATE apps SET display_name = '\(VirtualHost.displayName(for: VirtualHost.otherKey) ?? "")'
+                WHERE app_key = '\(VirtualHost.otherKey)';
+
+                INSERT INTO daily_usage (
+                    accounting_version, day, app_key, program_key,
+                    download_bytes, upload_bytes, sample_count, updated_at
+                )
+                SELECT accounting_version, day, \(target), program_key,
+                       download_bytes, upload_bytes, sample_count, updated_at
+                FROM daily_usage WHERE app_key = '\(legacyKey)'
+                ON CONFLICT(accounting_version, day, app_key, program_key) DO UPDATE SET
+                    download_bytes = daily_usage.download_bytes + excluded.download_bytes,
+                    upload_bytes = daily_usage.upload_bytes + excluded.upload_bytes,
+                    sample_count = daily_usage.sample_count + excluded.sample_count,
+                    updated_at = MAX(daily_usage.updated_at, excluded.updated_at);
+                DELETE FROM daily_usage WHERE app_key = '\(legacyKey)';
+
+                INSERT INTO usage_buckets (
+                    accounting_version, bucket_start, app_key, program_key,
+                    download_bytes, upload_bytes, sample_count, updated_at
+                )
+                SELECT accounting_version, bucket_start, \(target), program_key,
+                       download_bytes, upload_bytes, sample_count, updated_at
+                FROM usage_buckets WHERE app_key = '\(legacyKey)'
+                ON CONFLICT(accounting_version, bucket_start, app_key, program_key) DO UPDATE SET
+                    download_bytes = usage_buckets.download_bytes + excluded.download_bytes,
+                    upload_bytes = usage_buckets.upload_bytes + excluded.upload_bytes,
+                    sample_count = usage_buckets.sample_count + excluded.sample_count,
+                    updated_at = MAX(usage_buckets.updated_at, excluded.updated_at);
+                DELETE FROM usage_buckets WHERE app_key = '\(legacyKey)';
+
+                INSERT INTO daily_route_usage (
+                    accounting_version, day, app_key, program_key, route,
+                    download_bytes, upload_bytes, updated_at
+                )
+                SELECT accounting_version, day, \(target), program_key, route,
+                       download_bytes, upload_bytes, updated_at
+                FROM daily_route_usage WHERE app_key = '\(legacyKey)'
+                ON CONFLICT(accounting_version, day, app_key, program_key, route) DO UPDATE SET
+                    download_bytes = daily_route_usage.download_bytes + excluded.download_bytes,
+                    upload_bytes = daily_route_usage.upload_bytes + excluded.upload_bytes,
+                    updated_at = MAX(daily_route_usage.updated_at, excluded.updated_at);
+                DELETE FROM daily_route_usage WHERE app_key = '\(legacyKey)';
+
+                UPDATE process_names SET app_key = \(target) WHERE app_key = '\(legacyKey)';
+                DELETE FROM apps WHERE app_key = '\(legacyKey)';
+                DELETE FROM apps
+                WHERE app_key = '\(VirtualHost.systemKey)'
+                  AND NOT EXISTS (SELECT 1 FROM daily_usage WHERE app_key = '\(VirtualHost.systemKey)');
+                DELETE FROM apps
+                WHERE app_key = '\(VirtualHost.otherKey)'
+                  AND NOT EXISTS (SELECT 1 FROM daily_usage WHERE app_key = '\(VirtualHost.otherKey)');
+                DROP TABLE v13_system_programs;
+                PRAGMA user_version = 13;
+                """
+            )
             try database.execute("COMMIT;")
         } catch {
             try? database.execute("ROLLBACK;")
+            throw error
         }
     }
 
-    /// 调用方负责事务。
-    private func mergeHostApplicationKeys() throws {
-        try mergeCommandLineToolKeys()
+    /// 编辑器扩展目录 → 编辑器 bundle ID。
+    private static let editorExtensionDirectories: [String: String] = [
+        "/.vscode/extensions/": "com.microsoft.VSCode",
+        "/.vscode-insiders/extensions/": "com.microsoft.VSCodeInsiders",
+        "/.cursor/extensions/": "com.todesktop.230313mzl4w4u92",
+        "/.windsurf/extensions/": "com.exafunction.windsurf"
+    ]
 
-        var apps: [String: MigrationApp] = [:]
+    /// 每条需要改位置的旧记录 → 新的宿主与程序；不在结果里的（普通应用、代理）原样保留。
+    static func hostProgramPlan(for apps: [MigrationApp]) -> [String: HostProgramTarget] {
+        let appsByKey = Dictionary(apps.map { ($0.appKey, $0) }, uniquingKeysWith: { first, _ in first })
+        func isHostPath(_ path: String) -> Bool {
+            !path.contains("/Library/Application Support/") && !path.contains(".framework/")
+        }
+        let hosts = apps.filter { app in
+            guard app.isApplication else { return false }
+            guard let bundlePath = app.bundlePath else { return true }
+            return isHostPath(bundlePath) && !bundlePath.contains(".app/")
+        }
+        var hostByPath: [String: MigrationApp] = [:]
+        for host in hosts {
+            if let bundlePath = host.bundlePath { hostByPath[bundlePath] = host }
+        }
+        /// 目录名对应的唯一宿主：bundle ID 相同，或展示名相同（不区分大小写）。
+        func owner(ofDirectory directory: String) -> MigrationApp? {
+            let byBundleID = hosts.filter { $0.bundleID == directory }
+            if byBundleID.count == 1 { return byBundleID[0] }
+            let byName = hosts.filter { $0.displayName.caseInsensitiveCompare(directory) == .orderedSame }
+            return byName.count == 1 ? byName[0] : nil
+        }
+        func directory(after marker: String, in path: String) -> String? {
+            guard let range = path.range(of: marker) else { return nil }
+            return path[range.upperBound...].split(separator: "/").first.map(String.init)
+        }
+        func program(for app: MigrationApp, key: String? = nil) -> AttributedProgram {
+            let path = app.executablePath
+            var category = AppCategory(rawValue: app.category) ?? .unclassified
+            if category == .systemProcess, let path, !ProcessAttributor.isSystemExecutable(path) {
+                category = .unclassified
+            }
+            if let key, !key.hasPrefix("exec:") {
+                let name = key.hasPrefix("command:") ? String(key.dropFirst("command:".count)) : app.displayName
+                return AttributedProgram(key: key, displayName: name, category: category, executablePath: path)
+            }
+            let source = key.map { String($0.dropFirst("exec:".count)) } ?? path
+            if let source, let name = ExecutablePathNormalizer.programName(forExecutablePath: source) {
+                return AttributedProgram(key: "command:\(name)", displayName: name, category: category, executablePath: path)
+            }
+            if let key {
+                return AttributedProgram(key: key, displayName: app.displayName, category: category, executablePath: path)
+            }
+            if let path {
+                return AttributedProgram(
+                    key: "exec:\(ExecutablePathNormalizer.normalize(path))",
+                    displayName: app.displayName,
+                    category: category,
+                    executablePath: path
+                )
+            }
+            return AttributedProgram(key: "process:\(app.displayName)", displayName: app.displayName, category: category, executablePath: nil)
+        }
+
+        var plan: [String: HostProgramTarget] = [:]
+        for app in apps {
+            if app.appKey.hasPrefix("proxy:") || VirtualHost.isVirtual(app.appKey) { continue }
+
+            if app.isApplication {
+                // 附属应用归主应用，程序是它自己。
+                if let bundleID = app.bundleID,
+                   let mainBundleID = ProcessAttributor.auxiliaryApplicationHosts[bundleID],
+                   appsByKey["bundle:\(mainBundleID)"] != nil {
+                    plan[app.appKey] = HostProgramTarget(
+                        hostKey: "bundle:\(mainBundleID)",
+                        program: AttributedProgram(
+                            key: app.appKey,
+                            displayName: app.displayName,
+                            category: .userApp,
+                            executablePath: app.executablePath
+                        )
+                    )
+                    continue
+                }
+                let ownPath = app.bundlePath ?? app.executablePath
+                guard let ownPath, let outer = ProcessAttributor.outermostApplicationPath(in: ownPath + "/") else {
+                    continue
+                }
+                // 嵌套在另一个应用里的 helper、扩展、小组件。
+                if outer != app.bundlePath, let host = hostByPath[outer], host.appKey != app.appKey {
+                    plan[app.appKey] = HostProgramTarget(hostKey: host.appKey, program: nil)
+                    continue
+                }
+                guard !isHostPath(outer) else { continue }
+                // 附属包、框架里的 `.app`：按程序处理；系统框架里的归「macOS 系统」。
+                let hostKey = ProcessAttributor.isSystemExecutable(outer)
+                    ? VirtualHost.systemKey
+                    : directory(after: "/Library/Application Support/", in: outer)
+                        .flatMap(owner(ofDirectory:))?.appKey ?? VirtualHost.otherKey
+                plan[app.appKey] = HostProgramTarget(hostKey: hostKey, program: program(for: app))
+                continue
+            }
+
+            // 命令行记录。
+            let path = app.appKey.hasPrefix("exec:")
+                ? String(app.appKey.dropFirst("exec:".count))
+                : app.executablePath
+            // 有路径时按路径判断：旧版本曾把 `/usr/bin/` 下的工具标成系统进程。
+            let isSystem = path.map { ProcessAttributor.isSystemExecutable($0) }
+                ?? (app.category == AppCategory.systemProcess.rawValue)
+            if isSystem {
+                plan[app.appKey] = HostProgramTarget(hostKey: VirtualHost.systemKey, program: program(for: app, key: app.appKey))
+                continue
+            }
+            if let path, !path.contains(".app/") {
+                let dataDirectory = directory(after: "/Library/Application Support/", in: path)
+                    ?? directory(after: "/.cache/", in: path)
+                if let host = dataDirectory.flatMap(owner(ofDirectory:)) {
+                    plan[app.appKey] = HostProgramTarget(hostKey: host.appKey, program: nil)
+                    continue
+                }
+                if let bundleID = editorExtensionDirectories.first(where: { path.contains($0.key) })?.value,
+                   appsByKey["bundle:\(bundleID)"] != nil {
+                    plan[app.appKey] = HostProgramTarget(hostKey: "bundle:\(bundleID)", program: program(for: app, key: app.appKey))
+                    continue
+                }
+            }
+            plan[app.appKey] = HostProgramTarget(hostKey: VirtualHost.otherKey, program: program(for: app, key: app.appKey))
+        }
+        return plan
+    }
+
+    private func loadMigrationApps() throws -> [MigrationApp] {
+        var apps: [MigrationApp] = []
         let statement = try database.prepare(
-            "SELECT app_key, bundle_path, executable_path, display_name, first_seen_at FROM apps;"
+            """
+            SELECT app_key, bundle_path, executable_path, display_name, category, first_seen_at, last_seen_at
+            FROM apps;
+            """
         )
         defer { sqlite3_finalize(statement) }
         while true {
@@ -1061,235 +1718,17 @@ public final class UsageStore: @unchecked Sendable {
                 throw SQLiteDatabaseError.stepFailed(database.errorMessage)
             }
             guard let appKey = database.columnString(statement, at: 0) else { continue }
-            apps[appKey] = MigrationApp(
+            apps.append(MigrationApp(
                 appKey: appKey,
                 bundlePath: database.columnString(statement, at: 1),
                 executablePath: database.columnString(statement, at: 2),
                 displayName: database.columnString(statement, at: 3) ?? "",
-                firstSeenAt: database.columnString(statement, at: 4) ?? "0.000000"
-            )
-        }
-
-        let redirects = Self.hostApplicationRedirects(for: Array(apps.values))
-        for (oldKey, newKey) in redirects.sorted(by: { $0.key < $1.key }) {
-            guard let target = apps[newKey] else { continue }
-            try mergeUsageRows(in: "daily_usage", timeColumn: "day", from: oldKey, to: newKey)
-            try mergeUsageRows(in: "usage_buckets", timeColumn: "bucket_start", from: oldKey, to: newKey)
-            try mergeRouteUsageRows(from: oldKey, to: newKey)
-            try deleteRows(in: "app_launchers", for: oldKey)
-
-            let updateTarget = try database.prepare(
-                "UPDATE apps SET first_seen_at = MIN(first_seen_at, ?) WHERE app_key = ?;"
-            )
-            defer { sqlite3_finalize(updateTarget) }
-            try database.bind(apps[oldKey]?.firstSeenAt ?? target.firstSeenAt, at: 1, in: updateTarget)
-            try database.bind(newKey, at: 2, in: updateTarget)
-            try database.stepDone(updateTarget)
-
-            let deleteApp = try database.prepare("DELETE FROM apps WHERE app_key = ?;")
-            defer { sqlite3_finalize(deleteApp) }
-            try database.bind(oldKey, at: 1, in: deleteApp)
-            try database.stepDone(deleteApp)
-        }
-    }
-
-    /// `bin` / `sbin` 目录下的命令行工具按文件名合并：`exec:<路径>` 改为 `command:<名称>`，
-    /// 不同安装位置的同名工具（`/usr/bin/curl` 与 Homebrew 的 curl）并成一条。
-    /// 旧版本应用仍可能写入 `exec:` 记录，所以每次打开都执行；调用方负责事务。
-    private func mergeCommandLineToolKeys() throws {
-        var renames: [(oldKey: String, newKey: String, app: StoredApp, category: String)] = []
-        let statement = try database.prepare(
-            """
-            SELECT app_key, bundle_id, bundle_path, executable_path, display_name,
-                   category, first_seen_at, last_seen_at
-            FROM apps
-            WHERE app_key LIKE 'exec:%';
-            """
-        )
-        defer { sqlite3_finalize(statement) }
-        while true {
-            let result = sqlite3_step(statement)
-            if result == SQLITE_DONE { break }
-            guard result == SQLITE_ROW else {
-                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
-            }
-            guard let oldKey = database.columnString(statement, at: 0),
-                  let name = ExecutablePathNormalizer.commandName(
-                    forExecutablePath: String(oldKey.dropFirst("exec:".count))
-                  ) else { continue }
-            let executablePath = database.columnString(statement, at: 3)
-            var category = database.columnString(statement, at: 5) ?? AppCategory.unclassified.rawValue
-            // `/usr/bin/`、`/bin/` 下的工具不再算系统进程。
-            if category == AppCategory.systemProcess.rawValue,
-               let executablePath,
-               executablePath.hasPrefix("/usr/bin/") || executablePath.hasPrefix("/bin/") {
-                category = AppCategory.unclassified.rawValue
-            }
-            renames.append((
-                oldKey,
-                "command:\(name)",
-                StoredApp(
-                    bundleID: database.columnString(statement, at: 1),
-                    bundlePath: database.columnString(statement, at: 2),
-                    executablePath: executablePath,
-                    displayName: name,
-                    firstSeenAt: database.columnString(statement, at: 6) ?? "0.000000",
-                    lastSeenAt: database.columnString(statement, at: 7) ?? "0.000000"
-                ),
-                category
+                category: database.columnString(statement, at: 4) ?? AppCategory.unclassified.rawValue,
+                firstSeenAt: database.columnString(statement, at: 5) ?? "0.000000",
+                lastSeenAt: database.columnString(statement, at: 6) ?? "0.000000"
             ))
         }
-
-        for rename in renames {
-            try upsertRenamedApp(rename.app, appKey: rename.newKey, category: rename.category)
-            try mergeUsageRows(in: "daily_usage", timeColumn: "day", from: rename.oldKey, to: rename.newKey)
-            try mergeUsageRows(in: "usage_buckets", timeColumn: "bucket_start", from: rename.oldKey, to: rename.newKey)
-            try mergeRouteUsageRows(from: rename.oldKey, to: rename.newKey)
-            try mergeLauncherRow(from: rename.oldKey, to: rename.newKey)
-
-            let deleteApp = try database.prepare("DELETE FROM apps WHERE app_key = ?;")
-            defer { sqlite3_finalize(deleteApp) }
-            try database.bind(rename.oldKey, at: 1, in: deleteApp)
-            try database.stepDone(deleteApp)
-        }
-    }
-
-    /// 启动者只保留最近一次写入的那条。
-    private func mergeLauncherRow(from oldAppKey: String, to newAppKey: String) throws {
-        let statement = try database.prepare(
-            """
-            INSERT INTO app_launchers (app_key, launcher_name, updated_at)
-            SELECT ?, launcher_name, updated_at FROM app_launchers WHERE app_key = ?
-            ON CONFLICT(app_key) DO UPDATE SET
-                launcher_name = CASE WHEN excluded.updated_at > app_launchers.updated_at
-                    THEN excluded.launcher_name ELSE app_launchers.launcher_name END,
-                updated_at = MAX(app_launchers.updated_at, excluded.updated_at);
-            """
-        )
-        defer { sqlite3_finalize(statement) }
-        try database.bind(newAppKey, at: 1, in: statement)
-        try database.bind(oldAppKey, at: 2, in: statement)
-        try database.stepDone(statement)
-        try deleteRows(in: "app_launchers", for: oldAppKey)
-    }
-
-    /// 返回「旧 appKey → 最终 appKey」，链式重定向已展开，目标一定是未被重定向的记录。
-    private static func hostApplicationRedirects(for apps: [MigrationApp]) -> [String: String] {
-        let applications = apps.filter(\.isApplication)
-        var applicationByPath: [String: MigrationApp] = [:]
-        for app in applications {
-            if let bundlePath = app.bundlePath { applicationByPath[bundlePath] = app }
-        }
-        var direct: [String: String] = [:]
-
-        for app in applications {
-            guard let bundlePath = app.bundlePath else { continue }
-            if let range = bundlePath.range(of: ".app/Contents/") {
-                let outerPath = String(bundlePath[..<range.lowerBound]) + ".app"
-                if let outer = applicationByPath[outerPath], outer.appKey != app.appKey {
-                    direct[app.appKey] = outer.appKey
-                }
-                continue
-            }
-            guard let range = bundlePath.range(of: "/Library/Application Support/") else { continue }
-            let directory = bundlePath[range.upperBound...].split(separator: "/").first.map(String.init)
-            let owners = applications.filter {
-                $0.displayName == directory
-                    && $0.appKey != app.appKey
-                    && $0.bundlePath?.contains("/Library/Application Support/") != true
-            }
-            if owners.count == 1 {
-                direct[app.appKey] = owners[0].appKey
-            }
-        }
-
-        // 应用自带的命令行工具按所在目录归到唯一对应的应用：
-        // `~/Library/Application Support/<bundle ID>/…`（如 Raycast 内置的 node），
-        // `.cache/<应用名>/…`（如 magpie 缓存目录里的 bun，含临时目录里的预览副本）。
-        let hostApplications = applications.filter {
-            $0.bundlePath?.contains("/Library/Application Support/") != true
-        }
-        for app in apps where app.appKey.hasPrefix("exec:") {
-            let path = String(app.appKey.dropFirst("exec:".count))
-            let owners: [MigrationApp]
-            if let range = path.range(of: "/Library/Application Support/"),
-               let directory = path[range.upperBound...].split(separator: "/").first.map(String.init) {
-                owners = hostApplications.filter { $0.bundleID == directory }
-            } else if let range = path.range(of: "/.cache/"),
-                      let directory = path[range.upperBound...].split(separator: "/").first.map(String.init) {
-                owners = hostApplications.filter {
-                    $0.displayName.caseInsensitiveCompare(directory) == .orderedSame
-                }
-            } else {
-                continue
-            }
-            if owners.count == 1 {
-                direct[app.appKey] = owners[0].appKey
-            }
-        }
-
-        func resolve(_ key: String) -> String {
-            var current = key
-            var visited: Set<String> = [key]
-            while let next = direct[current], visited.insert(next).inserted {
-                current = next
-            }
-            return current
-        }
-
-        let resolved = apps.filter {
-            !$0.appKey.hasPrefix("process:") && !$0.appKey.hasPrefix("proxy:") && !$0.appKey.hasPrefix("unknown:")
-        }
-        for app in apps where app.appKey.hasPrefix("process:")
-            && app.bundlePath == nil && app.executablePath == nil {
-            let rawName = String(app.appKey.dropFirst("process:".count))
-            let name = rawName.trimmingCharacters(in: .whitespaces)
-            guard !name.isEmpty else { continue }
-            // nettop 进程名最多 15 个字符，到上限的名称按前缀匹配。
-            let isTruncated = rawName.count >= 15
-            let candidates = resolved.filter { candidate in
-                let fileName = candidate.executableFileName
-                if ExecutablePathNormalizer.isVersionLike(name) {
-                    return candidate.appKey.hasPrefix("exec:") && candidate.appKey.hasSuffix("/*")
-                }
-                return candidate.displayName == name
-                    || fileName == name
-                    || (isTruncated && (candidate.displayName.hasPrefix(name) || fileName?.hasPrefix(name) == true))
-            }
-            let targets = Set(candidates.map { resolve($0.appKey) })
-            if targets.count == 1, let target = targets.first {
-                direct[app.appKey] = target
-            }
-        }
-
-        var redirects: [String: String] = [:]
-        for key in direct.keys {
-            let target = resolve(key)
-            if target != key { redirects[key] = target }
-        }
-        return redirects
-    }
-
-    private func mergeRouteUsageRows(from oldAppKey: String, to newAppKey: String) throws {
-        let statement = try database.prepare(
-            """
-            INSERT INTO daily_route_usage (
-                accounting_version, day, app_key, route, download_bytes, upload_bytes, updated_at
-            )
-            SELECT accounting_version, day, ?, route, download_bytes, upload_bytes, updated_at
-            FROM daily_route_usage
-            WHERE app_key = ?
-            ON CONFLICT(accounting_version, day, app_key, route) DO UPDATE SET
-                download_bytes = daily_route_usage.download_bytes + excluded.download_bytes,
-                upload_bytes = daily_route_usage.upload_bytes + excluded.upload_bytes,
-                updated_at = MAX(daily_route_usage.updated_at, excluded.updated_at);
-            """
-        )
-        defer { sqlite3_finalize(statement) }
-        try database.bind(newAppKey, at: 1, in: statement)
-        try database.bind(oldAppKey, at: 2, in: statement)
-        try database.stepDone(statement)
-        try deleteRows(in: "daily_route_usage", for: oldAppKey)
+        return apps
     }
 
     /// 版本 7：`exec:` appKey 改为归一化路径（版本号、哈希目录折叠成 `*`），
@@ -1691,14 +2130,50 @@ public final class UsageStore: @unchecked Sendable {
         )
     }
 
+    private func prepareProgramUpsert() throws -> OpaquePointer {
+        try database.prepare(
+            """
+            INSERT INTO programs (
+                program_key, display_name, category, executable_path, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(program_key) DO UPDATE SET
+                display_name = CASE WHEN excluded.last_seen_at >= programs.last_seen_at
+                    THEN excluded.display_name ELSE programs.display_name END,
+                category = CASE WHEN excluded.last_seen_at >= programs.last_seen_at
+                    THEN excluded.category ELSE programs.category END,
+                executable_path = CASE WHEN excluded.last_seen_at >= programs.last_seen_at
+                    THEN COALESCE(excluded.executable_path, programs.executable_path)
+                    ELSE programs.executable_path END,
+                first_seen_at = MIN(programs.first_seen_at, excluded.first_seen_at),
+                last_seen_at = MAX(programs.last_seen_at, excluded.last_seen_at);
+            """
+        )
+    }
+
+    private func upsertProgram(
+        _ program: AttributedProgram,
+        firstSeenAt: Date,
+        lastSeenAt: Date,
+        using statement: OpaquePointer
+    ) throws {
+        try database.bind(program.key, at: 1, in: statement)
+        try database.bind(program.displayName, at: 2, in: statement)
+        try database.bind(program.category.rawValue, at: 3, in: statement)
+        try database.bind(program.executablePath, at: 4, in: statement)
+        try database.bind(Self.timestamp(firstSeenAt), at: 5, in: statement)
+        try database.bind(Self.timestamp(lastSeenAt), at: 6, in: statement)
+        try database.stepDone(statement)
+        try database.reset(statement)
+    }
+
     private func prepareDailyUsageUpsert() throws -> OpaquePointer {
         try database.prepare(
             """
             INSERT INTO daily_usage (
-                accounting_version, day, app_key, download_bytes,
+                accounting_version, day, app_key, program_key, download_bytes,
                 upload_bytes, sample_count, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(accounting_version, day, app_key) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accounting_version, day, app_key, program_key) DO UPDATE SET
                 download_bytes = daily_usage.download_bytes + excluded.download_bytes,
                 upload_bytes = daily_usage.upload_bytes + excluded.upload_bytes,
                 sample_count = daily_usage.sample_count + excluded.sample_count,
@@ -1711,10 +2186,10 @@ public final class UsageStore: @unchecked Sendable {
         try database.prepare(
             """
             INSERT INTO usage_buckets (
-                accounting_version, bucket_start, app_key, download_bytes,
+                accounting_version, bucket_start, app_key, program_key, download_bytes,
                 upload_bytes, sample_count, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(accounting_version, bucket_start, app_key) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accounting_version, bucket_start, app_key, program_key) DO UPDATE SET
                 download_bytes = usage_buckets.download_bytes + excluded.download_bytes,
                 upload_bytes = usage_buckets.upload_bytes + excluded.upload_bytes,
                 sample_count = usage_buckets.sample_count + excluded.sample_count,
@@ -1727,10 +2202,10 @@ public final class UsageStore: @unchecked Sendable {
         try database.prepare(
             """
             INSERT INTO daily_route_usage (
-                accounting_version, day, app_key, route,
+                accounting_version, day, app_key, program_key, route,
                 download_bytes, upload_bytes, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(accounting_version, day, app_key, route) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accounting_version, day, app_key, program_key, route) DO UPDATE SET
                 download_bytes = daily_route_usage.download_bytes + excluded.download_bytes,
                 upload_bytes = daily_route_usage.upload_bytes + excluded.upload_bytes,
                 updated_at = excluded.updated_at;
@@ -1745,10 +2220,11 @@ public final class UsageStore: @unchecked Sendable {
         try database.bind(Self.accountingVersion, at: 1, in: statement)
         try database.bind(aggregate.day, at: 2, in: statement)
         try database.bind(aggregate.appKey, at: 3, in: statement)
-        try database.bind(aggregate.route.rawValue, at: 4, in: statement)
-        try database.bind(aggregate.downloadBytes, at: 5, in: statement)
-        try database.bind(aggregate.uploadBytes, at: 6, in: statement)
-        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
+        try database.bind(aggregate.programKey, at: 4, in: statement)
+        try database.bind(aggregate.route.rawValue, at: 5, in: statement)
+        try database.bind(aggregate.downloadBytes, at: 6, in: statement)
+        try database.bind(aggregate.uploadBytes, at: 7, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 8, in: statement)
         try database.stepDone(statement)
         try database.reset(statement)
     }
@@ -1776,10 +2252,11 @@ public final class UsageStore: @unchecked Sendable {
         try database.bind(Self.accountingVersion, at: 1, in: statement)
         try database.bind(aggregate.day, at: 2, in: statement)
         try database.bind(aggregate.appKey, at: 3, in: statement)
-        try database.bind(aggregate.downloadBytes, at: 4, in: statement)
-        try database.bind(aggregate.uploadBytes, at: 5, in: statement)
-        try database.bind(aggregate.sampleCount, at: 6, in: statement)
-        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
+        try database.bind(aggregate.programKey, at: 4, in: statement)
+        try database.bind(aggregate.downloadBytes, at: 5, in: statement)
+        try database.bind(aggregate.uploadBytes, at: 6, in: statement)
+        try database.bind(aggregate.sampleCount, at: 7, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 8, in: statement)
         try database.stepDone(statement)
         try database.reset(statement)
     }
@@ -1791,10 +2268,11 @@ public final class UsageStore: @unchecked Sendable {
         try database.bind(Self.accountingVersion, at: 1, in: statement)
         try database.bind(Self.epochSeconds(aggregate.bucketStart), at: 2, in: statement)
         try database.bind(aggregate.appKey, at: 3, in: statement)
-        try database.bind(aggregate.downloadBytes, at: 4, in: statement)
-        try database.bind(aggregate.uploadBytes, at: 5, in: statement)
-        try database.bind(aggregate.sampleCount, at: 6, in: statement)
-        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 7, in: statement)
+        try database.bind(aggregate.programKey, at: 4, in: statement)
+        try database.bind(aggregate.downloadBytes, at: 5, in: statement)
+        try database.bind(aggregate.uploadBytes, at: 6, in: statement)
+        try database.bind(aggregate.sampleCount, at: 7, in: statement)
+        try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 8, in: statement)
         try database.stepDone(statement)
         try database.reset(statement)
     }
@@ -1834,6 +2312,11 @@ public final class UsageStore: @unchecked Sendable {
 
     private static func epochSeconds(_ date: Date) -> Int64 {
         Int64(date.timeIntervalSince1970.rounded(.down))
+    }
+
+    private static func dayString(for date: Date) -> String {
+        let components = Calendar.autoupdatingCurrent.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
     }
 
     private static func dateValue(_ value: String?) -> Date {

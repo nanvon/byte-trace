@@ -12,6 +12,10 @@ public struct UsageDelta: Equatable, Sendable {
     public let uploadBytes: Int64
     /// 应用侧流量的路径；代理传输为 nil，不记录路径。
     public let route: TrafficRoute?
+    /// 宿主之下的程序；nil 为宿主应用自身。
+    public let program: AttributedProgram?
+
+    public var programKey: String { program?.key ?? "" }
 
     public init(
         sampledAt: Date,
@@ -23,9 +27,11 @@ public struct UsageDelta: Equatable, Sendable {
         executablePath: String? = nil,
         downloadBytes: Int64,
         uploadBytes: Int64,
-        route: TrafficRoute? = nil
+        route: TrafficRoute? = nil,
+        program: AttributedProgram? = nil
     ) {
         self.route = route
+        self.program = program
         self.sampledAt = sampledAt
         self.appKey = appKey
         self.displayName = displayName
@@ -41,6 +47,9 @@ public struct UsageDelta: Equatable, Sendable {
 public struct DailyUsageAggregate: Equatable, Sendable {
     public let day: String
     public let appKey: String
+    public let program: AttributedProgram?
+
+    public var programKey: String { program?.key ?? "" }
     public let displayName: String
     public let category: AppCategory
     public let bundleID: String?
@@ -64,10 +73,12 @@ public struct DailyUsageAggregate: Equatable, Sendable {
         lastSeenAt: Date,
         downloadBytes: Int64,
         uploadBytes: Int64,
-        sampleCount: Int64
+        sampleCount: Int64,
+        program: AttributedProgram? = nil
     ) {
         self.day = day
         self.appKey = appKey
+        self.program = program
         self.displayName = displayName
         self.category = category
         self.bundleID = bundleID
@@ -120,6 +131,9 @@ public struct DailyUsageRecord: Equatable, Sendable {
 public struct UsageBucketAggregate: Equatable, Sendable {
     public let bucketStart: Date
     public let appKey: String
+    public let program: AttributedProgram?
+
+    public var programKey: String { program?.key ?? "" }
     public let displayName: String
     public let category: AppCategory
     public let bundleID: String?
@@ -143,10 +157,12 @@ public struct UsageBucketAggregate: Equatable, Sendable {
         lastSeenAt: Date,
         downloadBytes: Int64,
         uploadBytes: Int64,
-        sampleCount: Int64
+        sampleCount: Int64,
+        program: AttributedProgram? = nil
     ) {
         self.bucketStart = bucketStart
         self.appKey = appKey
+        self.program = program
         self.displayName = displayName
         self.category = category
         self.bundleID = bundleID
@@ -278,5 +294,59 @@ public struct UsageBucketStats: Equatable, Sendable {
         self.bucketCount = bucketCount
         self.earliestBucket = earliestBucket
         self.latestBucket = latestBucket
+    }
+}
+
+/// 某个宿主下某个程序在一段时间内的流量（不含代理传输）。`programKey` 为空表示宿主应用自身。
+/// 日汇总查询按天返回；分钟桶查询把整个时间段合成一行，`day` 取第一个分钟桶所在日。
+public struct ProgramUsageRecord: Equatable, Sendable {
+    public let day: String
+    public let appKey: String
+    public let programKey: String
+    public let programName: String?
+    public let programCategory: AppCategory?
+    public let programExecutablePath: String?
+    public let downloadBytes: Int64
+    public let uploadBytes: Int64
+
+    public init(
+        day: String,
+        appKey: String,
+        programKey: String,
+        programName: String?,
+        programCategory: AppCategory?,
+        programExecutablePath: String?,
+        downloadBytes: Int64,
+        uploadBytes: Int64
+    ) {
+        self.day = day
+        self.appKey = appKey
+        self.programKey = programKey
+        self.programName = programName
+        self.programCategory = programCategory
+        self.programExecutablePath = programExecutablePath
+        self.downloadBytes = downloadBytes
+        self.uploadBytes = uploadBytes
+    }
+
+    /// 跨宿主汇总时的程序身份：应用自身以宿主 appKey 出现。
+    public var programIdentity: String {
+        programKey.isEmpty ? appKey : programKey
+    }
+
+    public var totalBytes: Int64 {
+        let result = downloadBytes.addingReportingOverflow(uploadBytes)
+        return result.overflow ? Int64.max : result.partialValue
+    }
+}
+
+/// 运行时记下的「nettop 进程名 → 宿主 + 程序」。
+public struct ProcessNameAttribution: Hashable, Sendable {
+    public let appKey: String
+    public let programKey: String
+
+    public init(appKey: String, programKey: String) {
+        self.appKey = appKey
+        self.programKey = programKey
     }
 }

@@ -530,7 +530,7 @@ private struct UsageRows: View {
                 .interactiveHoverHighlight(cornerRadius: 6)
                 .pointingHandCursor()
                 .focusable(false)
-                // 「由 X 启动」和进程用途不占行内空间，悬停时与跳转提示一起显示。
+                // 运行过的程序和进程用途不占行内空间，悬停时与跳转提示一起显示。
                 .help(help(for: record))
             }
         }

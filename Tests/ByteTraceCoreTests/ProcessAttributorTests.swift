@@ -66,32 +66,42 @@ final class ProcessAttributorTests: XCTestCase {
         XCTAssertEqual(attributed.category, .userApp)
     }
 
-    func testCLILaunchedByApplicationIsMergedIntoIt() {
-        let identity = ProcessIdentity(
-            pid: 20,
-            nettopProcessName: "curl",
-            executablePath: "/usr/bin/curl",
-            ancestors: [
-                ProcessAncestor(
-                    pid: 19,
-                    executablePath: "/Applications/Browser.app/Contents/MacOS/Browser",
-                    bundleID: "com.example.browser",
-                    bundlePath: "/Applications/Browser.app",
-                    displayName: "Browser"
-                )
-            ]
-        )
+    private let ghostty = ProcessAncestor(
+        pid: 500,
+        executablePath: "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+        bundleID: "com.mitchellh.ghostty",
+        bundlePath: "/Applications/Ghostty.app",
+        displayName: "Ghostty"
+    )
+    private let shell = ProcessAncestor(pid: 501, executablePath: "/bin/zsh")
 
-        let attributed = ProcessAttributor().attribute(identity)
+    func testCLILaunchedByApplicationIsItsProgram() {
+        let attributed = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 20,
+                nettopProcessName: "curl",
+                executablePath: "/usr/bin/curl",
+                ancestors: [
+                    ProcessAncestor(
+                        pid: 19,
+                        executablePath: "/Applications/Browser.app/Contents/MacOS/Browser",
+                        bundleID: "com.example.browser",
+                        bundlePath: "/Applications/Browser.app",
+                        displayName: "Browser"
+                    )
+                ]
+            )
+        )
 
         XCTAssertEqual(attributed.appKey, "bundle:com.example.browser")
         XCTAssertEqual(attributed.displayName, "Browser")
         XCTAssertEqual(attributed.category, .userApp)
-        XCTAssertNil(attributed.launcherName)
+        XCTAssertEqual(attributed.program?.key, "command:curl")
+        XCTAssertEqual(attributed.program?.displayName, "curl")
+        XCTAssertEqual(attributed.program?.category, .unclassified)
     }
 
-    func testCLILaunchedThroughShellByApplicationIsMergedButTerminalIsNot() {
-        let shell = ProcessAncestor(pid: 50, executablePath: "/bin/zsh")
+    func testTerminalIsTheHostAndShellsAreSkipped() {
         let magpie = ProcessAncestor(
             pid: 49,
             executablePath: "/Applications/magpie.app/Contents/MacOS/magpie",
@@ -99,39 +109,25 @@ final class ProcessAttributorTests: XCTestCase {
             bundlePath: "/Applications/magpie.app",
             displayName: "magpie"
         )
-        let ghostty = ProcessAncestor(
-            pid: 48,
-            executablePath: "/Applications/Ghostty.app/Contents/MacOS/ghostty",
-            bundleID: "com.mitchellh.ghostty",
-            bundlePath: "/Applications/Ghostty.app",
-            displayName: "Ghostty"
-        )
+        let login = ProcessAncestor(pid: 502, executablePath: "/usr/bin/login")
         let attributor = ProcessAttributor()
+        func mise(_ ancestors: [ProcessAncestor]) -> AttributedProcess {
+            attributor.attribute(
+                ProcessIdentity(pid: 51, nettopProcessName: "mise", executablePath: "/Users/u/.local/bin/mise", ancestors: ancestors)
+            )
+        }
 
-        let viaApp = attributor.attribute(
-            ProcessIdentity(
-                pid: 51,
-                nettopProcessName: "mise",
-                executablePath: "/Users/u/.local/bin/mise",
-                ancestors: [shell, magpie]
-            )
-        )
-        let viaTerminal = attributor.attribute(
-            ProcessIdentity(
-                pid: 52,
-                nettopProcessName: "mise",
-                executablePath: "/Users/u/.local/bin/mise",
-                ancestors: [shell, ghostty]
-            )
-        )
+        let viaApp = mise([shell, magpie])
+        let viaTerminal = mise([shell, login, ghostty])
 
         XCTAssertEqual(viaApp.appKey, "bundle:com.yetone.magpie")
-        XCTAssertEqual(viaApp.category, .userApp)
-        XCTAssertEqual(viaTerminal.appKey, "command:mise")
-        XCTAssertEqual(viaTerminal.category, .unclassified)
+        XCTAssertEqual(viaApp.program?.key, "command:mise")
+        XCTAssertEqual(viaTerminal.appKey, "bundle:com.mitchellh.ghostty")
+        XCTAssertEqual(viaTerminal.displayName, "Ghostty")
+        XCTAssertEqual(viaTerminal.program?.key, "command:mise")
     }
 
-    func testEditorKeepsIntegratedTerminalCommandsButMergesExtensions() {
+    func testEditorHostsBothExtensionsAndIntegratedTerminalCommands() {
         let editor = ProcessAncestor(
             pid: 60,
             executablePath: "/Applications/Visual Studio Code.app/Contents/MacOS/Code",
@@ -161,16 +157,18 @@ final class ProcessAttributorTests: XCTestCase {
                 pid: 63,
                 nettopProcessName: "claude",
                 executablePath: "/Users/u/.local/share/claude/versions/2.1.314",
-                ancestors: [ProcessAncestor(pid: 64, executablePath: "/bin/zsh"), pluginHost, editor]
+                ancestors: [shell, pluginHost, editor]
             )
         )
 
         XCTAssertEqual(extensionProcess.appKey, "bundle:com.microsoft.VSCode")
         XCTAssertEqual(extensionProcess.displayName, "Code")
-        XCTAssertEqual(terminalCommand.appKey, "exec:/Users/u/.local/share/claude/versions/*")
+        XCTAssertEqual(extensionProcess.program?.key, "exec:/Users/u/.marscode/ai-chat/binary/*/modules/ai-agent/ai-agent")
+        XCTAssertEqual(terminalCommand.appKey, "bundle:com.microsoft.VSCode")
+        XCTAssertEqual(terminalCommand.program?.key, "command:claude")
     }
 
-    func testApplicationSupportBundleIsMergedIntoLaunchingApplication() {
+    func testApplicationSupportBundleIsAProgramOfTheLaunchingApplication() {
         let claude = ProcessAncestor(
             pid: 70,
             executablePath: "/Applications/Claude.app/Contents/MacOS/Claude",
@@ -211,16 +209,40 @@ final class ProcessAttributorTests: XCTestCase {
                 pid: 73,
                 nettopProcessName: "gh",
                 executablePath: "/opt/homebrew/Cellar/gh/2.80.0/bin/gh",
-                ancestors: [ProcessAncestor(pid: 74, executablePath: "/bin/zsh"), claudeCode, disclaimer, claude]
+                ancestors: [shell, claudeCode, disclaimer, claude]
             )
         )
 
         XCTAssertEqual(agent.appKey, "bundle:com.anthropic.claudefordesktop")
         XCTAssertEqual(agent.displayName, "Claude")
+        XCTAssertEqual(agent.program?.key, "command:claude")
+        // Claude Code 调起的工具算 Claude Code 这个程序。
         XCTAssertEqual(tool.appKey, "bundle:com.anthropic.claudefordesktop")
+        XCTAssertEqual(tool.program?.key, "command:claude")
     }
 
-    func testNestedAppUsesOutermostApplicationWithoutParent() {
+    func testToolInHostDataDirectoryCountsAsTheApplicationItself() {
+        let raycast = ProcessAncestor(
+            pid: 75,
+            executablePath: "/Applications/Raycast.app/Contents/MacOS/Raycast",
+            bundleID: "com.raycast.macos",
+            bundlePath: "/Applications/Raycast.app",
+            displayName: "Raycast"
+        )
+        let attributed = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 76,
+                nettopProcessName: "node",
+                executablePath: "/Users/u/Library/Application Support/com.raycast.macos/node/runtime/node-v22-darwin-arm64/bin/node",
+                ancestors: [raycast]
+            )
+        )
+
+        XCTAssertEqual(attributed.appKey, "bundle:com.raycast.macos")
+        XCTAssertNil(attributed.program)
+    }
+
+    func testXcodeToolchainIsAProgramNotXcode() {
         let pythonApp = "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app"
         let executable = pythonApp + "/Contents/MacOS/Python"
         let containing = SystemProcessIdentityResolver.containingApplication(
@@ -235,7 +257,8 @@ final class ProcessAttributorTests: XCTestCase {
             )
         )
 
-        let attributed = ProcessAttributor().attribute(
+        let attributor = ProcessAttributor()
+        let python = attributor.attribute(
             ProcessIdentity(
                 pid: 80,
                 nettopProcessName: "Python",
@@ -250,10 +273,48 @@ final class ProcessAttributorTests: XCTestCase {
                 )
             )
         )
+        let swift = attributor.attribute(
+            ProcessIdentity(
+                pid: 81,
+                nettopProcessName: "swift",
+                executablePath: "/Applications/Xcode-test.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift",
+                ancestors: [shell, ghostty]
+            )
+        )
 
-        XCTAssertEqual(attributed.appKey, "bundle:com.apple.dt.Xcode")
-        XCTAssertEqual(attributed.displayName, "Xcode")
-        XCTAssertEqual(attributed.category, .userApp)
+        XCTAssertEqual(python.appKey, VirtualHost.otherKey)
+        XCTAssertEqual(python.program?.key, "command:python")
+        XCTAssertEqual(swift.appKey, "bundle:com.mitchellh.ghostty")
+        XCTAssertEqual(swift.program?.key, "command:swift")
+    }
+
+    func testInterpreterIsNamedByItsScript() {
+        let brew = ProcessAncestor(
+            pid: 85,
+            executablePath: "/opt/homebrew/Library/Homebrew/vendor/portable-ruby/3.4.5/bin/ruby",
+            scriptName: "brew"
+        )
+        let attributed = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 86,
+                nettopProcessName: "curl",
+                executablePath: "/usr/bin/curl",
+                ancestors: [brew, shell, ghostty]
+            )
+        )
+        let node = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 87,
+                nettopProcessName: "node",
+                executablePath: "/Users/u/.local/share/mise/installs/node/24.0.0/bin/node",
+                ancestors: [shell, ghostty],
+                scriptName: "figma-developer-mcp"
+            )
+        )
+
+        XCTAssertEqual(attributed.program?.key, "command:brew")
+        XCTAssertEqual(node.program?.key, "command:figma-developer-mcp")
+        XCTAssertEqual(node.program?.displayName, "figma-developer-mcp")
     }
 
     func testExitedProcessReusesLastAttributionWithSameName() {
@@ -281,27 +342,21 @@ final class ProcessAttributorTests: XCTestCase {
         let unknown = cache.attribute(ProcessIdentity(pid: 92, nettopProcessName: "never-seen"))
 
         XCTAssertEqual(resolved.appKey, "bundle:com.hnc.Discord")
+        XCTAssertNil(resolved.program)
         XCTAssertEqual(exited.appKey, "bundle:com.hnc.Discord")
         XCTAssertEqual(exited.category, .userApp)
         XCTAssertEqual(exited.pid, 91)
-        XCTAssertEqual(unknown.appKey, "process:never-seen")
+        XCTAssertEqual(unknown.appKey, VirtualHost.otherKey)
+        XCTAssertEqual(unknown.program?.key, "process:never-seen")
     }
 
-    func testVersionedExecutablesShareOneKeyAndStableName() {
+    func testVersionedExecutablesShareOneProgramAndStableName() {
         let attributor = ProcessAttributor()
         let first = attributor.attribute(
-            ProcessIdentity(
-                pid: 30,
-                nettopProcessName: "2.1.300",
-                executablePath: "/Users/u/.local/share/claude/versions/2.1.300"
-            )
+            ProcessIdentity(pid: 30, nettopProcessName: "2.1.300", executablePath: "/Users/u/.local/share/claude/versions/2.1.300")
         )
         let second = attributor.attribute(
-            ProcessIdentity(
-                pid: 31,
-                nettopProcessName: "2.1.314",
-                executablePath: "/Users/u/.local/share/claude/versions/2.1.314"
-            )
+            ProcessIdentity(pid: 31, nettopProcessName: "2.1.314", executablePath: "/Users/u/.local/share/claude/versions/2.1.314")
         )
         let node = attributor.attribute(
             ProcessIdentity(
@@ -311,14 +366,15 @@ final class ProcessAttributorTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(first.appKey, "exec:/Users/u/.local/share/claude/versions/*")
-        XCTAssertEqual(second.appKey, first.appKey)
-        XCTAssertEqual(first.displayName, "claude")
-        XCTAssertEqual(node.appKey, "command:node")
-        XCTAssertEqual(node.displayName, "node")
+        XCTAssertEqual(first.appKey, VirtualHost.otherKey)
+        XCTAssertEqual(first.program?.key, "command:claude")
+        XCTAssertEqual(second.program?.key, first.program?.key)
+        XCTAssertEqual(first.program?.displayName, "claude")
+        XCTAssertEqual(node.program?.key, "command:node")
+        XCTAssertEqual(node.program?.displayName, "node")
     }
 
-    func testSameCommandFromSystemAndHomebrewSharesOneKey() {
+    func testSystemDaemonsGoToTheSystemHost() {
         let attributor = ProcessAttributor()
         let system = attributor.attribute(
             ProcessIdentity(pid: 35, nettopProcessName: "curl", executablePath: "/usr/bin/curl")
@@ -330,12 +386,16 @@ final class ProcessAttributorTests: XCTestCase {
             ProcessIdentity(pid: 37, nettopProcessName: "mDNSResponder", executablePath: "/usr/sbin/mDNSResponder")
         )
 
-        XCTAssertEqual(system.appKey, "command:curl")
-        XCTAssertEqual(homebrew.appKey, system.appKey)
-        XCTAssertEqual(system.displayName, "curl")
+        XCTAssertEqual(system.appKey, VirtualHost.otherKey)
         XCTAssertEqual(system.category, .unclassified)
-        XCTAssertEqual(homebrew.category, .unclassified)
+        XCTAssertEqual(system.program?.key, "command:curl")
+        XCTAssertEqual(homebrew.program?.key, system.program?.key)
+        XCTAssertEqual(system.program?.category, .unclassified)
+        XCTAssertEqual(daemon.appKey, VirtualHost.systemKey)
+        XCTAssertEqual(daemon.displayName, "macOS 系统")
         XCTAssertEqual(daemon.category, .systemProcess)
+        XCTAssertEqual(daemon.program?.key, "command:mDNSResponder")
+        XCTAssertEqual(daemon.program?.category, .systemProcess)
     }
 
     func testTruncatedProcessNameUsesExecutableFileName() {
@@ -347,8 +407,9 @@ final class ProcessAttributorTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(attributed.displayName, "SafariSearchUploadWorker")
-        XCTAssertEqual(attributed.category, .systemProcess)
+        XCTAssertEqual(attributed.appKey, VirtualHost.systemKey)
+        XCTAssertEqual(attributed.program?.displayName, "SafariSearchUploadWorker")
+        XCTAssertEqual(attributed.program?.category, .systemProcess)
     }
 
     func testDetectedProxyExecutableBecomesProxyTransport() {
@@ -400,22 +461,23 @@ final class ProcessAttributorTests: XCTestCase {
         XCTAssertNotEqual(attributed.category, .proxyTransport)
     }
 
-    func testUnknownKeyIsDeterministic() {
+    func testUnknownProgramKeyIsDeterministic() {
         let identity = ProcessIdentity(pid: nil, nettopProcessName: "")
         let attributor = ProcessAttributor()
 
         let first = attributor.attribute(identity)
         let second = attributor.attribute(identity)
 
-        XCTAssertTrue(first.appKey.hasPrefix("unknown:"))
-        XCTAssertEqual(first.appKey, second.appKey)
+        XCTAssertEqual(first.appKey, VirtualHost.otherKey)
+        XCTAssertTrue(first.program?.key.hasPrefix("unknown:") == true)
+        XCTAssertEqual(first.program?.key, second.program?.key)
         XCTAssertEqual(first.category, .unclassified)
     }
 
     func testNonAppBundlePathPollutionDoesNotProduceAppKey() {
         // NSRunningApplication 偶发把非 app 进程的可执行文件路径自身当成 bundleURL，
-        // 此时 bundlePath == executablePath 且无 .app 后缀，必须回退到 exec: 派生，
-        // 不能产生 app: 前缀的 appKey（曾导致 node 出现 app:/…/bin/node 分裂记录）。
+        // 此时 bundlePath == executablePath 且无 .app 后缀，不能把它当成应用
+        // （曾导致 node 出现 app:/…/bin/node 分裂记录）。
         let identity = ProcessIdentity(
             pid: 40,
             processStartTime: Date(timeIntervalSince1970: 100),
@@ -426,10 +488,8 @@ final class ProcessAttributorTests: XCTestCase {
 
         let attributed = ProcessAttributor().attribute(identity)
 
-        XCTAssertEqual(
-            attributed.appKey,
-            "command:node"
-        )
+        XCTAssertEqual(attributed.appKey, VirtualHost.otherKey)
+        XCTAssertEqual(attributed.program?.key, "command:node")
         XCTAssertNotEqual(attributed.category, .userApp)
     }
 
@@ -465,13 +525,15 @@ final class ProcessAttributorTests: XCTestCase {
             pid: 1,
             processStartTime: Date(timeIntervalSince1970: 100),
             nettopProcessName: "first.1",
-            bundleID: "com.example.first"
+            bundleID: "com.example.first",
+            bundlePath: "/Applications/First.app"
         )
         let second = ProcessIdentity(
             pid: 2,
             processStartTime: Date(timeIntervalSince1970: 100),
             nettopProcessName: "second.2",
-            bundleID: "com.example.second"
+            bundleID: "com.example.second",
+            bundlePath: "/Applications/Second.app"
         )
 
         XCTAssertEqual(cache.attribute(first).appKey, "bundle:com.example.first")
@@ -502,5 +564,144 @@ final class ProcessAttributorTests: XCTestCase {
 
         XCTAssertEqual(before.pid, getpid())
         XCTAssertEqual(before, after)
+    }
+
+    func testXPCServiceCountsAsTheResponsibleApplicationItself() {
+        let raycast = ContainingApplication(
+            bundleID: "com.raycast.macos",
+            bundlePath: "/Applications/Raycast.app",
+            displayName: "Raycast",
+            executablePath: "/Applications/Raycast.app/Contents/MacOS/Raycast"
+        )
+        let attributed = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 700,
+                nettopProcessName: "com.apple.WebKi",
+                executablePath: "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking",
+                bundleID: "com.apple.WebKit.Networking",
+                displayName: "Raycast Networking",
+                ancestors: [ProcessAncestor(pid: 1, executablePath: "/sbin/launchd")],
+                responsibleApplication: raycast
+            )
+        )
+
+        XCTAssertEqual(attributed.appKey, "bundle:com.raycast.macos")
+        XCTAssertEqual(attributed.displayName, "Raycast")
+        XCTAssertEqual(attributed.category, .userApp)
+        XCTAssertEqual(attributed.executablePath, "/Applications/Raycast.app/Contents/MacOS/Raycast")
+        XCTAssertNil(attributed.program)
+    }
+
+    func testAdoptedChildUsesResponsibleApplicationAndKeepsItsProgram() {
+        let attributed = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 705,
+                nettopProcessName: "opencode",
+                executablePath: "/Users/u/.opencode/bin/opencode",
+                ancestors: [ProcessAncestor(pid: 1, executablePath: "/sbin/launchd")],
+                responsibleApplication: ContainingApplication(
+                    bundleID: "com.mitchellh.ghostty",
+                    bundlePath: "/Applications/Ghostty.app",
+                    displayName: "Ghostty"
+                )
+            )
+        )
+
+        XCTAssertEqual(attributed.appKey, "bundle:com.mitchellh.ghostty")
+        XCTAssertEqual(attributed.program?.key, "command:opencode")
+    }
+
+    func testAuxiliaryApplicationIsAProgramOfItsMainApplication() {
+        XCTAssertEqual(ProcessAttributor.auxiliaryApplicationHosts["com.google.GoogleUpdater"], "com.google.Chrome")
+        let support = "/Users/u/Library/Application Support"
+        let attributed = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 710,
+                nettopProcessName: "EgoUpdater",
+                executablePath: "\(support)/Citro Labs/EgoUpdater/0.6/EgoUpdater.app/Contents/MacOS/EgoUpdater",
+                bundleID: "com.citrolabs.EgoUpdater",
+                bundlePath: "\(support)/Citro Labs/EgoUpdater/0.6/EgoUpdater.app",
+                displayName: "EgoUpdater",
+                delegatingApplication: ContainingApplication(
+                    bundleID: "com.citrolabs.ego.lite",
+                    bundlePath: "/Applications/ego lite.app",
+                    displayName: "ego lite"
+                )
+            )
+        )
+
+        XCTAssertEqual(attributed.appKey, "bundle:com.citrolabs.ego.lite")
+        XCTAssertEqual(attributed.displayName, "ego lite")
+        XCTAssertEqual(attributed.category, .userApp)
+        XCTAssertEqual(attributed.program?.key, "bundle:com.citrolabs.EgoUpdater")
+        XCTAssertEqual(attributed.program?.displayName, "EgoUpdater")
+    }
+
+    func testProgramIsTheOutermostToolBelowTheHost() {
+        let opencode = ProcessAncestor(pid: 801, executablePath: "/Users/u/.opencode/bin/opencode")
+        let topgrade = ProcessAncestor(pid: 802, executablePath: "/opt/homebrew/Cellar/topgrade/16.0/bin/topgrade")
+        let tmux = ProcessAncestor(pid: 803, executablePath: "/opt/homebrew/bin/tmux")
+        let attributor = ProcessAttributor()
+        func curl(_ ancestors: [ProcessAncestor]) -> AttributedProcess {
+            attributor.attribute(
+                ProcessIdentity(pid: 810, nettopProcessName: "curl", executablePath: "/usr/bin/curl", ancestors: ancestors)
+            )
+        }
+
+        let viaOpencode = curl([shell, opencode, shell, ghostty])
+        XCTAssertEqual(viaOpencode.appKey, "bundle:com.mitchellh.ghostty")
+        XCTAssertEqual(viaOpencode.program?.key, "command:opencode")
+        XCTAssertEqual(viaOpencode.program?.executablePath, "/Users/u/.opencode/bin/opencode")
+        XCTAssertEqual(curl([opencode, topgrade, shell, ghostty]).program?.key, "command:topgrade")
+        // 终端里直接运行（含经过 tmux）的命令是它自己。
+        XCTAssertEqual(curl([shell, ghostty]).program?.key, "command:curl")
+        XCTAssertEqual(curl([shell, tmux, shell, ghostty]).program?.key, "command:curl")
+    }
+
+    func testGitHelperCountsAsGit() {
+        let attributed = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 820,
+                nettopProcessName: "git-remote-http",
+                executablePath: "/opt/homebrew/Cellar/git/2.56.0/libexec/git-core/git-remote-http",
+                ancestors: [
+                    ProcessAncestor(pid: 819, executablePath: "/opt/homebrew/Cellar/git/2.56.0/bin/git"),
+                    shell,
+                    ghostty
+                ]
+            )
+        )
+
+        XCTAssertEqual(attributed.appKey, "bundle:com.mitchellh.ghostty")
+        XCTAssertEqual(attributed.program?.key, "command:git")
+        XCTAssertEqual(attributed.program?.displayName, "git")
+    }
+
+    func testSeededNamesSurviveRestartAndUnrelatedProxyDetection() {
+        let cache = ProcessAttributionCache()
+        let gh = AttributedProgram(
+            key: "command:gh",
+            displayName: "gh",
+            category: .unclassified,
+            executablePath: "/opt/homebrew/Cellar/gh/2.0/bin/gh"
+        )
+        cache.seed([
+            RememberedProcessAttribution(
+                processName: "gh",
+                appKey: "bundle:com.mitchellh.ghostty",
+                displayName: "Ghostty",
+                category: .userApp,
+                bundleID: "com.mitchellh.ghostty",
+                bundlePath: "/Applications/Ghostty.app",
+                executablePath: "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+                program: gh
+            )
+        ])
+        cache.registerDetectedProxy(executablePath: "/Users/u/Library/Application Support/clashbar/core/mihomo")
+
+        let exited = cache.attribute(ProcessIdentity(pid: 830, nettopProcessName: "gh"))
+        XCTAssertEqual(exited.appKey, "bundle:com.mitchellh.ghostty")
+        XCTAssertEqual(exited.pid, 830)
+        XCTAssertEqual(exited.program, gh)
     }
 }

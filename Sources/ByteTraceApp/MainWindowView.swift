@@ -3,8 +3,9 @@ import Charts
 import ByteTraceCore
 import SwiftUI
 
-/// 主窗口统计页：顶部总量与趋势并排；下方是全部应用（含系统进程与命令行工具）的单一列表，
-/// 点击一行在行下展开该应用的详情。代理传输不计入总量，不在列表里展示。
+/// 主窗口统计页：顶部总量与趋势并排；下方按应用排行，展开查看其中各程序。
+/// 没有 GUI 应用的流量归到 macOS 系统 / 命令行工具。
+/// 点击一行在行下展开详情。代理传输不计入总量，不在列表里展示。
 /// 设置是同一窗口里推入的独立页面，从右下角悬浮按钮、菜单栏齿轮或 ⌘, 进入；
 /// 悬浮按钮在设置页变成返回，进出都在同一位置。
 struct MainWindowView: View {
@@ -18,7 +19,7 @@ struct MainWindowView: View {
     @State private var isShowingSettings = false
 
     /// 收起时列出的行数。
-    private static let collapsedRowLimit = 12
+    private static let collapsedRowLimit = 20
     private static let appListID = "appList"
     /// 悬浮按钮距窗口右下角的距离；底部留出状态栏的高度，主页与设置页位置一致。
     private static let floatingButtonInset = EdgeInsets(top: 0, leading: 0, bottom: 44, trailing: 24)
@@ -119,7 +120,7 @@ struct MainWindowView: View {
         let shareBase = model.selectedRangeTotals.totalBytes
 
         return VStack(alignment: .leading, spacing: 4) {
-            listHeader(records: records)
+            listHeader(count: records.count, detail: listDetail(records: records))
 
             if records.isEmpty {
                 emptyMessage(searchText.isEmpty ? "当前时间范围内暂无应用流量" : "没有匹配“\(searchText)”的应用")
@@ -161,16 +162,16 @@ struct MainWindowView: View {
         }
     }
 
-    private func listHeader(records: [DailyUsageRecord]) -> some View {
+    private func listHeader(count: Int, detail: String?) -> some View {
         VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
                 Text("应用")
                     .font(.headline)
-                Text("\(records.count)")
+                Text("\(count)")
                     .font(.callout)
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: 8)
-                if let detail = listDetail(records: records) {
+                if let detail {
                     Text(detail)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -196,7 +197,7 @@ struct MainWindowView: View {
             let split = model.routeSplit(for: records)
             if split.isRepresentative {
                 let percent = split.proxyFraction.formatted(.percent.precision(.fractionLength(0)))
-                parts.append(model.routeBreakdownUsesToday ? "代理约 \(percent)" : "代理 \(percent)")
+                parts.append("代理 \(percent)")
             }
         }
         return parts.joined(separator: " · ")
@@ -215,7 +216,14 @@ struct MainWindowView: View {
             Button {
                 toggleExpansion(of: record.appKey)
             } label: {
-                UsageRow(record: record, share: share, note: note, isExpanded: isExpanded)
+                UsageRow(
+                    iconRecord: record,
+                    name: record.displayName,
+                    totalBytes: totalBytes(of: record),
+                    share: share,
+                    note: note,
+                    isExpanded: isExpanded
+                )
             }
             .buttonStyle(.plain)
             .interactiveHoverHighlight(cornerRadius: 8, opacity: isExpanded ? 0 : 0.045)
@@ -224,8 +232,13 @@ struct MainWindowView: View {
             .accessibilityHint(isExpanded ? "收起详情" : "展开详情")
 
             if isExpanded {
-                AppDetailPanel(record: record, rank: rank, rankCount: rankCount, model: model)
-                    .transition(.opacity)
+                AppDetailPanel(
+                    record: record,
+                    rank: rank,
+                    rankCount: rankCount,
+                    model: model
+                )
+                .transition(.opacity)
             }
         }
         .background(
@@ -241,9 +254,9 @@ struct MainWindowView: View {
         .padding(.vertical, isExpanded ? 4 : 0)
     }
 
-    /// 行内名称后的浅色说明：系统进程用途或启动者；同名不同路径时补上路径。
+    /// 行内名称后的浅色说明：系统进程用途、运行过的程序；同名不同路径时补上路径。
     private func rowNote(for record: DailyUsageRecord, duplicateNames: Set<String>) -> String? {
-        if let subtitle = model.subtitle(for: record) { return subtitle }
+        if let subtitle = model.rangeSubtitle(for: record) { return subtitle }
         if duplicateNames.contains(record.displayName),
            let path = record.bundlePath ?? record.executablePath {
             return ByteTraceViewModel.abbreviatedPath(path)
@@ -341,6 +354,7 @@ struct MainWindowView: View {
         .pickerStyle(.segmented)
         .labelsHidden()
         .fixedSize()
+        .focusable(false)
     }
 
     private var statusBar: some View {
@@ -395,41 +409,49 @@ private struct FloatingSettingsButton: View {
     }
 }
 
-private extension UsageTimeRange {
+private extension UsageRangeWindow {
     var axisStride: (component: Calendar.Component, count: Int) {
-        switch self {
-        case .lastHour: return (.minute, 15)
-        case .today: return (.hour, 6)
-        case .thisWeek: return (.day, 1)
-        case .thisMonth: return (.day, 7)
-        }
+        if chartUnit == .hour { return (.hour, 6) }
+        let calendar = Calendar.autoupdatingCurrent
+        let count = calendar.dateComponents([chartUnit], from: chartDomain.lowerBound, to: chartDomain.upperBound)
+            .value(for: chartUnit) ?? 1
+        return (chartUnit, max(1, Int(ceil(Double(count) / 6))))
     }
 
     var axisFormat: Date.FormatStyle {
-        switch self {
-        case .lastHour: return .dateTime.hour().minute()
-        case .today: return .dateTime.hour()
-        case .thisWeek: return .dateTime.weekday(.abbreviated)
-        case .thisMonth: return .dateTime.month(.defaultDigits).day()
+        switch chartUnit {
+        case .hour: return .dateTime.hour()
+        case .month: return .dateTime.year().month(.defaultDigits)
+        case .year: return .dateTime.year()
+        default: return .dateTime.month(.defaultDigits).day()
         }
     }
 
-    func chartDomain(now: Date, calendar: Calendar) -> ClosedRange<Date> {
-        let start = startDate(relativeTo: now, calendar: calendar)
-        let end = max(chartEndDate(relativeTo: now, calendar: calendar), start.addingTimeInterval(60))
-        return start...end
+    var chartDomain: ClosedRange<Date> {
+        let calendar = Calendar.autoupdatingCurrent
+        let lower = calendar.dateInterval(of: chartUnit, for: start)?.start ?? start
+        // 月 / 年柱画满所在周期，避免首尾柱被裁掉；查询仍截止到实际 end。
+        let upper: Date
+        if chartUnit == .month || chartUnit == .year {
+            upper = calendar.dateInterval(of: chartUnit, for: lastDay)?.end ?? chartEnd
+        } else {
+            upper = chartEnd
+        }
+        return lower...max(upper, lower.addingTimeInterval(60))
     }
 
     /// 一根柱子所代表时段的标题，用于悬停浮层和峰值说明。
     func barTitle(start: Date, end: Date) -> String {
         switch chartUnit {
-        case .minute:
-            return start.formatted(date: .omitted, time: .shortened)
         case .hour:
             let format = Date.FormatStyle.dateTime.hour(.twoDigits(amPM: .omitted)).minute()
             return "\(start.formatted(format)) – \(end.formatted(format))"
+        case .month:
+            return start.formatted(.dateTime.year().month())
+        case .year:
+            return start.formatted(.dateTime.year())
         default:
-            return start.formatted(.dateTime.month(.defaultDigits).day().weekday(.abbreviated))
+            return start.formatted(.dateTime.year().month(.defaultDigits).day())
         }
     }
 }
@@ -460,7 +482,7 @@ private struct OverviewHeader: View {
         HStack(alignment: .bottom, spacing: 36) {
             totalBlock
                 .frame(width: 250, alignment: .leading)
-            TrendChart(bars: model.rangeBars, range: model.selectedRange)
+            TrendChart(bars: model.rangeBars, window: model.rangeWindow)
         }
     }
 
@@ -508,28 +530,26 @@ private struct OverviewHeader: View {
     }
 
     private var rangeCaption: String {
-        let now = Date()
-        let calendar = Calendar.autoupdatingCurrent
+        let start = model.rangeWindow.start
         switch model.selectedRange {
-        case .lastHour:
-            return "最近 1 小时"
         case .today:
-            return "今天 · \(now.formatted(.dateTime.month().day().weekday(.wide)))"
+            return "今日 · \(start.formatted(.dateTime.month().day().weekday(.wide)))"
         case .thisWeek:
-            let start = model.selectedRange.startDate(relativeTo: now, calendar: calendar)
             return "本周 · \(start.formatted(.dateTime.month().day())) 起"
         case .thisMonth:
-            return "本月 · \(now.formatted(.dateTime.year().month()))"
+            return "本月 · \(start.formatted(.dateTime.year().month()))"
+        case .lastMonth:
+            return "上月 · \(start.formatted(.dateTime.year().month()))"
+        case .all:
+            guard !model.rangeApplicationRecords.isEmpty else { return "全部" }
+            return "全部 · \(start.formatted(.dateTime.year().month(.defaultDigits).day())) 起"
         }
     }
 
-    /// 只在口径需要说明时给一行注释：按今天估算、出口未知、路径统计启用前的流量。
+    /// 只在口径需要说明时给一行注释：出口未知、路径统计启用前的流量。
     private func routeNote(_ split: RouteSplit) -> String? {
         guard split.hasKnownRoute else { return nil }
         var parts: [String] = []
-        if model.routeBreakdownUsesToday {
-            parts.append("直连 / 代理按今天的比例估算")
-        }
         if split.unknownBytes > 0 {
             parts.append("另有 \(ByteTraceViewModel.formatBytes(split.unknownBytes)) 出口未知")
         }
@@ -609,7 +629,7 @@ private struct DirectionBar: View {
 /// 顶部趋势图：只画合计，悬停时浮层给出上下行与该时段流量最大的应用。
 private struct TrendChart: View {
     let bars: [UsageChartBar]
-    let range: UsageTimeRange
+    let window: UsageRangeWindow
 
     @State private var hoveredBar: UsageChartBar?
     @State private var hoverX: CGFloat = 0
@@ -619,10 +639,10 @@ private struct TrendChart: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text(range.chartUnitTitle)
+                Text(window.chartUnitTitle)
                 Spacer()
                 if let peak {
-                    Text("峰值 \(range.barTitle(start: peak.start, end: peak.end)) · \(ByteTraceViewModel.formatBytes(peak.totalBytes))")
+                    Text("峰值 \(window.barTitle(start: peak.start, end: peak.end)) · \(ByteTraceViewModel.formatBytes(peak.totalBytes))")
                         .monospacedDigit()
                 }
             }
@@ -634,7 +654,7 @@ private struct TrendChart: View {
                     Image(systemName: "chart.bar.xaxis")
                         .font(.title3)
                         .foregroundStyle(.tertiary)
-                    Text("统计运行一段时间后会在这里显示趋势")
+                    Text("所选时间范围暂无趋势数据")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -658,8 +678,7 @@ private struct TrendChart: View {
     }
 
     private var chart: some View {
-        let calendar = Calendar.autoupdatingCurrent
-        let unit = range.chartUnit
+        let unit = window.chartUnit
         return Chart(bars) { bar in
             BarMark(
                 x: .value("时间", bar.start, unit: unit),
@@ -668,11 +687,11 @@ private struct TrendChart: View {
             .foregroundStyle(TrafficColor.download.opacity(opacity(for: bar)))
             .cornerRadius(2)
         }
-        .chartXScale(domain: range.chartDomain(now: Date(), calendar: calendar))
+        .chartXScale(domain: window.chartDomain)
         .chartXAxis {
-            AxisMarks(values: .stride(by: range.axisStride.component, count: range.axisStride.count)) { _ in
+            AxisMarks(values: .stride(by: window.axisStride.component, count: window.axisStride.count)) { _ in
                 AxisTick(length: 3, stroke: StrokeStyle(lineWidth: 0.5))
-                AxisValueLabel(format: range.axisFormat)
+                AxisValueLabel(format: window.axisFormat)
             }
         }
         .chartYAxis {
@@ -736,7 +755,7 @@ private struct TrendChart: View {
 
     private func hoverBubble(for bar: UsageChartBar) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(range.barTitle(start: bar.start, end: bar.end))
+            Text(window.barTitle(start: bar.start, end: bar.end))
                 .font(.caption.weight(.semibold))
             Text("\(ByteTraceViewModel.formatBytes(bar.totalBytes))　↓ \(ByteTraceViewModel.formatBytes(bar.downloadBytes))　↑ \(ByteTraceViewModel.formatBytes(bar.uploadBytes))")
                 .font(.caption)
@@ -764,19 +783,21 @@ private struct TrendChart: View {
 
 // MARK: - 列表行与行下详情
 
-/// 列表行：图标 | 名称与浅色说明 | 合计 | 占比 | 展开箭头。
+/// 应用列表行：图标 | 名称与浅色说明 | 合计 | 占比 | 展开箭头。
 private struct UsageRow: View {
-    let record: DailyUsageRecord
+    let iconRecord: DailyUsageRecord
+    let name: String
+    let totalBytes: Int64
     let share: Double
     let note: String?
     let isExpanded: Bool
 
     var body: some View {
         HStack(spacing: 10) {
-            AppIconView(record: record, size: 22)
+            AppIconView(record: iconRecord, size: 22)
 
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(record.displayName)
+                Text(name)
                     .fontWeight(isExpanded ? .semibold : .regular)
                     .lineLimit(1)
                     .layoutPriority(1)
@@ -792,7 +813,7 @@ private struct UsageRow: View {
 
             // 这里刻意不加 .contentTransition(.numericText())：列表每次刷新数值都会变化，
             // 逐行数字滚动动画会让整个可见列表持续重绘。
-            Text(ByteTraceViewModel.formatBytes(totalBytes(of: record)))
+            Text(ByteTraceViewModel.formatBytes(totalBytes))
                 .fontWeight(.medium)
             Text(percentText(share))
                 .font(.caption)
@@ -822,7 +843,7 @@ private struct AppDetailPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            timeline
+            DetailTimelineChart(points: model.timeline(for: record.appKey), window: model.rangeWindow)
 
             HStack(alignment: .top, spacing: 16) {
                 stat("下行 / 上行") {
@@ -833,6 +854,8 @@ private struct AppDetailPanel: View {
                     Text("第 \(rank) / \(rankCount)")
                 }
             }
+
+            programRanking
 
             infoLines
         }
@@ -848,46 +871,35 @@ private struct AppDetailPanel: View {
         }
     }
 
-    // MARK: 趋势小图
+    // MARK: 程序排行
 
+    /// 宿主里运行过其他程序时列出排行；只有应用自身时不显示。
     @ViewBuilder
-    private var timeline: some View {
-        let range = model.selectedRange
-        let points = binnedTimeline(range: range)
-        if points.isEmpty {
-            Text("当前范围暂无时间粒度数据")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-        } else {
-            Chart(points, id: \.start) { point in
-                BarMark(
-                    x: .value("时间", point.start, unit: range.chartUnit),
-                    y: .value("字节", point.bytes)
-                )
-                .foregroundStyle(TrafficColor.download.opacity(0.85))
-                .cornerRadius(1.5)
-            }
-            .chartXScale(domain: range.chartDomain(now: Date(), calendar: Calendar.autoupdatingCurrent))
-            .chartXAxis {
-                AxisMarks(values: .stride(by: range.axisStride.component, count: range.axisStride.count)) { _ in
-                    AxisValueLabel(format: range.axisFormat)
-                }
-            }
-            .chartYAxis(.hidden)
-            .frame(height: 64)
+    private var programRanking: some View {
+        let programs = model.programs(forHost: record)
+        if programs.contains(where: { !$0.isApplicationItself }) {
+            let hostBytes = totalBytes(of: record)
+            ShareList(
+                title: "程序",
+                items: programs.map { program in
+                    let split = model.routeSplit(
+                        forHost: record.appKey,
+                        programKey: program.programKey,
+                        totalBytes: program.bytes
+                    )
+                    return ShareList.Item(
+                        id: program.programKey.isEmpty ? record.appKey : program.programKey,
+                        iconRecord: program.iconRecord,
+                        name: program.name,
+                        bytes: program.bytes,
+                        detail: split.isRepresentative
+                            ? "代理 \(percentText(split.proxyFraction))"
+                            : nil
+                    )
+                },
+                totalBytes: hostBytes
+            )
         }
-    }
-
-    /// 分钟桶按图表粒度（今天为每小时）合并，柱子数量与顶部趋势图一致。
-    private func binnedTimeline(range: UsageTimeRange) -> [(start: Date, bytes: Int64)] {
-        let calendar = Calendar.autoupdatingCurrent
-        var bins: [Date: Int64] = [:]
-        for point in model.timeline(for: record.appKey) {
-            let start = calendar.dateInterval(of: range.chartUnit, for: point.start)?.start ?? point.start
-            bins[start] = saturatingAdd(bins[start] ?? 0, point.totalBytes)
-        }
-        return bins.keys.sorted().map { ($0, bins[$0] ?? 0) }
     }
 
     // MARK: 路径
@@ -895,7 +907,7 @@ private struct AppDetailPanel: View {
     @ViewBuilder
     private var routeStat: some View {
         let split = model.routeSplit(for: [record])
-        stat(model.routeBreakdownUsesToday ? "直连 / 代理 · 按今天估算" : "直连 / 代理") {
+        stat("直连 / 代理") {
             if split.hasKnownRoute {
                 VStack(alignment: .leading, spacing: 5) {
                     RouteSegmentBar(split: split, height: 5)
@@ -955,5 +967,121 @@ private struct AppDetailPanel: View {
         }
         .monospacedDigit()
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 行下详情里的趋势小图；分钟桶按图表粒度（今天为每小时）合并，柱子数量与顶部趋势图一致。
+private struct DetailTimelineChart: View {
+    let points: [UsageTimelinePoint]
+    let window: UsageRangeWindow
+
+    var body: some View {
+        let bins = binned()
+        if bins.isEmpty {
+            Text("当前范围暂无时间粒度数据")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+        } else {
+            Chart(bins, id: \.start) { point in
+                BarMark(
+                    x: .value("时间", point.start, unit: window.chartUnit),
+                    y: .value("字节", point.bytes)
+                )
+                .foregroundStyle(TrafficColor.download.opacity(0.85))
+                .cornerRadius(1.5)
+            }
+            .chartXScale(domain: window.chartDomain)
+            .chartXAxis {
+                AxisMarks(values: .stride(by: window.axisStride.component, count: window.axisStride.count)) { _ in
+                    AxisValueLabel(format: window.axisFormat)
+                }
+            }
+            .chartYAxis(.hidden)
+            .frame(height: 64)
+        }
+    }
+
+    private func binned() -> [(start: Date, bytes: Int64)] {
+        let calendar = Calendar.autoupdatingCurrent
+        var bins: [Date: Int64] = [:]
+        for point in points {
+            let start = calendar.dateInterval(of: window.chartUnit, for: point.start)?.start ?? point.start
+            bins[start] = saturatingAdd(bins[start] ?? 0, point.totalBytes)
+        }
+        return bins.keys.sorted().map { ($0, bins[$0] ?? 0) }
+    }
+}
+
+/// 应用详情里的程序占比列表。前几项之外合成「其他」。
+private struct ShareList: View {
+    struct Item: Identifiable {
+        let id: String
+        let iconRecord: DailyUsageRecord?
+        let name: String
+        let bytes: Int64
+        let detail: String?
+    }
+
+    let title: String
+    let items: [Item]
+    let totalBytes: Int64
+
+    private static let visibleLimit = 8
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 2)
+            let visible = items.count > Self.visibleLimit + 1 ? Array(items.prefix(Self.visibleLimit)) : items
+            ForEach(visible) { item in
+                row(item)
+            }
+            if visible.count < items.count {
+                let rest = items.dropFirst(visible.count)
+                row(Item(
+                    id: "other",
+                    iconRecord: nil,
+                    name: "其他 \(rest.count) 个",
+                    bytes: rest.reduce(Int64(0)) { saturatingAdd($0, $1.bytes) },
+                    detail: nil
+                ))
+            }
+        }
+    }
+
+    private func row(_ item: Item) -> some View {
+        HStack(spacing: 8) {
+            Group {
+                if let iconRecord = item.iconRecord {
+                    AppIconView(record: iconRecord, size: 16)
+                } else {
+                    Image(systemName: "ellipsis")
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: 16, height: 16)
+            Text(item.name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let detail = item.detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            Text(ByteTraceViewModel.formatBytes(item.bytes))
+            Text(percentText(totalBytes > 0 ? min(1, Double(item.bytes) / Double(totalBytes)) : 0))
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .frame(width: 36, alignment: .trailing)
+        }
+        .font(.callout)
+        .monospacedDigit()
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
     }
 }

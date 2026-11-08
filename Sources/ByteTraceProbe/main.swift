@@ -458,7 +458,8 @@ private func runProbe(options: Options) -> Int32 {
                                 bundlePath: attributed.bundlePath,
                                 executablePath: attributed.executablePath,
                                 downloadBytes: delta.downloadBytes,
-                                uploadBytes: delta.uploadBytes
+                                uploadBytes: delta.uploadBytes,
+                                program: attributed.program
                             )
                         )
                     } catch {
@@ -478,7 +479,7 @@ private func runProbe(options: Options) -> Int32 {
                 )
                 for sample in preview {
                     print(
-                        "[sample] lane=\(sample.lane.rawValue) route=\(sample.route.rawValue) process=\(sample.delta.processName) app=\(sample.attributed.displayName) app_key=\(sample.attributed.appKey) category=\(sample.attributed.category.rawValue) launcher=\(sample.attributed.launcherName ?? "-") download_bytes=\(sample.delta.downloadBytes) upload_bytes=\(sample.delta.uploadBytes)"
+                        "[sample] lane=\(sample.lane.rawValue) route=\(sample.route.rawValue) process=\(sample.delta.processName) app=\(sample.attributed.displayName) app_key=\(sample.attributed.appKey) category=\(sample.attributed.category.rawValue) program=\(sample.attributed.program?.key ?? "-") download_bytes=\(sample.delta.downloadBytes) upload_bytes=\(sample.delta.uploadBytes)"
                     )
                 }
 

@@ -26,10 +26,23 @@ struct ByteTraceExportDocument: Encodable {
         let routeBytes: [String: Int64]
     }
 
+    /// 宿主下每个程序的流量；`programKey` 为空表示应用本身。
+    struct ProgramUsage: Encodable {
+        let appKey: String
+        let programKey: String
+        let displayName: String
+        let executablePath: String?
+        let downloadBytes: Int64
+        let uploadBytes: Int64
+        let totalBytes: Int64
+        let routeBytes: [String: Int64]
+    }
+
     let formatVersion: Int
     let accountingVersion: Int64
     let product: String
     let exportedAt: Date
     let range: Range
     let applicationUsage: [ApplicationUsage]
+    let programUsage: [ProgramUsage]
 }

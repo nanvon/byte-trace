@@ -63,8 +63,8 @@ external nettop stdout (-P, external) ─┐
                                        ├→ NettopDelta（进程名 + 上下行字节）
 supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 → 按进程和来源合并
   → ByteTraceViewModel.ingest()          NettopProcessToken 拆 pid → SystemProcessIdentityResolver
-                                         → ProcessAttributionCache → AttributedProcess（appKey/分类）
-  → UsageAggregator.ingest()             内存中按 (day, 分钟桶, appKey) 合并
+                                         → ProcessAttributionCache → AttributedProcess（宿主 appKey + 程序）
+  → UsageAggregator.ingest()             内存中按 (day, 分钟桶, appKey, programKey) 合并
   → UsageAggregator.flush()              每 5 秒定时器触发，一个事务写入 SQLite
   → ByteTraceViewModel.refresh()         回读 SQLite 刷新 UI（仅在有界面可见时）
 ```
@@ -83,36 +83,42 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 
 ## 进程归属（Attribution）
 
-`ProcessAttributor.attribute()` 按固定优先级派生 `appKey`：
+每个进程归到「宿主 + 程序」两级（schema 12 起，2026-11 上线）。宿主是 `appKey`，程序是 `program_key`（空串表示宿主应用自身）。两者都是 SQLite 主键的一部分，**改动派生规则会切断历史数据的连续性**，必须同时在 `UsageStore.migrate()` 追加迁移。
 
-```
-proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  command:<名称>  →  exec:<路径>  →  process:<名称>  →  unknown:<FNV哈希>
-```
+**宿主**（`ProcessAttributor.attribute()`，命中即停）：
 
-`appKey` 是 SQLite 的主键，**改动派生规则会切断历史数据的连续性**（老数据变成孤儿行），必须同时在 `UsageStore.migrate()` 追加合并迁移。
+1. `proxy:<rule>`：代理内核，单独记录。
+2. 附属应用（`ProcessAttributor.auxiliaryApplicationHosts`：GoogleUpdater → Chrome、EgoUpdater → ego lite、BobHelper → Bob、ChatGPT Computer Use → ChatGPT）归主应用，程序为 `bundle:<附属 bundle ID>`。主应用由解析器按 bundle ID 查到（`ProcessIdentity.delegatingApplication`）。新增附属应用加在这张表里，迁移也读它。
+3. 可执行文件所在的最外层 `.app`：helper、扩展、应用内置工具都算应用自身（`bundle:<bundleID>`，无 bundle ID 时 `app:<bundlePath>`）。以下不算宿主：Xcode 工具链（`.app/Contents/Developer/`）、框架里的 `.app`（Homebrew 的 Python.app）、`~/Library/Application Support/` 下的附属包（Claude 桌面版内置的 Claude Code）。
+4. 父进程链（最多 8 层，不含 launchd）上最近的 GUI 应用。终端、编辑器都算宿主；代理应用与 `com.apple.loginwindow`（`nonHostBundleIDs`）不算。
+5. `ProcessIdentity.responsibleApplication`：`responsibility_get_pid_responsible_for_pid`（libquarantine 非公开接口，`dlsym` 查找）给出的负责应用，只接受 `.app`。系统 XPC 服务（`.xpc/Contents/MacOS/`，如 WebKit 网络进程、「自动填充」）算该应用自身；被 launchd 收养的子进程照常找程序。
+6. 虚拟宿主（`VirtualHost`）：程序位于系统目录时为 `host:system`「macOS 系统」，否则 `host:other`「命令行工具」（launchd 直接启动的后台程序、解析前就退出的进程，以及迁移时没有记下宿主的旧命令行记录）。
 
-- `exec:` 使用 `ExecutablePathNormalizer.normalize` 后的路径：版本号目录（`2.1.314`、`v24.17.0`、`0.164.0-aarch64-apple-darwin`）、内嵌版本（`node-v22.22.2` → `node-*`）、16 位以上十六进制哈希与 UUID 目录折叠成 `*`，让 mise / fnm / 自更新 CLI 的各版本合并为一个应用；规则对应 schema 7 的迁移。无应用包的进程展示名优先用路径派生名（nettop 进程名最多 15 字符，自更新 CLI 的进程名可能就是版本号）。
-- `command:` 是位于 `bin` / `sbin` 目录下的命令行工具（`ExecutablePathNormalizer.commandName`）：同名工具不论装在哪里合并为一条，如 `/usr/bin/curl` 与 Homebrew 的 curl、mise 与 fnm 的 node。`.app/` 内、`~/Library/Application Support/`、`.cache/` 下的应用附带工具和文件名含通配的路径不在此列，仍用 `exec:`。
+**程序**：宿主之下由宿主或 shell 直接启动的那个进程，即父进程链中宿主以下最外层、不透明的一环（`transparentLauncherNames`：shell、login、sudo、env、tmux、zellij、caffeinate 等跳过）。它再调起的子进程都算它：opencode 调起的 curl 记 `command:opencode`，topgrade → opencode → curl 记 `command:topgrade`，Claude Code 调起的 gh 记 `command:claude`。程序位于宿主包内、或在宿主的 `Application Support/<bundleID|名称>/`、`.cache/<名称>/` 下（且不在 `.app` 里）时算应用自身，如 Raycast 内置的 node、magpie-bun。程序键：
 
-- `hostCandidate()` 会沿父进程链（最多 8 层）向上找「可执行文件位于其 `.app/Contents/` 内、且 bundlePath 最短」的祖先。这是 helper 进程（如浏览器子进程）能归属到主应用的原因。父进程已退出时，用解析器从可执行路径取出的最外层 `.app`（`ProcessIdentity.containingApplication`）兜底，如 Xcode 内置的 Python 归到 Xcode。
-- `launchingApplication()`：没有自己应用包（或应用包在 `~/Library/Application Support` 下，如 Claude 桌面版内置的 Claude Code）的进程，归到父进程链上第一个 GUI 应用，如 magpie 调起的 mise、Raycast 自带的 node。终端应用（`terminalBundleIDs`）不作为宿主；编辑器（`editorBundleIDs`）只收不经过 shell 的子进程，内置终端里运行的命令仍按命令行工具单独统计；代理应用不作为宿主。
-- `ProcessAttributionCache` 记住每个 nettop 进程名最近一次解析成功的归属，进程在读到路径前就退出时沿用，避免拆出 `process:` 记录；同名不同路径取最近一次。
-- 以上三条于 2026-11 上线。schema 10 迁移只合并能确定宿主的历史记录（见「存储」的迁移说明）；按启动者推断的、同名对应多个路径的 `process:` 记录留在原键下。
-- `ProcessAttributionCache` 以 `(pid, processStartTime)` 为键，规避 pid 复用。
-- **展示辅助（不参与 appKey）**：没有宿主应用的进程由 `ProcessAttributor.launcherName(for:)` 沿父进程链找启动者（跳过 shell、launchd、系统目录工具和同一可执行文件），列表副标题显示「由 X 启动」；常见系统守护进程的中文用途在 `SystemProcessDescriptions`（按可执行文件名匹配，mDNSResponder 标为「局域网/Bonjour」）。进程在被解析前就退出时拿不到路径和父进程，这两项都为空。
-- **nsurlsessiond 无法归属到委托应用**：用后台 URLSession 实测，它的套接字 `epid` 是自己的 pid、`euuid` 是自己的二进制 UUID，nettop 不提供委托方信息，因此只显示用途说明，不要再尝试按 epid 拆分。
-- 分类 `AppCategory`：`userApp` / `systemProcess`（可执行文件位于 `/System/`、`/usr/libexec/`、`/usr/sbin/` 等系统守护进程目录；`/usr/bin/`、`/bin/` 下是用户运行的命令行工具，不算）/ `proxyTransport` / `unclassified`。界面不按分类分组：菜单栏和主窗口只有一个应用列表，系统进程与命令行工具一并列出；分类只用于图标、用途说明和排除代理传输。
+- `command:<名称>`：`ExecutablePathNormalizer.programName`。先看 `commandName`：位于 `bin` / `sbin` 目录下的工具同名合并（`/usr/bin/curl` 与 Homebrew 的 curl、mise 与 fnm 的 node，Xcode 工具链的 `.app/Contents/Developer/…/bin` 也算）；几种固定布局按工具名合并：`libexec/git-core/` 下的 helper 记 `git`；`~/.local/share/<工具>/versions/`、Homebrew `Caskroom/<cask>/<版本>/`、`~/.<工具>/downloads/<工具>-<版本>…` 下的自更新 CLI 记工具名（Claude Code 的三种安装方式都是 `claude`）。其次是解释器名（Python.app → `python`），以及 `Application Support` 下 `.app/Contents/MacOS/` 的文件名、编辑器扩展目录（`~/.vscode/extensions/` 等）里的文件名。
+- 解释器（node、nodejs、ruby、perl、php、python*；bun、deno 不算）按脚本命名：解析器经 `KERN_PROCARGS2`（`MihomoControllerDiscovery.processArguments`）读启动参数，`ExecutablePathNormalizer.scriptProgramName` 取第一个非选项参数。`python -m pip` 取模块名，`brew.rb` 记 brew，`node_modules/<包>/…` 取包名，`bin` 下的脚本取文件名，`index.js` / `main.py` 这类通用文件名取所在目录名，`-e` / `-c` 内联代码没有脚本名。
+- `exec:<路径>`：其余可执行文件用 `ExecutablePathNormalizer.normalize` 后的路径：版本号目录（`2.1.314`、`v24.17.0`、`0.164.0-aarch64-apple-darwin`）、内嵌版本（`node-v22.22.2` → `node-*`）、16 位以上十六进制哈希与 UUID 目录折叠成 `*`。展示名优先用路径派生名（nettop 进程名最多 15 字符，自更新 CLI 的进程名可能就是版本号）。
+- `process:<名称>` / `unknown:<FNV哈希>`：读不到路径的进程。
+
+其他规则：
+
+- 跨宿主的「程序」身份是 `programKey.isEmpty ? appKey : programKey`（`ProgramUsageRecord.programIdentity`），程序视图按它汇总。
+- `ProcessAttributionCache` 以 `(pid, processStartTime)` 为键，规避 pid 复用；另记住每个 nettop 进程名最近一次解析成功的归属（含程序），进程在读到路径前就退出时沿用，同名不同路径取最近一次。名称映射落在 `process_names` 表（进程名 → `app_key` + `program_key`），启动时用 `rememberedProcessAttributions()` 预填：已记录的映射优先，其次按各应用、各程序可执行文件名的前 15 个字符推出。
+- 常见系统守护进程的中文用途在 `SystemProcessDescriptions`（按可执行文件名匹配，mDNSResponder 标为「局域网/Bonjour」），用于副标题。
+- **nsurlsessiond 无法归属到委托应用**：用后台 URLSession 实测，它的套接字 `epid` 是自己的 pid、`euuid` 是自己的二进制 UUID，nettop 不提供委托方信息，因此归「macOS 系统」并只显示用途说明，不要再尝试按 epid 拆分。
+- 分类 `AppCategory`：`userApp` / `systemProcess`（可执行文件位于 `/System/`、`/usr/lib/`、`/usr/libexec/`、`/usr/sbin/`、`/sbin/`；`/usr/bin/`、`/bin/` 下是用户运行的命令行工具，不算）/ `proxyTransport` / `unclassified`。宿主与程序各有分类；分类只用于图标、用途说明、虚拟宿主选择和排除代理传输。
 - 新增代理进程：在 `ProxyClassifier.defaultClassifier` 加一条 `ProxyRule`（可按 bundleID / 可执行路径 / 进程名匹配）。静态规则之外，补充通道里本地端点等于系统代理端点的 lo0 连接所属进程（代理监听端）会被自动登记为代理（`TrafficFilter.proxyListenerProcessTokens` → `ProcessAttributionCache.registerDetectedProxy`），路径持久化在 `UserDefaults` 键 `ByteTrace.detectedProxyExecutables`；代理内核常以 root 运行，lsof 看不到它的监听套接字，所以用 nettop 数据识别。代理流量**单独记录、不做反向抵扣、不计入应用总量、界面不展示**（总量卡片已有经代理流量）——UI 各处统一用 `category != .proxyTransport` 过滤，新增汇总逻辑时必须沿用。
 
 ## 存储
 
 自己封装的 `SQLiteDatabase`（直接调 SQLite3 C API，无第三方依赖），WAL + `busy_timeout=5000` + `foreign_keys=ON`。路径：`~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3`。
 
-六张表：`apps`、`daily_usage`（键 `accounting_version`+`day`+`app_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`，分钟粒度）、`daily_route_usage`（键 `accounting_version`+`day`+`app_key`+`route`）、`app_launchers`（键 `app_key`，命令行进程最近一次的启动者，覆盖写入、仅用于展示）、`collector_events`。
+七张表：`apps`（宿主：GUI 应用、虚拟宿主 `host:*`、代理 `proxy:*`）、`programs`（键 `program_key`，程序的展示名、分类、可执行路径）、`daily_usage`（键 `accounting_version`+`day`+`app_key`+`program_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`+`program_key`，分钟粒度）、`daily_route_usage`（键 `accounting_version`+`day`+`app_key`+`program_key`+`route`）、`process_names`（键 nettop 进程名 → 最近一次解析到的 `app_key` + `program_key`，覆盖写入，只用于重启后预填名称缓存）、`collector_events`。`program_key` 为空串表示宿主应用自身。应用级查询（`dailyUsage`、`bucketUsage`）跨程序 GROUP BY；程序级查询是 `programUsage`、`bucketProgramUsage`、`programRouteUsage`，`bucketTimeline(programIdentity:)` 按程序身份过滤，都排除代理传输。
 
 **流量路径**（`TrafficRoute`）：外部通道的非代理进程记 `direct`；补充通道（系统代理 lo0 / TUN utun）记 `proxied`，读到 mihomo 连接表时细分为 `proxy_node` / `proxy_rule_direct`。路径只写 `daily_route_usage` 一张旁表，`daily_usage` / `usage_buckets` 的总量与口径不变；代理传输不记路径。路径上线前的历史没有路径行，界面把「日汇总 − 路径合计」显示为「未区分」。「最近 1 小时」没有分钟级路径，按今天的拆分近似并注明。卡片标题与列表行的「走节点 X%」／「经代理 X%」只在已区分路径的流量里计算，且已区分部分不足全部流量的一半时不显示（`RouteBreakdown.Share.isRepresentative`），避免升级初期被「未区分」压成接近 0；覆盖不足 99% 时标题加「已区分部分中」。
 
-**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 10`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径；版本 8 新增 `daily_route_usage`；版本 9 新增 `app_launchers`；版本 10 按归属新规则合并历史记录：嵌套 `.app` 归外层应用、`~/Library/Application Support/<目录>/` 下的附属包归到展示名等于该目录名的唯一应用、同名只对应一个已解析记录的 `process:` 记录归到该记录、`exec:` 路径在 `~/Library/Application Support/<bundle ID>/` 或 `.cache/<应用名>/` 下的工具归到对应的唯一应用（如 Raycast 内置 node、magpie-bun）。合并前先把 `bin` / `sbin` 下工具的 `exec:` 记录按文件名并到 `command:<名称>`（`mergeCommandLineToolKeys`，`/usr/bin/`、`/bin/` 记录的 `system_process` 分类同时改为 `unclassified`）。这套合并在已是版本 10 的库每次打开时都会再跑一次（`mergeLateHostApplicationKeys`），迁移后由旧版本写入或名称缓存未命中拆出的记录也会并入；只搬移行，失败回滚且不影响打开。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
+**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 13`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径；版本 8 新增 `daily_route_usage`；版本 9 曾新增 `app_launchers`（版本 12 删除）；版本 10、11 曾按旧的「归到启动者」规则合并过历史记录并新增 `process_names`，那段合并代码已删除，正式库里合并过的数据不可还原。版本 12（`migrateHostsAndPrograms`，计划由 `hostProgramPlan(for:)` 生成）在一个事务里重建三张用量表加入 `program_key`，旧记录重新落位：应用记录的宿主就是它自己；嵌套在另一个 `.app` 里的归外层应用；附属应用归主应用、程序为它自己；`Application Support` 下的附属包与框架里的 `.app` 按程序处理，宿主是目录名对应的唯一应用（bundle ID 或展示名匹配），系统框架里的归 `host:system`，找不到时为 `host:other`；命令行记录（`command:` / `exec:` / `process:` / `unknown:`）按新规则重算程序键，有路径时按路径判断是否系统目录（旧版本曾把 `/usr/bin/` 标成系统进程），系统目录归 `host:system`，位于某应用数据目录（`Application Support/<目录>/`、`.cache/<名称>/`）的归该应用自身，编辑器扩展目录的归编辑器，其余以前没记下宿主，归 `host:other`「命令行工具」，不按最近一次启动者猜（`app_launchers` 只记了每个程序最近一次的启动者，且多是 opencode、pnpm 这类命令行工具）。`process_names` 同步改到新位置，`app_launchers` 删除，字节总量不变。这次重建在主线程打开数据库时执行，正式库（约 75 万行分钟桶）实测约 8 秒。版本 13（`mergeLegacyHost`）：开发期的版本 12 曾把这些记录放在单独的 `host:legacy`「历史记录」，并入 `host:other`（可执行文件在系统目录的归 `host:system`），同一位置的行累加合并。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
 
 **写入是累加而非幂等**：所有 upsert 都是 `ON CONFLICT ... DO UPDATE SET x = x + excluded.x`。同一批聚合重复 flush 会双计。`flush()` 成功后必须清空 pending（现有代码已如此）。
 
@@ -135,7 +141,8 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  command:<名�
 - **「今天」是双数据源**：汇总数字来自 `daily_usage`，趋势图来自 `usage_buckets`（`usesBucketSummary` 与 `usesFineGrainedTimeline` 两个开关分别控制）。「最近 10 分钟 / 1 小时」两者都用分钟桶，「本周 / 本月」两者都用日汇总。
 - **nettop 的时间字段只有时钟没有日期**，`NettopSampleClock.date(for:)` 把「今天」的年月日嫁接上去；结果比当前时间晚 1 小时以上时回退一天，零点前采样、零点后处理的帧仍记入前一天。
 - 设置持久化：`UserDefaults` 键 `ByteTrace.usageRetentionPolicy`（默认 90 天）、`ByteTrace.readsMihomoConnections`（默认开启）、`ByteTrace.detectedProxyExecutables`（运行时识别出的代理内核路径）；登录时启动用 `SMAppService.mainApp`。
-- 导出 `formatVersion` 硬编码在 `exportCurrentRange(to:)`，结构变更时需同步 bump。
+- **主窗口只有一个应用列表**（按宿主），默认显示前 20 个（`collapsedRowLimit`），其余折叠到「显示其余 N 个」，只多出一两个时直接全部列出；菜单栏面板默认 10 个。没有单独的程序列表：点击应用行在行下展开详情（趋势、下行/上行、路径、排名），宿主里运行过其他程序时再列出程序排行（前 8 个，其余合并为「其他 N 个」，「应用本身」单独一项）。菜单栏与主窗口的行副标题写「含 X、Y 等 N 个程序」。虚拟宿主用 SF Symbols 图标（`AppIconView`）。
+- 导出 `formatVersion` 硬编码在 `exportCurrentRange(to:)`，结构变更时需同步 bump；当前为 5，含 `programUsage`。
 
 ## 代码风格约定
 
