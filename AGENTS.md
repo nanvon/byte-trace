@@ -46,7 +46,7 @@ ByteTrace 按 nettop 接口类型拆分成两个常驻通道，避免高功耗�
 
 **`-c` 是性能关键参数，不要移除**（man: "Less intensive use of the CPU - draws less often"）。在 `-L 0` 日志模式下它只跳过 curses 绘制，不改变采样周期与 CSV 输出：同时运行带／不带 `-c` 的两个补充通道 30 秒，帧数、有效行数、上下行字节完全一致（0.00% 差异），而补充通道 CPU 从 9.0% 降到 2.1%。这是实测结论而非文档保证，未来 macOS 升级后若出现帧率或数据异常，应优先排查这里。
 
-系统代理端点通过 `SCDynamicStoreCopyProxies` 首次读取，并监听 `State:/Network/Global/Proxies` 变化；只接受启用的 HTTP／HTTPS／SOCKS 本机回环端点，因此不写死 `7890`。补充通道丢弃其他本地 IPC、无明确端点的广播／通配连接，并在进程归属后丢弃代理进程的 utun 镜像；代理外层流量仍由外部通道单独展示、不反向抵扣、不计入应用总量。端点仅参与内存过滤，不落库、不展示。
+系统代理端点通过 `SCDynamicStoreCopyProxies` 首次读取，并监听 `State:/Network/Global/Proxies` 变化；只接受启用的 HTTP／HTTPS／SOCKS 本机回环端点，因此不写死 `7890`。补充通道丢弃其他本地 IPC、无明确端点的广播／通配连接，并在进程归属后丢弃代理进程的 utun 镜像；代理外层流量仍由外部通道单独记录（`proxy:` appKey）、不反向抵扣、不计入应用总量，界面不展示。端点仅参与内存过滤，不落库、不展示。
 
 ### mihomo 连接表（可选）
 
@@ -54,7 +54,7 @@ ByteTrace 按 nettop 接口类型拆分成两个常驻通道，避免高功耗�
 
 - 控制器发现顺序：已识别代理进程的启动参数（`-ext-ctl` / `-ext-ctl-unix` / `-secret`，以及 `-f` / `-d` 指向配置的顶层 `external-controller` / `secret`）→ `/tmp/verge/verge-mihomo.sock` → `127.0.0.1:9090`；找不到时每 30 秒重试；新识别出代理进程时立即重新查找，避免启动后前 30 秒的经代理流量都记为「出口未知」。代理内核常以 root 运行，参数通过 `KERN_PROCARGS2` 读取。
 - TCP 请求用不走系统代理的 `URLSession`；unix socket 用 POSIX 套接字发 HTTP/1.0，响应兼容 chunked。
-- 读不到连接表时补充通道仍记 `proxied`，总量不受影响。代理外层流量的「节点 / 规则直连」只按应用侧比例估算，仅在代理页展示，不计入应用总量，也不用 mihomo 的总字节数修正 nettop 结果。
+- 读不到连接表时补充通道仍记 `proxied`，总量不受影响。代理外层流量不在界面上展示，不计入应用总量，也不用 mihomo 的总字节数修正 nettop 结果。
 
 ### 数据流（正式管线）
 
@@ -86,12 +86,13 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 `ProcessAttributor.attribute()` 按固定优先级派生 `appKey`：
 
 ```
-proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径>  →  process:<名称>  →  unknown:<FNV哈希>
+proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  command:<名称>  →  exec:<路径>  →  process:<名称>  →  unknown:<FNV哈希>
 ```
 
 `appKey` 是 SQLite 的主键，**改动派生规则会切断历史数据的连续性**（老数据变成孤儿行），必须同时在 `UsageStore.migrate()` 追加合并迁移。
 
 - `exec:` 使用 `ExecutablePathNormalizer.normalize` 后的路径：版本号目录（`2.1.314`、`v24.17.0`、`0.164.0-aarch64-apple-darwin`）、内嵌版本（`node-v22.22.2` → `node-*`）、16 位以上十六进制哈希与 UUID 目录折叠成 `*`，让 mise / fnm / 自更新 CLI 的各版本合并为一个应用；规则对应 schema 7 的迁移。无应用包的进程展示名优先用路径派生名（nettop 进程名最多 15 字符，自更新 CLI 的进程名可能就是版本号）。
+- `command:` 是位于 `bin` / `sbin` 目录下的命令行工具（`ExecutablePathNormalizer.commandName`）：同名工具不论装在哪里合并为一条，如 `/usr/bin/curl` 与 Homebrew 的 curl、mise 与 fnm 的 node。`.app/` 内、`~/Library/Application Support/`、`.cache/` 下的应用附带工具和文件名含通配的路径不在此列，仍用 `exec:`。
 
 - `hostCandidate()` 会沿父进程链（最多 8 层）向上找「可执行文件位于其 `.app/Contents/` 内、且 bundlePath 最短」的祖先。这是 helper 进程（如浏览器子进程）能归属到主应用的原因。父进程已退出时，用解析器从可执行路径取出的最外层 `.app`（`ProcessIdentity.containingApplication`）兜底，如 Xcode 内置的 Python 归到 Xcode。
 - `launchingApplication()`：没有自己应用包（或应用包在 `~/Library/Application Support` 下，如 Claude 桌面版内置的 Claude Code）的进程，归到父进程链上第一个 GUI 应用，如 magpie 调起的 mise、Raycast 自带的 node。终端应用（`terminalBundleIDs`）不作为宿主；编辑器（`editorBundleIDs`）只收不经过 shell 的子进程，内置终端里运行的命令仍按命令行工具单独统计；代理应用不作为宿主。
@@ -100,8 +101,8 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 - `ProcessAttributionCache` 以 `(pid, processStartTime)` 为键，规避 pid 复用。
 - **展示辅助（不参与 appKey）**：没有宿主应用的进程由 `ProcessAttributor.launcherName(for:)` 沿父进程链找启动者（跳过 shell、launchd、系统目录工具和同一可执行文件），列表副标题显示「由 X 启动」；常见系统守护进程的中文用途在 `SystemProcessDescriptions`（按可执行文件名匹配，mDNSResponder 标为「局域网/Bonjour」）。进程在被解析前就退出时拿不到路径和父进程，这两项都为空。
 - **nsurlsessiond 无法归属到委托应用**：用后台 URLSession 实测，它的套接字 `epid` 是自己的 pid、`euuid` 是自己的二进制 UUID，nettop 不提供委托方信息，因此只显示用途说明，不要再尝试按 epid 拆分。
-- 分类 `AppCategory`：`userApp` / `systemProcess`（可执行文件位于 `/System/`、`/usr/bin/` 等前缀）/ `proxyTransport` / `unclassified`。
-- 新增代理进程：在 `ProxyClassifier.defaultClassifier` 加一条 `ProxyRule`（可按 bundleID / 可执行路径 / 进程名匹配）。静态规则之外，补充通道里本地端点等于系统代理端点的 lo0 连接所属进程（代理监听端）会被自动登记为代理（`TrafficFilter.proxyListenerProcessTokens` → `ProcessAttributionCache.registerDetectedProxy`），路径持久化在 `UserDefaults` 键 `ByteTrace.detectedProxyExecutables`；代理内核常以 root 运行，lsof 看不到它的监听套接字，所以用 nettop 数据识别。代理流量**单独展示、不做反向抵扣、不计入应用总量**——UI 各处统一用 `category != .proxyTransport` 过滤，新增汇总逻辑时必须沿用。
+- 分类 `AppCategory`：`userApp` / `systemProcess`（可执行文件位于 `/System/`、`/usr/libexec/`、`/usr/sbin/` 等系统守护进程目录；`/usr/bin/`、`/bin/` 下是用户运行的命令行工具，不算）/ `proxyTransport` / `unclassified`。界面不按分类分组：菜单栏和主窗口只有一个应用列表，系统进程与命令行工具一并列出；分类只用于图标、用途说明和排除代理传输。
+- 新增代理进程：在 `ProxyClassifier.defaultClassifier` 加一条 `ProxyRule`（可按 bundleID / 可执行路径 / 进程名匹配）。静态规则之外，补充通道里本地端点等于系统代理端点的 lo0 连接所属进程（代理监听端）会被自动登记为代理（`TrafficFilter.proxyListenerProcessTokens` → `ProcessAttributionCache.registerDetectedProxy`），路径持久化在 `UserDefaults` 键 `ByteTrace.detectedProxyExecutables`；代理内核常以 root 运行，lsof 看不到它的监听套接字，所以用 nettop 数据识别。代理流量**单独记录、不做反向抵扣、不计入应用总量、界面不展示**（总量卡片已有经代理流量）——UI 各处统一用 `category != .proxyTransport` 过滤，新增汇总逻辑时必须沿用。
 
 ## 存储
 
@@ -109,9 +110,9 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 六张表：`apps`、`daily_usage`（键 `accounting_version`+`day`+`app_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`，分钟粒度）、`daily_route_usage`（键 `accounting_version`+`day`+`app_key`+`route`）、`app_launchers`（键 `app_key`，命令行进程最近一次的启动者，覆盖写入、仅用于展示）、`collector_events`。
 
-**流量路径**（`TrafficRoute`）：外部通道的非代理进程记 `direct`；补充通道（系统代理 lo0 / TUN utun）记 `proxied`，读到 mihomo 连接表时细分为 `proxy_node` / `proxy_rule_direct`。路径只写 `daily_route_usage` 一张旁表，`daily_usage` / `usage_buckets` 的总量与口径不变；代理传输不记路径。路径上线前的历史没有路径行，界面把「日汇总 − 路径合计」显示为「未区分」。「最近 1 小时」没有分钟级路径，按今天的拆分近似并注明。卡片标题与列表行的「走节点 X%」／「经代理 X%」只在已区分路径的流量里计算，且已区分部分不足全部流量的一半时不显示（`RouteBreakdown.Share.isRepresentative`），避免升级初期被「未区分」压成接近 0；覆盖不足 99% 时标题加「已区分部分中」。代理页的「代理外层流量去向（估算）」同理：应用侧有路径记录的经代理流量不足代理外层字节的一半时不显示。
+**流量路径**（`TrafficRoute`）：外部通道的非代理进程记 `direct`；补充通道（系统代理 lo0 / TUN utun）记 `proxied`，读到 mihomo 连接表时细分为 `proxy_node` / `proxy_rule_direct`。路径只写 `daily_route_usage` 一张旁表，`daily_usage` / `usage_buckets` 的总量与口径不变；代理传输不记路径。路径上线前的历史没有路径行，界面把「日汇总 − 路径合计」显示为「未区分」。「最近 1 小时」没有分钟级路径，按今天的拆分近似并注明。卡片标题与列表行的「走节点 X%」／「经代理 X%」只在已区分路径的流量里计算，且已区分部分不足全部流量的一半时不显示（`RouteBreakdown.Share.isRepresentative`），避免升级初期被「未区分」压成接近 0；覆盖不足 99% 时标题加「已区分部分中」。
 
-**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 10`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径；版本 8 新增 `daily_route_usage`；版本 9 新增 `app_launchers`；版本 10 按归属新规则合并历史记录：嵌套 `.app` 归外层应用、`~/Library/Application Support/<目录>/` 下的附属包归到展示名等于该目录名的唯一应用、同名只对应一个已解析记录的 `process:` 记录归到该记录。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
+**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 10`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径；版本 8 新增 `daily_route_usage`；版本 9 新增 `app_launchers`；版本 10 按归属新规则合并历史记录：嵌套 `.app` 归外层应用、`~/Library/Application Support/<目录>/` 下的附属包归到展示名等于该目录名的唯一应用、同名只对应一个已解析记录的 `process:` 记录归到该记录、`exec:` 路径在 `~/Library/Application Support/<bundle ID>/` 或 `.cache/<应用名>/` 下的工具归到对应的唯一应用（如 Raycast 内置 node、magpie-bun）。合并前先把 `bin` / `sbin` 下工具的 `exec:` 记录按文件名并到 `command:<名称>`（`mergeCommandLineToolKeys`，`/usr/bin/`、`/bin/` 记录的 `system_process` 分类同时改为 `unclassified`）。这套合并在已是版本 10 的库每次打开时都会再跑一次（`mergeLateHostApplicationKeys`），迁移后由旧版本写入或名称缓存未命中拆出的记录也会并入；只搬移行，失败回滚且不影响打开。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
 
 **写入是累加而非幂等**：所有 upsert 都是 `ON CONFLICT ... DO UPDATE SET x = x + excluded.x`。同一批聚合重复 flush 会双计。`flush()` 成功后必须清空 pending（现有代码已如此）。
 
@@ -133,7 +134,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
   **因此数据保留策略不能挂在 `refresh()` 里**——它已移到 `flushTimerFired`，否则无人打开界面时清理永远不会执行。
 - **「今天」是双数据源**：汇总数字来自 `daily_usage`，趋势图来自 `usage_buckets`（`usesBucketSummary` 与 `usesFineGrainedTimeline` 两个开关分别控制）。「最近 10 分钟 / 1 小时」两者都用分钟桶，「本周 / 本月」两者都用日汇总。
 - **nettop 的时间字段只有时钟没有日期**，`NettopSampleClock.date(for:)` 把「今天」的年月日嫁接上去；结果比当前时间晚 1 小时以上时回退一天，零点前采样、零点后处理的帧仍记入前一天。
-- 设置持久化：`UserDefaults` 键 `ByteTrace.showSystemProcesses`、`ByteTrace.usageRetentionPolicy`（默认 90 天）、`ByteTrace.readsMihomoConnections`（默认开启）、`ByteTrace.detectedProxyExecutables`（运行时识别出的代理内核路径）；登录时启动用 `SMAppService.mainApp`。
+- 设置持久化：`UserDefaults` 键 `ByteTrace.usageRetentionPolicy`（默认 90 天）、`ByteTrace.readsMihomoConnections`（默认开启）、`ByteTrace.detectedProxyExecutables`（运行时识别出的代理内核路径）；登录时启动用 `SMAppService.mainApp`。
 - 导出 `formatVersion` 硬编码在 `exportCurrentRange(to:)`，结构变更时需同步 bump。
 
 ## 代码风格约定

@@ -8,17 +8,12 @@ struct MenuBarView: View {
 
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage("ByteTrace.menuBar.proxySectionExpanded") private var isProxyExpanded = false
-    @AppStorage("ByteTrace.menuBar.systemSectionExpanded") private var isSystemExpanded = false
     @State private var showsMoreApplications = false
-    @State private var showsMoreSystemProcesses = false
-    @State private var showsMoreProxyProcesses = false
     /// 滚动内容的实际高度；初值是常见内容的估计，避免首帧高度为 0。
     @State private var contentHeight: CGFloat = 560
 
-    private let collapsedRowLimit = 5
+    private let collapsedRowLimit = 10
     private let expandedRowLimit = 15
-    private let collapsedSectionRowLimit = 3
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,6 +53,7 @@ struct MenuBarView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .pointingHandCursor()
+                    .focusable(false)
                 }
                 .font(.caption)
                 .padding(.horizontal, 16)
@@ -130,6 +126,7 @@ struct MenuBarView: View {
         }
         .buttonStyle(ByteTraceActionButtonStyle())
         .pointingHandCursor()
+        .focusable(false)
         .accessibilityLabel(label)
         .help(label)
     }
@@ -156,6 +153,7 @@ struct MenuBarView: View {
             }
             .controlSize(.small)
             .pointingHandCursor()
+            .focusable(false)
         }
         .padding(12)
         .cardSurface()
@@ -250,11 +248,12 @@ struct MenuBarView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("全部应用") {
-                    openMainWindow(section: .applications)
+                    openMainWindow(showsAppList: true)
                 }
                 .buttonStyle(.link)
                 .font(.callout)
                 .pointingHandCursor()
+                .focusable(false)
             }
             .padding(.horizontal, 6)
             .padding(.top, 14)
@@ -271,87 +270,22 @@ struct MenuBarView: View {
                     expandableRows(
                         applications,
                         collapsedLimit: collapsedRowLimit,
-                        isExpanded: $showsMoreApplications,
-                        section: .applications,
-                        noun: "个应用"
+                        isExpanded: $showsMoreApplications
                     )
                 }
             }
             .padding(.vertical, 4)
             .cardSurface()
-
-            if hasSeparateSection {
-                separateSection
-                    .padding(.top, 10)
-            }
         }
     }
 
-    private var hasSeparateSection: Bool {
-        !model.proxyRecords.isEmpty || (model.showsSystemProcesses && !model.systemRecords.isEmpty)
-    }
-
-    private var separateSection: some View {
-        VStack(spacing: 0) {
-            if model.showsSystemProcesses, !model.systemRecords.isEmpty {
-                CollapsibleSectionCard(
-                    symbolName: "desktopcomputer",
-                    tint: .secondary,
-                    title: "系统与后台进程",
-                    subtitle: "\(model.systemRecords.count) 个进程",
-                    bytes: systemTotalBytes,
-                    isExpanded: $isSystemExpanded
-                ) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        expandableRows(
-                            model.systemRecords,
-                            collapsedLimit: collapsedSectionRowLimit,
-                            isExpanded: $showsMoreSystemProcesses,
-                            section: .system,
-                            noun: "个进程"
-                        )
-                    }
-                    .padding(.bottom, 4)
-                }
-            }
-            if !model.proxyRecords.isEmpty, model.showsSystemProcesses, !model.systemRecords.isEmpty {
-                Divider()
-                    .padding(.leading, 50)
-            }
-            if !model.proxyRecords.isEmpty {
-                CollapsibleSectionCard(
-                    symbolName: "arrow.triangle.2.circlepath",
-                    tint: TrafficColor.proxy,
-                    title: "代理传输",
-                    subtitle: "\(proxyNames) · 不计入总量",
-                    bytes: model.proxyTotals.totalBytes,
-                    isExpanded: $isProxyExpanded
-                ) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        expandableRows(
-                            model.proxyRecords,
-                            collapsedLimit: collapsedSectionRowLimit,
-                            isExpanded: $showsMoreProxyProcesses,
-                            section: .proxy,
-                            noun: "个代理进程"
-                        )
-                    }
-                    .padding(.bottom, 4)
-                }
-            }
-        }
-        .cardSurface()
-    }
-
-    /// 应用、系统进程、代理传输三处共用：折叠时列出前几行，展开到 `expandedRowLimit` 行，
-    /// 仍有剩余时给出跳转主窗口对应页面的入口。折叠后只差一行时直接全部列出，不为一行单独放按钮。
+    /// 折叠时列出前几行，展开到 `expandedRowLimit` 行，仍有剩余时给出跳转主窗口全部应用的入口。
+    /// 折叠后只差一行时直接全部列出，不为一行单独放按钮。
     @ViewBuilder
     private func expandableRows(
         _ records: [DailyUsageRecord],
         collapsedLimit: Int,
-        isExpanded: Binding<Bool>,
-        section: MainWindowSection,
-        noun: String
+        isExpanded: Binding<Bool>
     ) -> some View {
         let canExpand = records.count > collapsedLimit + 1
         let expandedCount = min(records.count, expandedRowLimit)
@@ -367,19 +301,20 @@ struct MenuBarView: View {
             showMoreButton(isExpanded: isExpanded, moreCount: expandedCount - collapsedLimit)
         }
         if canExpand, isExpanded.wrappedValue, records.count > expandedRowLimit {
-            sectionLink(count: records.count, section: section, noun: noun)
+            allApplicationsLink(count: records.count)
         }
     }
 
-    private func sectionLink(count: Int, section: MainWindowSection, noun: String) -> some View {
-        Button("在主窗口查看全部 \(count) \(noun)") {
-            openMainWindow(section: section)
+    private func allApplicationsLink(count: Int) -> some View {
+        Button("在主窗口查看全部 \(count) 个应用") {
+            openMainWindow(showsAppList: true)
         }
         .buttonStyle(.link)
         .font(.callout)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .pointingHandCursor()
+        .focusable(false)
     }
 
     private func showMoreButton(isExpanded: Binding<Bool>, moreCount: Int) -> some View {
@@ -402,33 +337,22 @@ struct MenuBarView: View {
         .buttonStyle(.plain)
         .interactiveHoverHighlight(cornerRadius: 6)
         .pointingHandCursor()
+        .focusable(false)
         .padding(.horizontal, 4)
     }
 
-    private var proxyNames: String {
-        let names = model.proxyRecords.prefix(2).map(\.displayName)
-        let suffix = model.proxyRecords.count > 2 ? " 等" : ""
-        return names.joined(separator: "、") + suffix
-    }
-
-    private var systemTotalBytes: Int64 {
-        model.systemRecords.reduce(Int64(0)) { partial, record in
-            let total = UsageRowView.totalBytes(of: record)
-            let result = partial.addingReportingOverflow(total)
-            return result.overflow ? Int64.max : result.partialValue
-        }
-    }
-
-    private func openMainWindow(section: MainWindowSection? = nil) {
-        model.requestedMainWindowSection = section
+    private func openMainWindow(showsAppList: Bool = false) {
+        model.requestsMainWindowAppList = showsAppList
         ByteTraceAppDelegate.prepareMainWindow()
         openWindow(id: "main")
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
+    /// 设置是主窗口里的独立页面：打开主窗口并进入设置页。
     private func openSettingsWindow() {
+        model.requestsMainWindowSettings = true
         ByteTraceAppDelegate.prepareMainWindow()
-        openWindow(id: "settings")
+        openWindow(id: "main")
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
@@ -583,69 +507,6 @@ private struct HourSparkline: View {
     }
 }
 
-/// 代理传输、系统与后台进程的可折叠分组：标题行显示汇总，点击展开具体进程。
-private struct CollapsibleSectionCard<Content: View>: View {
-    let symbolName: String
-    let tint: Color
-    let title: String
-    let subtitle: String
-    let bytes: Int64
-    @Binding var isExpanded: Bool
-    @ViewBuilder let content: () -> Content
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Button {
-                withAnimation(reduceMotion ? nil : .smooth(duration: 0.22)) {
-                    isExpanded.toggle()
-                }
-            } label: {
-                // 图标尺寸、内边距和两行间距与 UsageRowView 一致，标题、合计与下方进程行对齐且等高；
-                // 展开箭头跟在标题后面，不占用右侧合计列。
-                HStack(spacing: 10) {
-                    Image(systemName: symbolName)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(tint)
-                        .frame(width: 28, height: 28)
-                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(title)
-                            Image(systemName: "chevron.right")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                                .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        }
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    Text(ByteTraceViewModel.formatBytes(bytes))
-                        .fontWeight(.semibold)
-                        .monospacedDigit()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .interactiveHoverHighlight(cornerRadius: 12)
-            .pointingHandCursor()
-            .accessibilityValue(isExpanded ? "已展开" : "已收起")
-            .help(isExpanded ? "收起\(title)" : "展开\(title)")
-
-            if isExpanded {
-                content()
-                    .transition(.opacity)
-            }
-        }
-    }
-}
-
 private struct UsageRows: View {
     let records: [DailyUsageRecord]
     let onSelect: (String) -> Void
@@ -668,6 +529,7 @@ private struct UsageRows: View {
                 .buttonStyle(.plain)
                 .interactiveHoverHighlight(cornerRadius: 6)
                 .pointingHandCursor()
+                .focusable(false)
                 // 「由 X 启动」和进程用途不占行内空间，悬停时与跳转提示一起显示。
                 .help(help(for: record))
             }

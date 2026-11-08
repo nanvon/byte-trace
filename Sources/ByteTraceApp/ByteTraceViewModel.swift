@@ -25,23 +25,6 @@ struct UsageTotals: Equatable {
     }
 }
 
-/// 主窗口里的分组；菜单栏据此展开并滚动到对应分组。
-enum MainWindowSection: String, Hashable, Identifiable, CaseIterable {
-    case applications
-    case system
-    case proxy
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .applications: return "应用"
-        case .system: return "系统进程"
-        case .proxy: return "代理传输"
-        }
-    }
-}
-
 enum UsageTimeRange: String, CaseIterable, Identifiable {
     case lastHour
     case today
@@ -326,10 +309,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var todayRouteSplit: RouteSplit = .empty
     @Published private(set) var status: MonitorStatus = .stopped
     @Published private(set) var lastError: String?
-    /// 菜单栏请求主窗口展开并滚动到的分组；主窗口处理后置回 nil。
-    @Published var requestedMainWindowSection: MainWindowSection?
+    /// 菜单栏「全部应用」请求主窗口列出全部应用并滚动到列表；主窗口处理后置回 false。
+    @Published var requestsMainWindowAppList = false
     /// 从菜单栏点击某个应用后，主窗口据此选中该行并打开详情栏；处理后置回 nil。
     @Published var pendingAppDetailKey: String?
+    /// 菜单栏齿轮或 ⌘, 请求打开主窗口的设置页；处理后置回 false。
+    @Published var requestsMainWindowSettings = false
     @Published var selectedRange: UsageTimeRange = .today {
         didSet {
             guard oldValue != selectedRange else { return }
@@ -353,14 +338,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var dailyRangeRecords: [DailyUsageRecord] = []
     private var activeDetailAppKey: String?
     @Published private(set) var launchAtLoginEnabled: Bool
-    @Published var showsSystemProcesses: Bool {
-        didSet {
-            UserDefaults.standard.set(
-                showsSystemProcesses,
-                forKey: Self.showSystemProcessesKey
-            )
-        }
-    }
     @Published var usageRetentionPolicy: UsageRetentionPolicy {
         didSet {
             guard oldValue != usageRetentionPolicy else { return }
@@ -382,7 +359,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var mihomoStatus: MihomoConnectionStatus = .idle
     let databaseURL: URL
 
-    private static let showSystemProcessesKey = "ByteTrace.showSystemProcesses"
     private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
     private static let detectedProxyExecutablesKey = "ByteTrace.detectedProxyExecutables"
     private static let readsMihomoConnectionsKey = "ByteTrace.readsMihomoConnections"
@@ -464,11 +440,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         attributionCache = ProcessAttributionCache()
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
 
-        let storedPreference = UserDefaults.standard.object(
-            forKey: Self.showSystemProcessesKey
-        ) as? Bool
-        _showsSystemProcesses = Published(initialValue: storedPreference ?? true)
-
         let storedRetentionPolicy = UserDefaults.standard.string(
             forKey: Self.usageRetentionPolicyKey
         )
@@ -516,32 +487,22 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         wantsCollection
     }
 
+    /// 应用列表：系统进程与命令行工具一并列出；代理传输不计入总量，不在列表里展示。
     var applicationRecords: [DailyUsageRecord] {
-        records.filter { $0.category == .userApp || $0.category == .unclassified }
+        records.filter { $0.category != .proxyTransport }
     }
 
-    var proxyRecords: [DailyUsageRecord] {
-        records.filter { $0.category == .proxyTransport }
-    }
-
-    var systemRecords: [DailyUsageRecord] {
-        records.filter { $0.category == .systemProcess }
+    /// 主窗口当前时间范围的应用列表，口径同 `applicationRecords`。
+    var rangeApplicationRecords: [DailyUsageRecord] {
+        rangeRecords.filter { $0.category != .proxyTransport }
     }
 
     var todayTotals: UsageTotals {
         totals(from: records.filter { $0.category != .proxyTransport })
     }
 
-    var proxyTotals: UsageTotals {
-        totals(from: proxyRecords)
-    }
-
     var selectedRangeTotals: UsageTotals {
         totals(from: rangeRecords.filter { $0.category != .proxyTransport })
-    }
-
-    var selectedRangeProxyTotals: UsageTotals {
-        totals(from: rangeRecords.filter { $0.category == .proxyTransport })
     }
 
     var dayKey: String {
@@ -828,24 +789,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 (totalBytes(for: $0), rangeRouteUsage[$0.appKey] ?? [:])
             },
             reference: rangeRouteReference
-        )
-    }
-
-    /// 代理外层流量按应用侧「代理节点 / 规则直连」比例估算去向。没有 mihomo 路径数据时返回 nil。
-    func proxyTransportEstimate(proxyBytes: Int64) -> RouteSplit? {
-        let node = rangeRouteReference[.proxyNode] ?? 0
-        let ruleDirect = rangeRouteReference[.proxyRuleDirect] ?? 0
-        let unknownExit = rangeRouteReference[.proxied] ?? 0
-        let known = saturatingAdd(node, ruleDirect)
-        guard proxyBytes > 0, known > 0 else { return nil }
-        // 应用侧有路径记录的经代理流量不足代理外层的一半时（多为更新前的数据），比例代表性不足，不估算。
-        guard Double(saturatingAdd(known, unknownExit)) >= Double(proxyBytes) * 0.5 else { return nil }
-        let nodeBytes = Int64(Double(proxyBytes) * Double(node) / Double(known))
-        return RouteSplit(
-            directBytes: proxyBytes - nodeBytes,
-            proxyBytes: nodeBytes,
-            unknownBytes: 0,
-            totalBytes: proxyBytes
         )
     }
 
