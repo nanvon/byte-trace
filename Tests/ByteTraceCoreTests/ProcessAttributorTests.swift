@@ -66,7 +66,7 @@ final class ProcessAttributorTests: XCTestCase {
         XCTAssertEqual(attributed.category, .userApp)
     }
 
-    func testGenericCLIIsNotMergedWithParentApplication() {
+    func testCLILaunchedByApplicationIsMergedIntoIt() {
         let identity = ProcessIdentity(
             pid: 20,
             nettopProcessName: "curl",
@@ -84,9 +84,207 @@ final class ProcessAttributorTests: XCTestCase {
 
         let attributed = ProcessAttributor().attribute(identity)
 
-        XCTAssertEqual(attributed.appKey, "exec:/usr/bin/curl")
-        XCTAssertNil(attributed.bundleID)
-        XCTAssertEqual(attributed.category, .systemProcess)
+        XCTAssertEqual(attributed.appKey, "bundle:com.example.browser")
+        XCTAssertEqual(attributed.displayName, "Browser")
+        XCTAssertEqual(attributed.category, .userApp)
+        XCTAssertNil(attributed.launcherName)
+    }
+
+    func testCLILaunchedThroughShellByApplicationIsMergedButTerminalIsNot() {
+        let shell = ProcessAncestor(pid: 50, executablePath: "/bin/zsh")
+        let magpie = ProcessAncestor(
+            pid: 49,
+            executablePath: "/Applications/magpie.app/Contents/MacOS/magpie",
+            bundleID: "com.yetone.magpie",
+            bundlePath: "/Applications/magpie.app",
+            displayName: "magpie"
+        )
+        let ghostty = ProcessAncestor(
+            pid: 48,
+            executablePath: "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+            bundleID: "com.mitchellh.ghostty",
+            bundlePath: "/Applications/Ghostty.app",
+            displayName: "Ghostty"
+        )
+        let attributor = ProcessAttributor()
+
+        let viaApp = attributor.attribute(
+            ProcessIdentity(
+                pid: 51,
+                nettopProcessName: "mise",
+                executablePath: "/Users/u/.local/bin/mise",
+                ancestors: [shell, magpie]
+            )
+        )
+        let viaTerminal = attributor.attribute(
+            ProcessIdentity(
+                pid: 52,
+                nettopProcessName: "mise",
+                executablePath: "/Users/u/.local/bin/mise",
+                ancestors: [shell, ghostty]
+            )
+        )
+
+        XCTAssertEqual(viaApp.appKey, "bundle:com.yetone.magpie")
+        XCTAssertEqual(viaApp.category, .userApp)
+        XCTAssertEqual(viaTerminal.appKey, "exec:/Users/u/.local/bin/mise")
+        XCTAssertEqual(viaTerminal.category, .unclassified)
+    }
+
+    func testEditorKeepsIntegratedTerminalCommandsButMergesExtensions() {
+        let editor = ProcessAncestor(
+            pid: 60,
+            executablePath: "/Applications/Visual Studio Code.app/Contents/MacOS/Code",
+            bundleID: "com.microsoft.VSCode",
+            bundlePath: "/Applications/Visual Studio Code.app",
+            displayName: "Code"
+        )
+        let pluginHost = ProcessAncestor(
+            pid: 61,
+            executablePath: "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)",
+            bundleID: "com.microsoft.VSCode.helper",
+            bundlePath: "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app",
+            displayName: "Code Helper (Plugin)"
+        )
+        let attributor = ProcessAttributor()
+
+        let extensionProcess = attributor.attribute(
+            ProcessIdentity(
+                pid: 62,
+                nettopProcessName: "ai-agent",
+                executablePath: "/Users/u/.marscode/ai-chat/binary/1.0/modules/ai-agent/ai-agent",
+                ancestors: [pluginHost, editor]
+            )
+        )
+        let terminalCommand = attributor.attribute(
+            ProcessIdentity(
+                pid: 63,
+                nettopProcessName: "claude",
+                executablePath: "/Users/u/.local/share/claude/versions/2.1.314",
+                ancestors: [ProcessAncestor(pid: 64, executablePath: "/bin/zsh"), pluginHost, editor]
+            )
+        )
+
+        XCTAssertEqual(extensionProcess.appKey, "bundle:com.microsoft.VSCode")
+        XCTAssertEqual(extensionProcess.displayName, "Code")
+        XCTAssertEqual(terminalCommand.appKey, "exec:/Users/u/.local/share/claude/versions/*")
+    }
+
+    func testApplicationSupportBundleIsMergedIntoLaunchingApplication() {
+        let claude = ProcessAncestor(
+            pid: 70,
+            executablePath: "/Applications/Claude.app/Contents/MacOS/Claude",
+            bundleID: "com.anthropic.claudefordesktop",
+            bundlePath: "/Applications/Claude.app",
+            displayName: "Claude"
+        )
+        let disclaimer = ProcessAncestor(
+            pid: 71,
+            executablePath: "/Applications/Claude.app/Contents/Helpers/disclaimer",
+            bundleID: "com.anthropic.claudefordesktop",
+            bundlePath: "/Applications/Claude.app",
+            displayName: "Claude"
+        )
+        let claudeCodePath = "/Users/u/Library/Application Support/Claude/claude-code/2.1.317/abc/claude.app"
+        let claudeCode = ProcessAncestor(
+            pid: 72,
+            executablePath: claudeCodePath + "/Contents/MacOS/claude",
+            bundleID: "com.anthropic.claude-code",
+            bundlePath: claudeCodePath,
+            displayName: "Claude Code"
+        )
+        let attributor = ProcessAttributor()
+
+        let agent = attributor.attribute(
+            ProcessIdentity(
+                pid: 72,
+                nettopProcessName: "claude",
+                executablePath: claudeCodePath + "/Contents/MacOS/claude",
+                bundleID: "com.anthropic.claude-code",
+                bundlePath: claudeCodePath,
+                displayName: "Claude Code",
+                ancestors: [disclaimer, claude]
+            )
+        )
+        let tool = attributor.attribute(
+            ProcessIdentity(
+                pid: 73,
+                nettopProcessName: "gh",
+                executablePath: "/opt/homebrew/Cellar/gh/2.80.0/bin/gh",
+                ancestors: [ProcessAncestor(pid: 74, executablePath: "/bin/zsh"), claudeCode, disclaimer, claude]
+            )
+        )
+
+        XCTAssertEqual(agent.appKey, "bundle:com.anthropic.claudefordesktop")
+        XCTAssertEqual(agent.displayName, "Claude")
+        XCTAssertEqual(tool.appKey, "bundle:com.anthropic.claudefordesktop")
+    }
+
+    func testNestedAppUsesOutermostApplicationWithoutParent() {
+        let pythonApp = "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app"
+        let executable = pythonApp + "/Contents/MacOS/Python"
+        let containing = SystemProcessIdentityResolver.containingApplication(
+            for: executable,
+            ownBundlePath: pythonApp
+        )
+        XCTAssertEqual(containing?.bundlePath, "/Applications/Xcode.app")
+        XCTAssertNil(
+            SystemProcessIdentityResolver.containingApplication(
+                for: "/Applications/Xcode.app/Contents/MacOS/Xcode",
+                ownBundlePath: "/Applications/Xcode.app"
+            )
+        )
+
+        let attributed = ProcessAttributor().attribute(
+            ProcessIdentity(
+                pid: 80,
+                nettopProcessName: "Python",
+                executablePath: executable,
+                bundleID: "com.apple.python3",
+                bundlePath: pythonApp,
+                displayName: "Python",
+                containingApplication: ContainingApplication(
+                    bundleID: "com.apple.dt.Xcode",
+                    bundlePath: "/Applications/Xcode.app",
+                    displayName: "Xcode"
+                )
+            )
+        )
+
+        XCTAssertEqual(attributed.appKey, "bundle:com.apple.dt.Xcode")
+        XCTAssertEqual(attributed.displayName, "Xcode")
+        XCTAssertEqual(attributed.category, .userApp)
+    }
+
+    func testExitedProcessReusesLastAttributionWithSameName() {
+        let cache = ProcessAttributionCache()
+        let resolved = cache.attribute(
+            ProcessIdentity(
+                pid: 90,
+                processStartTime: Date(timeIntervalSince1970: 100),
+                nettopProcessName: "Discord Helper",
+                executablePath: "/Applications/Discord.app/Contents/Frameworks/Discord Helper.app/Contents/MacOS/Discord Helper",
+                bundleID: "com.hnc.Discord.helper",
+                bundlePath: "/Applications/Discord.app/Contents/Frameworks/Discord Helper.app",
+                ancestors: [
+                    ProcessAncestor(
+                        pid: 89,
+                        executablePath: "/Applications/Discord.app/Contents/MacOS/Discord",
+                        bundleID: "com.hnc.Discord",
+                        bundlePath: "/Applications/Discord.app",
+                        displayName: "Discord"
+                    )
+                ]
+            )
+        )
+        let exited = cache.attribute(ProcessIdentity(pid: 91, nettopProcessName: "Discord Helper"))
+        let unknown = cache.attribute(ProcessIdentity(pid: 92, nettopProcessName: "never-seen"))
+
+        XCTAssertEqual(resolved.appKey, "bundle:com.hnc.Discord")
+        XCTAssertEqual(exited.appKey, "bundle:com.hnc.Discord")
+        XCTAssertEqual(exited.category, .userApp)
+        XCTAssertEqual(exited.pid, 91)
+        XCTAssertEqual(unknown.appKey, "process:never-seen")
     }
 
     func testVersionedExecutablesShareOneKeyAndStableName() {

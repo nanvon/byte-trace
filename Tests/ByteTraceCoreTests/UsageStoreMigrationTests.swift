@@ -219,6 +219,83 @@ final class UsageStoreMigrationTests: XCTestCase {
         XCTAssertEqual(try migrated.scalarInt64("PRAGMA user_version;"), UsageStore.schemaVersion)
     }
 
+    func testHostApplicationKeysMergeOnlyWhenTheHostIsCertain() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("byte-trace-host-merge-\(UUID().uuidString).sqlite3")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + "-wal")
+            try? FileManager.default.removeItem(atPath: url.path + "-shm")
+        }
+
+        let database = try SQLiteDatabase(url: url)
+        try createVersionFiveTables(in: database)
+        let support = "/Users/u/Library/Application Support"
+        try database.execute(
+            """
+            INSERT INTO apps VALUES ('bundle:com.example.host', 'com.example.host', '/Applications/Host.app', '/Applications/Host.app/Contents/MacOS/Host', 'Host', 'user_app', '1754000100.000000', '1754000100.000000');
+            INSERT INTO apps VALUES ('bundle:com.example.host.updater', 'com.example.host.updater', '/Applications/Host.app/Contents/Library/Updater.app', '/Applications/Host.app/Contents/Library/Updater.app/Contents/MacOS/Updater', 'Updater', 'user_app', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('bundle:com.anthropic.claudefordesktop', 'com.anthropic.claudefordesktop', '/Applications/Claude.app', '/Applications/Claude.app/Contents/MacOS/Claude', 'Claude', 'user_app', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('bundle:com.anthropic.claude-code', 'com.anthropic.claude-code', '\(support)/Claude/claude-code/2.1/abc/claude.app', '\(support)/Claude/claude-code/2.1/abc/claude.app/Contents/MacOS/claude', 'Claude Code', 'user_app', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('bundle:com.google.GoogleUpdater', 'com.google.GoogleUpdater', '\(support)/Google/GoogleUpdater/1.0/GoogleUpdater.app', '\(support)/Google/GoogleUpdater/1.0/GoogleUpdater.app/Contents/MacOS/GoogleUpdater', 'GoogleUpdater', 'user_app', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('bundle:com.yetone.magpie', 'com.yetone.magpie', '/Applications/magpie.app', '/Applications/magpie.app/Contents/MacOS/magpie', 'magpie', 'user_app', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('exec:/usr/bin/curl', NULL, NULL, '/usr/bin/curl', 'curl', 'system_process', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('exec:/opt/homebrew/Cellar/curl/*/bin/curl', NULL, NULL, '/opt/homebrew/Cellar/curl/8.0/bin/curl', 'curl', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('exec:/Users/u/.local/share/claude/versions/*', NULL, NULL, '/Users/u/.local/share/claude/versions/2.1.300', 'claude', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('process:magpie', NULL, NULL, NULL, 'magpie', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('process:Updater', NULL, NULL, NULL, 'Updater', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('process:curl', NULL, NULL, NULL, 'curl', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO apps VALUES ('process:2.1.314', NULL, NULL, NULL, '2.1.314', 'unclassified', '1754000000.000000', '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'bundle:com.example.host', 100, 10, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'bundle:com.example.host.updater', 20, 2, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'process:Updater', 3, 0, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'bundle:com.anthropic.claudefordesktop', 50, 5, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'bundle:com.anthropic.claude-code', 70, 7, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'bundle:com.google.GoogleUpdater', 9, 0, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'bundle:com.yetone.magpie', 40, 4, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'process:magpie', 6, 1, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'process:curl', 8, 0, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'exec:/Users/u/.local/share/claude/versions/*', 30, 3, 1, '1754000000.000000');
+            INSERT INTO daily_usage VALUES ('2025-07-18', 'process:2.1.314', 2, 0, 1, '1754000000.000000');
+            INSERT INTO usage_buckets VALUES (1754000000, 'bundle:com.anthropic.claude-code', 70, 7, 1, '1754000000.000000');
+            PRAGMA user_version = 5;
+            """
+        )
+
+        _ = try UsageStore(databaseURL: url)
+        let migrated = try SQLiteDatabase(url: url)
+        func download(_ appKey: String) throws -> Int64 {
+            try migrated.scalarInt64(
+                "SELECT COALESCE(SUM(download_bytes), -1) FROM daily_usage WHERE app_key = '\(appKey)';"
+            )
+        }
+        func appCount(_ appKey: String) throws -> Int64 {
+            try migrated.scalarInt64("SELECT COUNT(*) FROM apps WHERE app_key = '\(appKey)';")
+        }
+
+        XCTAssertEqual(try download("bundle:com.example.host"), 123)
+        XCTAssertEqual(try appCount("bundle:com.example.host.updater"), 0)
+        XCTAssertEqual(try appCount("process:Updater"), 0)
+        XCTAssertEqual(
+            try migrated.scalarInt64("SELECT COUNT(*) FROM apps WHERE app_key = 'bundle:com.example.host' AND first_seen_at = '1754000000.000000';"),
+            1
+        )
+        XCTAssertEqual(try download("bundle:com.anthropic.claudefordesktop"), 120)
+        XCTAssertEqual(
+            try migrated.scalarInt64("SELECT download_bytes FROM usage_buckets WHERE app_key = 'bundle:com.anthropic.claudefordesktop';"),
+            70
+        )
+        XCTAssertEqual(try download("bundle:com.google.GoogleUpdater"), 9)
+        XCTAssertEqual(try download("bundle:com.yetone.magpie"), 46)
+        XCTAssertEqual(try download("exec:/Users/u/.local/share/claude/versions/*"), 32)
+        XCTAssertEqual(try download("process:curl"), 8)
+        XCTAssertEqual(
+            try migrated.scalarInt64("SELECT SUM(download_bytes) FROM daily_usage;"),
+            338
+        )
+        XCTAssertEqual(try migrated.scalarInt64("PRAGMA user_version;"), UsageStore.schemaVersion)
+    }
+
     private func seedLegacyCCBarUsage(at url: URL, sampleDate: Date) throws {
         let database = try SQLiteDatabase(url: url)
         try createVersionFiveTables(in: database)

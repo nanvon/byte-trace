@@ -57,6 +57,20 @@ public struct ProcessAncestor: Equatable, Sendable {
     }
 }
 
+/// 可执行文件路径上最外层的 `.app` 包。只在它与进程自身的应用包不同时才有值，
+/// 例如 `Xcode.app/Contents/…/Python.app` 里的 Python，用于父进程已退出时仍能归到外层应用。
+public struct ContainingApplication: Equatable, Sendable {
+    public let bundleID: String?
+    public let bundlePath: String
+    public let displayName: String?
+
+    public init(bundleID: String?, bundlePath: String, displayName: String?) {
+        self.bundleID = bundleID
+        self.bundlePath = bundlePath
+        self.displayName = displayName
+    }
+}
+
 public struct ProcessIdentity: Equatable, Sendable {
     public let pid: Int32?
     public let processStartTime: Date?
@@ -67,6 +81,7 @@ public struct ProcessIdentity: Equatable, Sendable {
     public let displayName: String?
     public let parentPID: Int32?
     public let ancestors: [ProcessAncestor]
+    public let containingApplication: ContainingApplication?
 
     public init(
         pid: Int32?,
@@ -77,7 +92,8 @@ public struct ProcessIdentity: Equatable, Sendable {
         bundlePath: String? = nil,
         displayName: String? = nil,
         parentPID: Int32? = nil,
-        ancestors: [ProcessAncestor] = []
+        ancestors: [ProcessAncestor] = [],
+        containingApplication: ContainingApplication? = nil
     ) {
         self.pid = pid
         self.processStartTime = processStartTime
@@ -88,6 +104,7 @@ public struct ProcessIdentity: Equatable, Sendable {
         self.displayName = displayName
         self.parentPID = parentPID
         self.ancestors = ancestors
+        self.containingApplication = containingApplication
     }
 }
 
@@ -210,8 +227,34 @@ public struct SystemProcessIdentityResolver: Sendable {
             bundlePath: current.bundlePath,
             displayName: current.displayName,
             parentPID: current.parentPID,
-            ancestors: ancestors
+            ancestors: ancestors,
+            containingApplication: Self.containingApplication(
+                for: current.executablePath,
+                ownBundlePath: current.bundlePath
+            )
         )
+    }
+
+    static func containingApplication(
+        for executablePath: String?,
+        ownBundlePath: String?
+    ) -> ContainingApplication? {
+        guard let executablePath else { return nil }
+        var path = ""
+        for component in URL(fileURLWithPath: executablePath).pathComponents.dropFirst() {
+            path += "/" + component
+            guard URL(fileURLWithPath: component).pathExtension.lowercased() == "app" else { continue }
+            guard path != ownBundlePath, executablePath.hasPrefix(path + "/Contents/") else { return nil }
+            let bundle = Bundle(url: URL(fileURLWithPath: path))
+            return ContainingApplication(
+                bundleID: bundle?.bundleIdentifier,
+                bundlePath: path,
+                displayName: bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                    ?? bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
+                    ?? URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+            )
+        }
+        return nil
     }
 
     private struct Snapshot {

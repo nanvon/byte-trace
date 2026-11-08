@@ -93,7 +93,10 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 - `exec:` 使用 `ExecutablePathNormalizer.normalize` 后的路径：版本号目录（`2.1.314`、`v24.17.0`、`0.164.0-aarch64-apple-darwin`）、内嵌版本（`node-v22.22.2` → `node-*`）、16 位以上十六进制哈希与 UUID 目录折叠成 `*`，让 mise / fnm / 自更新 CLI 的各版本合并为一个应用；规则对应 schema 7 的迁移。无应用包的进程展示名优先用路径派生名（nettop 进程名最多 15 字符，自更新 CLI 的进程名可能就是版本号）。
 
-- `hostCandidate()` 会沿父进程链（最多 8 层）向上找「可执行文件位于其 `.app/Contents/` 内、且 bundlePath 最短」的祖先。这是 helper 进程（如浏览器子进程）能归属到主应用的原因。
+- `hostCandidate()` 会沿父进程链（最多 8 层）向上找「可执行文件位于其 `.app/Contents/` 内、且 bundlePath 最短」的祖先。这是 helper 进程（如浏览器子进程）能归属到主应用的原因。父进程已退出时，用解析器从可执行路径取出的最外层 `.app`（`ProcessIdentity.containingApplication`）兜底，如 Xcode 内置的 Python 归到 Xcode。
+- `launchingApplication()`：没有自己应用包（或应用包在 `~/Library/Application Support` 下，如 Claude 桌面版内置的 Claude Code）的进程，归到父进程链上第一个 GUI 应用，如 magpie 调起的 mise、Raycast 自带的 node。终端应用（`terminalBundleIDs`）不作为宿主；编辑器（`editorBundleIDs`）只收不经过 shell 的子进程，内置终端里运行的命令仍按命令行工具单独统计；代理应用不作为宿主。
+- `ProcessAttributionCache` 记住每个 nettop 进程名最近一次解析成功的归属，进程在读到路径前就退出时沿用，避免拆出 `process:` 记录；同名不同路径取最近一次。
+- 以上三条于 2026-11 上线。schema 10 迁移只合并能确定宿主的历史记录（见「存储」的迁移说明）；按启动者推断的、同名对应多个路径的 `process:` 记录留在原键下。
 - `ProcessAttributionCache` 以 `(pid, processStartTime)` 为键，规避 pid 复用。
 - **展示辅助（不参与 appKey）**：没有宿主应用的进程由 `ProcessAttributor.launcherName(for:)` 沿父进程链找启动者（跳过 shell、launchd、系统目录工具和同一可执行文件），列表副标题显示「由 X 启动」；常见系统守护进程的中文用途在 `SystemProcessDescriptions`（按可执行文件名匹配，mDNSResponder 标为「局域网/Bonjour」）。进程在被解析前就退出时拿不到路径和父进程，这两项都为空。
 - **nsurlsessiond 无法归属到委托应用**：用后台 URLSession 实测，它的套接字 `epid` 是自己的 pid、`euuid` 是自己的二进制 UUID，nettop 不提供委托方信息，因此只显示用途说明，不要再尝试按 epid 拆分。
@@ -108,7 +111,7 @@ proxy:<rule>  →  bundle:<bundleID>  →  app:<bundlePath>  →  exec:<路径> 
 
 **流量路径**（`TrafficRoute`）：外部通道的非代理进程记 `direct`；补充通道（系统代理 lo0 / TUN utun）记 `proxied`，读到 mihomo 连接表时细分为 `proxy_node` / `proxy_rule_direct`。路径只写 `daily_route_usage` 一张旁表，`daily_usage` / `usage_buckets` 的总量与口径不变；代理传输不记路径。路径上线前的历史没有路径行，界面把「日汇总 − 路径合计」显示为「未区分」。「最近 1 小时」没有分钟级路径，按今天的拆分近似并注明。卡片标题与列表行的「走节点 X%」／「经代理 X%」只在已区分路径的流量里计算，且已区分部分不足全部流量的一半时不显示（`RouteBreakdown.Share.isRepresentative`），避免升级初期被「未区分」压成接近 0；覆盖不足 99% 时标题加「已区分部分中」。代理页的「代理外层流量去向（估算）」同理：应用侧有路径记录的经代理流量不足代理外层字节的一半时不显示。
 
-**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 9`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径；版本 8 新增 `daily_route_usage`；版本 9 新增 `app_launchers`。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
+**迁移**：`UsageStore.migrate()` 用 `PRAGMA user_version`（当前 `schemaVersion = 10`）做累加式 `if currentVersion <= N` 分支。新增表/列时追加一个分支、在块内 `PRAGMA user_version = N+1`，并同步 `UsageStore.schemaVersion`。版本 5 会删除已废弃的 `host_usage_buckets` 实验表；版本 6 为日汇总和分钟桶加入 `accounting_version`；版本 7 把带版本号的 `exec:` appKey 合并到归一化路径；版本 8 新增 `daily_route_usage`；版本 9 新增 `app_launchers`；版本 10 按归属新规则合并历史记录：嵌套 `.app` 归外层应用、`~/Library/Application Support/<目录>/` 下的附属包归到展示名等于该目录名的唯一应用、同名只对应一个已解析记录的 `process:` 记录归到该记录。旧口径标为 1 并保留，系统代理双通道口径为 2，当前系统代理＋TUN 补充口径为 3；查询只返回当前口径，避免新旧数据直接相加。
 
 **写入是累加而非幂等**：所有 upsert 都是 `ON CONFLICT ... DO UPDATE SET x = x + excluded.x`。同一批聚合重复 flush 会双计。`flush()` 成功后必须清空 pending（现有代码已如此）。
 

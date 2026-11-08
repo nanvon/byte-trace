@@ -67,7 +67,9 @@ public struct ProcessAttributor: Sendable {
             )
         }
 
-        let host = hostCandidate(for: identity)
+        let ownHost = hostCandidate(for: identity)
+        let launchingHost = launchingApplication(for: identity, ownHost: ownHost)
+        let host = launchingHost ?? ownHost
         let executablePath = Self.canonicalPath(identity.executablePath)
         let appKey: String
         if let bundleID = host.bundleID, !bundleID.isEmpty {
@@ -89,8 +91,10 @@ public struct ProcessAttributor: Sendable {
             appKey = "unknown:\(Self.stableHash(fingerprint))"
         }
 
+        // 归到启动它的应用时，分类跟随该应用（如 App 调起的 /usr/bin/curl 计入该 App）。
+        let categoryPath = launchingHost.map(\.executablePath) ?? executablePath
         let category: AppCategory
-        if Self.isSystemExecutable(executablePath) {
+        if Self.isSystemExecutable(categoryPath) {
             category = .systemProcess
         } else if host.bundleID != nil || host.bundlePath != nil {
             category = .userApp
@@ -105,7 +109,7 @@ public struct ProcessAttributor: Sendable {
             pid: identity.pid,
             processStartTime: identity.processStartTime,
             nettopProcessName: identity.nettopProcessName,
-            executablePath: executablePath,
+            executablePath: launchingHost?.executablePath ?? executablePath,
             bundleID: host.bundleID,
             bundlePath: host.bundlePath,
             launcherName: host.bundleID == nil && host.bundlePath == nil
@@ -162,7 +166,15 @@ public struct ProcessAttributor: Sendable {
 
         guard let executablePath = current.executablePath else { return current }
 
-        let candidates = [current] + identity.ancestors.map {
+        let containing = identity.containingApplication.map {
+            HostCandidate(
+                executablePath: nil,
+                bundleID: $0.bundleID,
+                bundlePath: Self.validatedBundlePath($0.bundlePath),
+                displayName: $0.displayName
+            )
+        }
+        let candidates = [current] + (containing.map { [$0] } ?? []) + identity.ancestors.map {
             HostCandidate(
                 executablePath: Self.canonicalPath($0.executablePath),
                 bundleID: $0.bundleID,
@@ -178,6 +190,104 @@ public struct ProcessAttributor: Sendable {
             .min { lhs, rhs in
                 (lhs.bundlePath?.count ?? Int.max) < (rhs.bundlePath?.count ?? Int.max)
             } ?? current
+    }
+
+    /// 终端里启动的进程算作用户自己运行的命令行工具，不归到终端应用。
+    private static let terminalBundleIDs: Set<String> = [
+        "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty",
+        "dev.warp.Warp-Stable", "dev.warp.Warp", "com.github.wez.wezterm",
+        "net.kovidgoyal.kitty", "org.alacritty", "co.zeit.hyper", "com.raphaelamorim.rio",
+        "io.appmakes.otty", "com.github.tty7", "com.termius-dmg.mac", "dev.commandline.waveterm",
+        "com.apple.loginwindow"
+    ]
+
+    /// 编辑器的内置终端经过 shell 启动进程；只有不经过 shell 的子进程（扩展、语言服务）才归到编辑器。
+    private static let editorBundleIDs: Set<String> = [
+        "com.microsoft.VSCode", "com.microsoft.VSCodeInsiders", "com.vscodium",
+        "com.todesktop.230313mzl4w4u92", "dev.zed.Zed", "dev.zed.Zed-Preview",
+        "com.exafunction.windsurf", "com.sublimetext.4", "com.panic.Nova"
+    ]
+
+    private static let shellNames: Set<String> = [
+        "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"
+    ]
+
+    private static func isEditor(_ bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return editorBundleIDs.contains(bundleID) || bundleID.hasPrefix("com.jetbrains.")
+    }
+
+    /// 应用装在 `~/Library/Application Support` 下的附属包（如 Claude 桌面版内置的 Claude Code）。
+    private static func isApplicationSupportBundle(_ bundlePath: String?) -> Bool {
+        bundlePath?.contains("/Library/Application Support/") == true
+    }
+
+    /// 没有自己应用包的进程，沿父进程链归到启动它的第一个 GUI 应用。
+    /// 终端、经 shell 启动的编辑器子进程、代理应用不作为宿主；附属包会继续向上找。
+    private func launchingApplication(
+        for identity: ProcessIdentity,
+        ownHost: HostCandidate
+    ) -> HostCandidate? {
+        let hasOwnBundle = !(ownHost.bundleID ?? "").isEmpty || ownHost.bundlePath != nil
+        if hasOwnBundle, !Self.isApplicationSupportBundle(ownHost.bundlePath) {
+            return nil
+        }
+
+        var passedShell = false
+        let ancestors = identity.ancestors
+        for (index, ancestor) in ancestors.enumerated() where ancestor.pid > 1 {
+            let ancestorPath = Self.canonicalPath(ancestor.executablePath)
+            guard let bundlePath = Self.validatedBundlePath(ancestor.bundlePath) else {
+                if let ancestorPath,
+                   Self.shellNames.contains(URL(fileURLWithPath: ancestorPath).lastPathComponent) {
+                    passedShell = true
+                }
+                continue
+            }
+
+            let host = ancestors[index...]
+                .compactMap { candidate -> HostCandidate? in
+                    guard let candidatePath = Self.validatedBundlePath(candidate.bundlePath),
+                          candidatePath == bundlePath
+                            || ancestorPath.map({ Self.isInsideAppContents($0, bundlePath: candidatePath) }) == true
+                    else { return nil }
+                    return HostCandidate(
+                        executablePath: Self.canonicalPath(candidate.executablePath),
+                        bundleID: candidate.bundleID,
+                        bundlePath: candidatePath,
+                        displayName: candidate.displayName
+                    )
+                }
+                .min { ($0.bundlePath?.count ?? Int.max) < ($1.bundlePath?.count ?? Int.max) }
+                ?? HostCandidate(
+                    executablePath: ancestorPath,
+                    bundleID: ancestor.bundleID,
+                    bundlePath: bundlePath,
+                    displayName: ancestor.displayName
+                )
+
+            if Self.isApplicationSupportBundle(host.bundlePath) {
+                continue
+            }
+            if let bundleID = host.bundleID, Self.terminalBundleIDs.contains(bundleID) {
+                return nil
+            }
+            if passedShell, Self.isEditor(host.bundleID) {
+                return nil
+            }
+            let hostIdentity = ProcessIdentity(
+                pid: nil,
+                nettopProcessName: host.executablePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "",
+                executablePath: host.executablePath,
+                bundleID: host.bundleID,
+                bundlePath: host.bundlePath
+            )
+            if proxyClassifier.match(hostIdentity) != nil {
+                return nil
+            }
+            return host
+        }
+        return nil
     }
 
     private func displayName(for identity: ProcessIdentity, host: HostCandidate) -> String {
@@ -279,6 +389,10 @@ public final class ProcessAttributionCache: @unchecked Sendable {
     private let maxCount: Int
     private var cache: [CacheKey: AttributedProcess] = [:]
     private var accessOrder: [CacheKey] = []
+    /// 每个 nettop 进程名最近一次解析成功的归属。进程在读到路径前就退出时沿用它，
+    /// 避免同一程序拆出一条 `process:` 记录；同名不同路径时取最近一次。
+    private var lastResolvedByName: [String: AttributedProcess] = [:]
+    private let maxNameCount = 1000
 
     public init(
         attributor: ProcessAttributor = ProcessAttributor(),
@@ -289,12 +403,35 @@ public final class ProcessAttributionCache: @unchecked Sendable {
     }
 
     public func attribute(_ identity: ProcessIdentity) -> AttributedProcess {
+        if Self.isUnresolved(identity) {
+            lock.lock()
+            let currentAttributor = attributor
+            let remembered = lastResolvedByName[identity.nettopProcessName]
+            lock.unlock()
+            let attributed = currentAttributor.attribute(identity)
+            guard attributed.category != .proxyTransport, let remembered else { return attributed }
+            return AttributedProcess(
+                appKey: remembered.appKey,
+                displayName: remembered.displayName,
+                category: remembered.category,
+                pid: identity.pid,
+                processStartTime: identity.processStartTime,
+                nettopProcessName: identity.nettopProcessName,
+                executablePath: remembered.executablePath,
+                bundleID: remembered.bundleID,
+                bundlePath: remembered.bundlePath,
+                launcherName: remembered.launcherName
+            )
+        }
+
         guard let pid = identity.pid,
               let processStartTime = identity.processStartTime else {
             lock.lock()
             let currentAttributor = attributor
             lock.unlock()
-            return currentAttributor.attribute(identity)
+            let attributed = currentAttributor.attribute(identity)
+            remember(attributed)
+            return attributed
         }
 
         let key = CacheKey(pid: pid, processStartTime: processStartTime)
@@ -321,7 +458,30 @@ public final class ProcessAttributionCache: @unchecked Sendable {
             evictIfNeeded()
         }
         lock.unlock()
+        remember(attributed)
         return attributed
+    }
+
+    /// 解析时进程已退出：拿不到路径、应用包和启动时间。
+    private static func isUnresolved(_ identity: ProcessIdentity) -> Bool {
+        identity.executablePath == nil
+            && identity.bundlePath == nil
+            && (identity.bundleID ?? "").isEmpty
+            && identity.processStartTime == nil
+            && !identity.nettopProcessName.isEmpty
+    }
+
+    private func remember(_ attributed: AttributedProcess) {
+        guard !attributed.nettopProcessName.isEmpty,
+              attributed.executablePath != nil || attributed.bundlePath != nil,
+              attributed.category != .proxyTransport else { return }
+        lock.lock()
+        if lastResolvedByName.count >= maxNameCount,
+           lastResolvedByName[attributed.nettopProcessName] == nil {
+            lastResolvedByName.removeAll(keepingCapacity: true)
+        }
+        lastResolvedByName[attributed.nettopProcessName] = attributed
+        lock.unlock()
     }
 
     private func evictIfNeeded() {
@@ -345,6 +505,7 @@ public final class ProcessAttributionCache: @unchecked Sendable {
         attributor = ProcessAttributor(proxyClassifier: classifier)
         cache.removeAll(keepingCapacity: true)
         accessOrder.removeAll(keepingCapacity: true)
+        lastResolvedByName.removeAll(keepingCapacity: true)
         return true
     }
 
@@ -352,6 +513,7 @@ public final class ProcessAttributionCache: @unchecked Sendable {
         lock.lock()
         cache.removeAll(keepingCapacity: false)
         accessOrder.removeAll(keepingCapacity: false)
+        lastResolvedByName.removeAll(keepingCapacity: false)
         lock.unlock()
     }
 }
