@@ -156,8 +156,8 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 版本号真值在 `Packaging/Info.plist` 的 `CFBundleShortVersionString`。发布时 git tag 必须是 `v<版本号>`，由 `Scripts/check-release-version.py` 在 CI 与 release 流程中强制校验；README 的 release badge 自动跟随最新 Release，不用手改。
 
 - CI 与发布固定使用 Xcode 27.1（27A9275）和 macOS 27.0 SDK，运行要求为 macOS 26+、Apple Silicon。
-- `ci.yml`：push main / PR 时在 `xcode-27` Apple Silicon runner 上跑 `swift build`、`swift test`、plist 校验与 ad-hoc 打包校验。
-- `release.yml`：推 `v*` tag 触发，先校验版本和更新说明，再构建 Apple Silicon 产物、生成 DMG / ZIP / SHA-256 并建 Release。
+- `ci.yml`：push main / PR 时并行跑三个 job——`meta`（Ubuntu，脚本与元数据校验）、`test`（`xcode-27`，`swift build` + `swift test`）、`package`（`xcode-27`，plist 校验 + ad-hoc 打包校验）；同一 PR / 分支连续推送取消旧运行，main 不取消；仅文档改动（`*.md`、`docs/`、`designs/`、`LICENSE`）不触发；SwiftPM 依赖与编译产物用 `actions/cache` 缓存（debug 与 release 分开命名空间）。
+- `release.yml`：推 `v*` tag 触发，先校验版本和更新说明，再构建 Apple Silicon 产物、生成 DMG / ZIP / SHA-256 并建 Release；macOS 打包 job 复用 CI 预热过的 release 构建缓存。
 - `package_app.sh` 显式传入链接 SDK 与最低系统版本，并在打包前校验 Mach-O 的 `sdk`、`minos` 和 `arm64` 架构，防止 SwiftPM 错写 SDK 标记造成界面外观差异。
 - 全程 ad-hoc 签名，不使用 Developer ID 证书、不公证。
 
