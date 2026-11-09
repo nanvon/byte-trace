@@ -17,13 +17,11 @@ jobs:
   prepare:
     name: Verify release version
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
+      # ubuntu-latest 自带 python3，脚本只用标准库，不需要再装 setup-python。
       - name: Check tag and app version
         run: python3 Scripts/check-release-version.py "${GITHUB_REF_NAME}"
 
@@ -51,6 +49,7 @@ jobs:
     name: macOS Apple Silicon
     needs: prepare
     runs-on: xcode-27
+    timeout-minutes: 45
     env:
       # 使用本地验收的工具链，只生成 Apple Silicon 产物。
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
@@ -67,6 +66,19 @@ jobs:
           swift --version
           test "$(xcodebuild -version)" = $'Xcode 27.1\nBuild version 27A9275'
           test "$(xcrun --sdk macosx --show-sdk-version)" = "27.0"
+
+      # 复用 CI 同一个依赖缓存键，省掉 Sparkle 的重新解析/下载。
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/checkouts
+            .build/artifacts
+            .build/repositories
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-deps-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            swiftpm-deps-${{ runner.os }}-
 
       - name: Build and sign ad-hoc app bundle
         env:
@@ -125,6 +137,7 @@ jobs:
     name: Publish GitHub Release
     needs: package
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     env:

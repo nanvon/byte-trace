@@ -1,28 +1,73 @@
 name: CI
 
 # CI 使用发布工具链检查 Apple Silicon 产物；不创建 Release。
+#
+# 结构：meta(Ubuntu) 与 check(macOS) 两个 job 并行。
+# check 保持单台 macOS 串行完成「编译探针 → 测试 → release 打包」，不再把一个 job
+# 拆成两台 macOS；实测说明见下：本仓库的 macOS runner 并发争用很明显，拆两台时
+# 第二个 runner 冷启动要等 25～75s、且两个 job 互相拖慢（打包 47s→76～120s），
+# 均值反而比单机慢、方差更大，所以这里用单台 macOS runner 换取稳定。
+#
+# 相比原流程省掉的重复：不再 debug 编译整个 ByteTraceApp（它由打包步骤以 release
+# 编译并校验，release 更严格）；debug 只编译探针和测试所需目标。
+#
+# 文档类提交（仅改 README/*.md/docs/designs/LICENSE）不触发本流程。
+#
+# 注意（必需检查的坑）：现在仓库没有配置分支保护的必需检查，路径过滤是安全的。
+# 如果以后把本工作流设为「Required status check」，工作流级 paths 过滤会让被跳过的
+# 运行在 PR 上一直处于 Expected、卡住合并。届时应改成「始终运行一个轻量 gate job，
+# 重型 job 用 dorny/paths-filter 条件跳过」，而不是在工作流级做 paths 过滤。
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '*.md'
+      - 'docs/**'
+      - 'designs/**'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - '*.md'
+      - 'docs/**'
+      - 'designs/**'
+      - 'LICENSE'
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # 同一个 PR / 分支连续推送时，取消旧运行只跑最新的；
+  # main 上不取消，确保发版的每个提交都完整跑过一遍。
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
 
+env:
+  # 与本地 Xcode 保持一致，避免 runner 默认工具链变化影响系统界面样式。
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  BYTE_TRACE_SWIFT_TRIPLE: arm64-apple-macosx26.0
+
 jobs:
+  # 不挑系统的纯脚本校验，放到 Ubuntu 并行跑，不占用 macOS 名额。
+  meta:
+    name: Validate metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate packaging inputs
+        run: |
+          python3 Scripts/check-release-version.py
+          bash -n Scripts/package_app.sh
+          python3 -m py_compile Scripts/generate-update-feed.py
+
   check:
     name: macOS Apple Silicon
     runs-on: xcode-27
-    env:
-      # 与本地 Xcode 保持一致，避免 runner 默认工具链变化影响系统界面样式。
-      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-      BYTE_TRACE_SWIFT_TRIPLE: arm64-apple-macosx26.0
-
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -33,18 +78,29 @@ jobs:
           test "$(xcodebuild -version)" = $'Xcode 27.1\nBuild version 27A9275'
           test "$(xcrun --sdk macosx --show-sdk-version)" = "27.0"
 
-      - name: Swift build
-        run: swift build --triple "$BYTE_TRACE_SWIFT_TRIPLE"
+      # 只缓存依赖层（Sparkle 的 checkout / 二进制产物），相当于 setup-node / setup-go
+      # 自带的依赖缓存；不缓存编译产物，避免占满 runner 磁盘。键只跟 Package.resolved
+      # 走，依赖不变就命中同一份缓存，与源码改动无关。
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/checkouts
+            .build/artifacts
+            .build/repositories
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-deps-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            swiftpm-deps-${{ runner.os }}-
+
+      - name: Validate packaging inputs
+        run: plutil -lint Packaging/Info.plist
+
+      - name: Swift build (probe)
+        run: swift build --product ByteTraceProbe --triple "$BYTE_TRACE_SWIFT_TRIPLE"
 
       - name: Swift tests
         run: swift test --triple "$BYTE_TRACE_SWIFT_TRIPLE"
-
-      - name: Validate packaging inputs
-        run: |
-          python3 Scripts/check-release-version.py
-          bash -n Scripts/package_app.sh
-          plutil -lint Packaging/Info.plist
-          python3 -m py_compile Scripts/generate-update-feed.py
 
       - name: Build local ad-hoc app bundle
         env:
