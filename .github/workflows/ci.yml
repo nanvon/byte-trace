@@ -2,14 +2,14 @@ name: CI
 
 # CI 使用发布工具链检查 Apple Silicon 产物；不创建 Release。
 #
-# 结构：meta(ubuntu) / test(macOS) / package(macOS) 三个 job 并行执行。
-# 原来一个 job 串行做「debug 构建 → 测试 → release 打包」，墙钟时间被串起来；
-# 这里把互不依赖、也不传数据的阶段拆开并行，墙钟时间约等于最慢的一条。
-# 实测（runner 池空闲时）整条墙钟 118s→约 92s；两台 macOS 同时被本仓库占满时会互相
-# 拖慢并叠加冷启动等待，那是并发争用而不是流程问题，日常稀疏推送不会触发。
+# 结构：meta(Ubuntu) 与 check(macOS) 两个 job 并行。
+# check 保持单台 macOS 串行完成「编译探针 → 测试 → release 打包」，不再把一个 job
+# 拆成两台 macOS；实测说明见下：本仓库的 macOS runner 并发争用很明显，拆两台时
+# 第二个 runner 冷启动要等 25～75s、且两个 job 互相拖慢（打包 47s→76～120s），
+# 均值反而比单机慢、方差更大，所以这里用单台 macOS runner 换取稳定。
 #
-# 相比原流程省掉的重复：不再 debug 编译整个 ByteTraceApp（它由 package job 以
-# release 编译并校验，release 更严格）；debug 只编译探针和测试所需目标。
+# 相比原流程省掉的重复：不再 debug 编译整个 ByteTraceApp（它由打包步骤以 release
+# 编译并校验，release 更严格）；debug 只编译探针和测试所需目标。
 #
 # 文档类提交（仅改 README/*.md/docs/designs/LICENSE）不触发本流程。
 #
@@ -64,13 +64,10 @@ jobs:
           bash -n Scripts/package_app.sh
           python3 -m py_compile Scripts/generate-update-feed.py
 
-  # 测试 job：只编译探针与测试所需目标并跑全部测试。
-  # ByteTraceApp 由下面 package job 以 release 配置编译（更严格），这里不再重复
-  # debug 编译整个 App，避免把最重的 SwiftUI 目标放进关键路径。
-  test:
-    name: Build & test
+  check:
+    name: macOS Apple Silicon
     runs-on: xcode-27
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -96,41 +93,14 @@ jobs:
           restore-keys: |
             swiftpm-deps-${{ runner.os }}-
 
+      - name: Validate packaging inputs
+        run: plutil -lint Packaging/Info.plist
+
       - name: Swift build (probe)
         run: swift build --product ByteTraceProbe --triple "$BYTE_TRACE_SWIFT_TRIPLE"
 
       - name: Swift tests
         run: swift test --triple "$BYTE_TRACE_SWIFT_TRIPLE"
-
-  # release 构建 + ad-hoc 打包 + 产物校验。与上面的测试 job 相互独立，并行跑。
-  package:
-    name: Package app
-    runs-on: xcode-27
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify Xcode 27.1 and macOS 27.0 SDK
-        run: |
-          xcodebuild -version
-          swift --version
-          test "$(xcodebuild -version)" = $'Xcode 27.1\nBuild version 27A9275'
-          test "$(xcrun --sdk macosx --show-sdk-version)" = "27.0"
-
-      - name: Cache SwiftPM dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            .build/checkouts
-            .build/artifacts
-            .build/repositories
-            ~/Library/Caches/org.swift.swiftpm
-          key: swiftpm-deps-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
-          restore-keys: |
-            swiftpm-deps-${{ runner.os }}-
-
-      - name: Validate packaging inputs
-        run: plutil -lint Packaging/Info.plist
 
       - name: Build local ad-hoc app bundle
         env:
