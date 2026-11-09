@@ -17,12 +17,14 @@ on:
     branches: [main]
     paths-ignore:
       - '**/*.md'
+      - '*.md'
       - 'docs/**'
       - 'designs/**'
       - 'LICENSE'
   pull_request:
     paths-ignore:
       - '**/*.md'
+      - '*.md'
       - 'docs/**'
       - 'designs/**'
       - 'LICENSE'
