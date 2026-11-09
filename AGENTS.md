@@ -156,7 +156,7 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 版本号真值在 `Packaging/Info.plist` 的 `CFBundleShortVersionString`。发布时 git tag 必须是 `v<版本号>`，由 `Scripts/check-release-version.py` 在 CI 与 release 流程中强制校验；README 的 release badge 自动跟随最新 Release，不用手改。
 
 - CI 与发布固定使用 Xcode 27.1（27A9275）和 macOS 27.0 SDK，运行要求为 macOS 26+、Apple Silicon。
-- `ci.yml`：push main / PR 时并行跑两个 job——`meta`（Ubuntu，脚本与元数据校验）与 `check`（`xcode-27` 单台 macOS 串行完成编译探针 + `swift test` + release 构建 + plist 校验 + ad-hoc 打包校验；不再 debug 编译整个 App，实测拆成两台 macOS 会因 runner 争用/冷启动反而更慢更抖）；同一 PR / 分支连续推送取消旧运行，main 不取消；仅文档改动（`*.md`、`docs/`、`designs/`、`LICENSE`）不触发；SwiftPM 依赖层（`.build/checkouts|artifacts|repositories`）用 `actions/cache` 按 `Package.resolved` 缓存。
+- `ci.yml`：push main / PR 时并行跑三个 job——`meta`（Ubuntu，脚本与元数据校验）、`test`（`xcode-27`，编译探针 + `swift test`，不重复 debug 编译整个 App）、`package`（`xcode-27`，plist 校验 + release 构建 + ad-hoc 打包校验）；同一 PR / 分支连续推送取消旧运行，main 不取消；仅文档改动（`*.md`、`docs/`、`designs/`、`LICENSE`）不触发；SwiftPM 依赖层（`.build/checkouts|artifacts|repositories`）用 `actions/cache` 按 `Package.resolved` 缓存。
 - `release.yml`：推 `v*` tag 触发，先校验版本和更新说明，再构建 Apple Silicon 产物、生成 DMG / ZIP / SHA-256 并建 Release；macOS 打包 job 复用 CI 同一个依赖缓存键。
 - `package_app.sh` 显式传入链接 SDK 与最低系统版本，并在打包前校验 Mach-O 的 `sdk`、`minos` 和 `arm64` 架构，防止 SwiftPM 错写 SDK 标记造成界面外观差异。
 - 全程 ad-hoc 签名，不使用 Developer ID 证书、不公证。
