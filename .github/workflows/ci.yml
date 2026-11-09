@@ -57,7 +57,9 @@ jobs:
           bash -n Scripts/package_app.sh
           python3 -m py_compile Scripts/generate-update-feed.py
 
-  # debug 构建 + 全部测试。与下面的打包 job 相互独立，并行跑。
+  # 测试 job：只编译测试与探针所需目标并跑全部测试。
+  # ByteTraceApp 本身由下面 package job 以 release 配置编译（更严格），这里不再重复
+  # debug 编译整个 App，避免把最重的 SwiftUI 目标放进关键路径。
   test:
     name: Build & test
     runs-on: xcode-27
@@ -72,21 +74,23 @@ jobs:
           test "$(xcodebuild -version)" = $'Xcode 27.1\nBuild version 27A9275'
           test "$(xcrun --sdk macosx --show-sdk-version)" = "27.0"
 
-      # 缓存 SwiftPM 依赖与编译产物，命中后第二次构建接近瞬时。
-      # 键里带源码哈希，源码变化时按 restore-keys 回退到最近的同一依赖版本缓存，
-      # 只增量重编改动过的文件。
-      - name: Cache SwiftPM build
+      # 只缓存依赖层（Sparkle 的 checkout / 二进制产物），相当于 setup-node / setup-go
+      # 自带的依赖缓存；不缓存编译产物，避免占满 runner 磁盘。键只跟 Package.resolved
+      # 走，依赖不变就命中同一份缓存，与源码改动无关。
+      - name: Cache SwiftPM dependencies
         uses: actions/cache@v4
         with:
           path: |
-            .build
+            .build/checkouts
+            .build/artifacts
+            .build/repositories
             ~/Library/Caches/org.swift.swiftpm
-          key: swift-debug-${{ runner.os }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('**/*.swift', 'Package.swift') }}
+          key: swiftpm-deps-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            swift-debug-${{ runner.os }}-${{ hashFiles('Package.resolved') }}-
+            swiftpm-deps-${{ runner.os }}-
 
-      - name: Swift build
-        run: swift build --triple "$BYTE_TRACE_SWIFT_TRIPLE"
+      - name: Swift build (probe)
+        run: swift build --product ByteTraceProbe --triple "$BYTE_TRACE_SWIFT_TRIPLE"
 
       - name: Swift tests
         run: swift test --triple "$BYTE_TRACE_SWIFT_TRIPLE"
@@ -106,17 +110,17 @@ jobs:
           test "$(xcodebuild -version)" = $'Xcode 27.1\nBuild version 27A9275'
           test "$(xcrun --sdk macosx --show-sdk-version)" = "27.0"
 
-      # release 配置单独一个缓存命名空间，避免和 debug 的 .build 互相覆盖。
-      # 发布工作流（release.yml）复用同一前缀，能直接命中这里预热好的 release 构建。
-      - name: Cache SwiftPM build
+      - name: Cache SwiftPM dependencies
         uses: actions/cache@v4
         with:
           path: |
-            .build
+            .build/checkouts
+            .build/artifacts
+            .build/repositories
             ~/Library/Caches/org.swift.swiftpm
-          key: swift-release-${{ runner.os }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('**/*.swift', 'Package.swift') }}
+          key: swiftpm-deps-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            swift-release-${{ runner.os }}-${{ hashFiles('Package.resolved') }}-
+            swiftpm-deps-${{ runner.os }}-
 
       - name: Validate packaging inputs
         run: plutil -lint Packaging/Info.plist

@@ -67,16 +67,18 @@ jobs:
           test "$(xcodebuild -version)" = $'Xcode 27.1\nBuild version 27A9275'
           test "$(xcrun --sdk macosx --show-sdk-version)" = "27.0"
 
-      # 复用 CI 打包 job 预热过的 release 缓存（同前缀），发布时直接增量构建。
-      - name: Cache SwiftPM build
+      # 复用 CI 同一个依赖缓存键，省掉 Sparkle 的重新解析/下载。
+      - name: Cache SwiftPM dependencies
         uses: actions/cache@v4
         with:
           path: |
-            .build
+            .build/checkouts
+            .build/artifacts
+            .build/repositories
             ~/Library/Caches/org.swift.swiftpm
-          key: swift-release-${{ runner.os }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('**/*.swift', 'Package.swift') }}
+          key: swiftpm-deps-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            swift-release-${{ runner.os }}-${{ hashFiles('Package.resolved') }}-
+            swiftpm-deps-${{ runner.os }}-
 
       - name: Build and sign ad-hoc app bundle
         env:
