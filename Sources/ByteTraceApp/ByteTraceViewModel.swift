@@ -369,6 +369,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var rangeProgramRoutes: [ProgramSlot: [TrafficRoute: Int64]] = [:]
     @Published private(set) var rangeBars: [UsageChartBar] = []
     @Published private(set) var detailTimeline: [UsageTimelinePoint] = []
+    @Published private(set) var detailDomains: [ByteTraceExportDocument.DomainUsage] = []
     @Published private(set) var bucketStats: UsageBucketStats?
     /// 当前时间范围内各应用按路径汇总的字节数（日粒度；「最近 1 小时」按今天统计）。
     @Published private(set) var rangeRouteUsage: [String: [TrafficRoute: Int64]] = [:]
@@ -396,7 +397,19 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         didSet {
             guard oldValue != readsMihomoConnections else { return }
             UserDefaults.standard.set(readsMihomoConnections, forKey: Self.readsMihomoConnectionsKey)
+            if !readsMihomoConnections { supplementalResidualTracker.discardDomains() }
             updateMihomoPolling()
+        }
+    }
+    @Published var recordsDomains: Bool {
+        didSet {
+            guard oldValue != recordsDomains else { return }
+            UserDefaults.standard.set(recordsDomains, forKey: Self.recordsDomainsKey)
+            mihomoRequestID = nil
+            if !recordsDomains {
+                mihomoRouteTracker.discardDomains()
+                supplementalResidualTracker.discardDomains()
+            }
         }
     }
     @Published private(set) var mihomoStatus: MihomoConnectionStatus = .idle
@@ -405,9 +418,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private static let usageRetentionPolicyKey = "ByteTrace.usageRetentionPolicy"
     private static let detectedProxyExecutablesKey = "ByteTrace.detectedProxyExecutables"
     private static let readsMihomoConnectionsKey = "ByteTrace.readsMihomoConnections"
+    private static let recordsDomainsKey = "ByteTrace.recordsDomains"
     /// 只在最近有经代理流量时轮询，空闲时不访问控制器。
     private static let mihomoActiveWindow: TimeInterval = 30
-    private static let mihomoPollInterval: TimeInterval = 2
+    private static let mihomoPollInterval: TimeInterval = 1
     private static let mihomoDiscoveryInterval: TimeInterval = 30
     private enum CollectorLane: Sendable {
         case external
@@ -495,6 +509,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         _readsMihomoConnections = Published(
             initialValue: UserDefaults.standard.object(forKey: Self.readsMihomoConnectionsKey) as? Bool ?? true
         )
+        _recordsDomains = Published(initialValue: UserDefaults.standard.bool(forKey: Self.recordsDomainsKey))
         detectedProxyExecutables = UserDefaults.standard.stringArray(
             forKey: Self.detectedProxyExecutablesKey
         ) ?? []
@@ -586,13 +601,15 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
     func beginObservingAppDetail(_ appKey: String) {
         activeDetailAppKey = appKey
-        refreshDetailTimeline()
+        detailDomains = []
+        refreshAppDetail()
     }
 
     func endObservingAppDetail(_ appKey: String) {
         guard activeDetailAppKey == appKey else { return }
         activeDetailAppKey = nil
         detailTimeline = []
+        detailDomains = []
     }
 
     func start() {
@@ -758,6 +775,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeRecords = []
             rangeBars = []
             detailTimeline = []
+            detailDomains = []
             bucketStats = nil
             return
         }
@@ -800,6 +818,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             rangeRecords = []
             rangeBars = []
             detailTimeline = []
+            detailDomains = []
             return
         }
         do {
@@ -914,6 +933,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             dailyRangeRecords = []
             rangeWindow = selectedRange.window(relativeTo: Date(), calendar: Calendar.autoupdatingCurrent)
             detailTimeline = []
+            detailDomains = []
             activeDetailAppKey = nil
             lastRetentionCleanupDay = nil
             lastError = nil
@@ -924,9 +944,15 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     func exportCurrentRange(to url: URL) throws {
+        var domainUsage: [ByteTraceExportDocument.DomainUsage] = []
         if let store {
             let today = selectedRange == .today ? try loadToday(from: store) : nil
             try loadRange(from: store, cachedToday: today)
+            let records = try store.domainUsage(
+                from: selectedRange == .all ? "0001-01-01" : Self.dayKey(for: rangeWindow.start),
+                through: Self.dayKey(for: rangeWindow.lastDay)
+            )
+            domainUsage = summarizeDomains(records)
         }
         let exportedAt = Date()
         let encoder = JSONEncoder()
@@ -934,7 +960,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
         let document = ByteTraceExportDocument(
-            formatVersion: 5,
+            formatVersion: 6,
             accountingVersion: UsageStore.accountingVersion,
             product: "ByteTrace",
             exportedAt: exportedAt,
@@ -981,7 +1007,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                         ] ?? [:]).map { ($0.key.rawValue, $0.value) }
                     )
                 )
-            }
+            },
+            domainUsage: domainUsage
         )
         try encoder.encode(document).write(to: url, options: .atomic)
     }
@@ -1295,7 +1322,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 let proxyEndpoints = proxyEndpointMonitor.currentLoopbackEndpoints
                 detectProxyListeners(in: deltas, proxyEndpoints: proxyEndpoints)
                 let route: (NettopDelta) -> RouteResolution = { [weak self] in
-                    RouteResolution(route: self?.supplementalRoute(for: $0) ?? .proxied)
+                    self?.supplementalRoute(for: $0) ?? .proxied
                 }
                 let residuals = supplementalResidualTracker.residuals(
                     processTotals: processTotals,
@@ -1319,7 +1346,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 }
             }
             for routed in acceptedDeltas {
-                ingest(routed.delta, route: routed.route)
+                ingest(routed.delta, route: routed.route, domain: routed.domain)
             }
 
         case .malformedRow:
@@ -1397,9 +1424,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     /// 补充通道单条连接的出口路径。
-    private func supplementalRoute(for delta: NettopDelta) -> TrafficRoute {
+    private func supplementalRoute(for delta: NettopDelta) -> RouteResolution {
         guard readsMihomoConnections else { return .proxied }
-        return mihomoRouteTracker.route(forLocalEndpoint: delta.localEndpoint) ?? .proxied
+        let resolution = mihomoRouteTracker.resolution(forLocalEndpoint: delta.localEndpoint) ?? .proxied
+        return RouteResolution(route: resolution.route, domain: recordsDomains ? resolution.domain : nil)
     }
 
     // MARK: - mihomo 连接表
@@ -1423,7 +1451,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 self?.mihomoTimerFired()
             }
         }
-        timer.tolerance = 0.5
+        timer.tolerance = 0.25
         RunLoop.main.add(timer, forMode: .common)
         mihomoTimer = timer
         mihomoTimerFired()
@@ -1464,11 +1492,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         let requestID = UUID()
         mihomoRequestID = requestID
         let client = mihomoClient
+        let includeDomains = recordsDomains
         Task.detached(priority: .utility) { [weak self] in
             let result: Result<MihomoConnectionsSnapshot, Error>
             do {
                 let data = try await client.get("/connections", from: controller)
-                result = .success(try MihomoConnectionsParser.parse(data))
+                result = .success(try MihomoConnectionsParser.parse(data, includeDomains: includeDomains))
             } catch {
                 result = .failure(error)
             }
@@ -1538,7 +1567,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func ingest(_ delta: NettopDelta, route: TrafficRoute) {
+    private func ingest(_ delta: NettopDelta, route: TrafficRoute, domain: String? = nil) {
         let token = NettopProcessToken(rawValue: delta.processName)
         let identity = resolver.resolve(token)
         let attributed = attributionCache.attribute(identity)
@@ -1576,7 +1605,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                     downloadBytes: delta.downloadBytes,
                     uploadBytes: delta.uploadBytes,
                     route: attributed.category == .proxyTransport ? nil : route,
-                    program: attributed.program
+                    program: attributed.program,
+                    domain: readsMihomoConnections && recordsDomains && attributed.category != .proxyTransport ? domain : nil
                 )
             )
         } catch {
@@ -1994,7 +2024,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 )
             )
         }
-        try loadActiveDetailTimeline(from: store, start: start, end: end)
+        try loadActiveDetail(from: store, startDay: startDay, endDay: endDay)
     }
 
     /// 路径与日汇总使用相同的首日、末日（均包含）。
@@ -2113,26 +2143,68 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func refreshDetailTimeline() {
+    private func refreshAppDetail() {
         guard let store else {
             detailTimeline = []
+            detailDomains = []
             return
         }
         do {
-            try loadActiveDetailTimeline(from: store, start: rangeWindow.start, end: rangeWindow.end)
+            try loadActiveDetail(
+                from: store,
+                startDay: selectedRange == .all ? "0001-01-01" : Self.dayKey(for: rangeWindow.start),
+                endDay: Self.dayKey(for: rangeWindow.lastDay)
+            )
         } catch {
-            lastError = "读取趋势失败：\(error.localizedDescription)"
+            lastError = "读取应用详情失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
         }
     }
 
-    private func loadActiveDetailTimeline(
+    private func loadActiveDetail(
         from store: UsageStore,
-        start: Date,
-        end: Date
+        startDay: String,
+        endDay: String
     ) throws {
         guard let appKey = activeDetailAppKey else { return }
-        try loadDetailTimeline(for: appKey, from: store, start: start, end: end)
+        try loadDetailTimeline(for: appKey, from: store, start: rangeWindow.start, end: rangeWindow.end)
+        let records = try store.domainUsage(appKey: appKey, from: startDay, through: endDay)
+        let domains = summarizeDomains(records)
+        if detailDomains != domains { detailDomains = domains }
+    }
+
+    private func summarizeDomains(_ records: [DomainUsageRecord]) -> [ByteTraceExportDocument.DomainUsage] {
+        struct Key: Hashable {
+            let appKey: String
+            let domain: String
+        }
+        struct Usage {
+            var download: Int64 = 0
+            var upload: Int64 = 0
+            var routes: [String: Int64] = [:]
+        }
+        var grouped: [Key: Usage] = [:]
+        for record in records {
+            let key = Key(appKey: record.appKey, domain: record.domain)
+            var usage = grouped[key] ?? Usage()
+            usage.download = saturatingAdd(usage.download, record.downloadBytes)
+            usage.upload = saturatingAdd(usage.upload, record.uploadBytes)
+            usage.routes[record.route.rawValue] = saturatingAdd(
+                usage.routes[record.route.rawValue, default: 0],
+                saturatingAdd(record.downloadBytes, record.uploadBytes)
+            )
+            grouped[key] = usage
+        }
+        return grouped.map { key, usage in
+            ByteTraceExportDocument.DomainUsage(
+                appKey: key.appKey, domain: key.domain, downloadBytes: usage.download, uploadBytes: usage.upload,
+                totalBytes: saturatingAdd(usage.download, usage.upload), routeBytes: usage.routes
+            )
+        }.sorted {
+            if $0.appKey != $1.appKey { return $0.appKey < $1.appKey }
+            if $0.totalBytes != $1.totalBytes { return $0.totalBytes > $1.totalBytes }
+            return $0.domain < $1.domain
+        }
     }
 
     private func loadDetailTimeline(

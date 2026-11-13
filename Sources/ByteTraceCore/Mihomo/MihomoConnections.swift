@@ -193,6 +193,17 @@ public final class MihomoRouteTracker: @unchecked Sendable {
         return Date().timeIntervalSince(lastUpdate) <= retention
     }
 
+    public func discardDomains() {
+        lock.lock()
+        defer { lock.unlock() }
+        entries = entries.mapValues { entry in
+            Entry(
+                resolution: RouteResolution(route: entry.resolution.route, exitName: entry.resolution.exitName),
+                lastSeen: entry.lastSeen
+            )
+        }
+    }
+
     public func removeAll() {
         lock.lock()
         entries.removeAll()

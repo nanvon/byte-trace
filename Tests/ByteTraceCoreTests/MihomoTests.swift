@@ -117,6 +117,10 @@ final class MihomoTests: XCTestCase {
         XCTAssertEqual(tracker.resolution(forLocalEndpoint: nodeEndpoint), RouteResolution(route: .proxyNode, domain: "example.com"))
         let directEndpoint = NettopEndpoint(host: "127.0.0.1", port: 50002)
         XCTAssertEqual(tracker.resolution(forLocalEndpoint: directEndpoint), RouteResolution(route: .proxyRuleDirect))
+
+        tracker.discardDomains()
+        XCTAssertEqual(tracker.resolution(forLocalEndpoint: nodeEndpoint), RouteResolution(route: .proxyNode))
+        XCTAssertEqual(tracker.route(forLocalEndpoint: directEndpoint), .proxyRuleDirect)
     }
 
     func testProcessArgumentsOfCurrentProcess() throws {

@@ -38,6 +38,15 @@ struct ByteTraceExportDocument: Encodable {
         let routeBytes: [String: Int64]
     }
 
+    struct DomainUsage: Encodable, Equatable {
+        let appKey: String
+        let domain: String
+        let downloadBytes: Int64
+        let uploadBytes: Int64
+        let totalBytes: Int64
+        let routeBytes: [String: Int64]
+    }
+
     let formatVersion: Int
     let accountingVersion: Int64
     let product: String
@@ -45,4 +54,5 @@ struct ByteTraceExportDocument: Encodable {
     let range: Range
     let applicationUsage: [ApplicationUsage]
     let programUsage: [ProgramUsage]
+    let domainUsage: [DomainUsage]
 }

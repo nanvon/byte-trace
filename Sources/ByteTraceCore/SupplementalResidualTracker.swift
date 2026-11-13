@@ -52,6 +52,18 @@ public struct SupplementalResidualTracker: Sendable {
         framesSincePrune = 0
     }
 
+    public mutating func discardDomains() {
+        histories = histories.mapValues { history in
+            var history = history
+            history.domains.removeAll()
+            // 原有连接仍可能产生残差，先视为域名未知，直到这些连接离开窗口。
+            if let lastKnownAt = history.kinds.values.map(\.lastSeenAt).max() {
+                history.lastUnlabeledAt = lastKnownAt
+            }
+            return history
+        }
+    }
+
     /// `connections` 是本帧全部非零连接行（过滤前），`processTotals` 是本帧非零进程行。
     public mutating func residuals(
         processTotals: [NettopDelta],

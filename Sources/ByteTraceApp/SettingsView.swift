@@ -84,10 +84,19 @@ struct SettingsView: View {
             Toggle(isOn: $model.readsMihomoConnections) {
                 titleWithInfo(
                     "区分代理节点与规则直连",
-                    info: "有经代理流量时每 2 秒读取本机 mihomo 控制器的连接列表，按连接判断走节点还是命中 DIRECT 规则。字节仍以 nettop 为准，不读取域名、不上传数据。"
+                    info: "有经代理流量时每秒读取本机 mihomo 的连接列表，区分代理节点与规则直连。字节由 nettop 统计，数据保存在本机。"
                 )
-                Text("读取本机 mihomo 连接列表，不读取域名。")
+                Text("读取本机 mihomo 连接列表。")
             }
+            Toggle(isOn: $model.recordsDomains) {
+                titleWithInfo(
+                    "记录访问的域名",
+                    info: "在本机保存主域名和流量，供应用详情和 JSON 导出使用。保存范围为主域名，不含完整网址、IP 和端口。"
+                )
+                Text("开启后，应用详情会显示域名用量。导出的 JSON 包含已记录的域名。")
+            }
+            .disabled(!model.readsMihomoConnections)
+            .focusable(false)
             LabeledContent("连接状态") {
                 Text(model.mihomoStatus.title)
                     .lineLimit(1)

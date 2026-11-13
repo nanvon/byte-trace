@@ -127,4 +127,20 @@ final class SupplementalResidualTrackerTests: XCTestCase {
             XCTAssertEqual(next.first?.domain, "fresh.example")
         }
     }
+
+    func testDiscardingDomainsPreservesResidualBytesAndRoute() {
+        var tracker = SupplementalResidualTracker()
+        let delta = connection("Dia.4", "127.0.0.1:50000<->127.0.0.1:7890", "lo0", 100)
+        _ = tracker.residuals(processTotals: [], connections: [delta], proxyEndpoints: [proxy], at: start) {
+            _ in RouteResolution(route: .proxyNode, domain: "example.com")
+        }
+        tracker.discardDomains()
+        let residuals = tracker.residuals(
+            processTotals: [total("Dia.4", 150)], connections: [delta],
+            proxyEndpoints: [proxy], at: start.addingTimeInterval(1)
+        ) { _ in RouteResolution(route: .proxyNode, domain: "example.net") }
+        XCTAssertEqual(residuals.map(\.delta.downloadBytes), [50])
+        XCTAssertEqual(residuals.map(\.route), [.proxyNode])
+        XCTAssertNil(residuals.first?.domain)
+    }
 }

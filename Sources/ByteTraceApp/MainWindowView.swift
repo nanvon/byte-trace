@@ -837,6 +837,7 @@ private struct AppDetailPanel: View {
     @ObservedObject var model: ByteTraceViewModel
 
     private static let programLimit = 8
+    private static let domainLimit = 8
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -850,6 +851,7 @@ private struct AppDetailPanel: View {
                 .padding(.trailing, 8)
 
             programSection
+            domainSection
 
             footnote
                 .padding(.leading, DetailLayout.rowLeading)
@@ -957,6 +959,74 @@ private struct AppDetailPanel: View {
         return rows
     }
 
+    @ViewBuilder
+    private var domainSection: some View {
+        let domains = model.detailDomains.filter { $0.appKey == record.appKey }
+        if !domains.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Text("域名")
+                        .foregroundStyle(.secondary)
+                    Text("\(domains.count)")
+                        .foregroundStyle(.tertiary)
+                }
+                .font(.caption)
+                .monospacedDigit()
+                .padding(.leading, DetailLayout.rowLeading)
+                .padding(.top, 14)
+                .padding(.bottom, 2)
+
+                DetailRowGroup(rows: domainRows(domains))
+            }
+        }
+    }
+
+    private func domainRows(_ domains: [ByteTraceExportDocument.DomainUsage]) -> [DetailRow.Item] {
+        let hostBytes = totalBytes(of: record)
+        let displayedCount = domains.count > Self.domainLimit + 1 ? Self.domainLimit : domains.count
+        var rows = domains.prefix(displayedCount).map { domain in
+            DetailRow.Item(
+                id: "domain:\(domain.domain)",
+                marker: .symbol("globe"),
+                name: domain.domain,
+                note: domainRouteNote(domain),
+                bytes: domain.totalBytes,
+                share: fraction(domain.totalBytes, of: hostBytes)
+            )
+        }
+        let remaining = domains.dropFirst(displayedCount)
+        if !remaining.isEmpty {
+            let bytes = remaining.reduce(Int64(0)) { saturatingAdd($0, $1.totalBytes) }
+            rows.append(DetailRow.Item(
+                id: "otherDomains", marker: .symbol("ellipsis"), name: "其他 \(remaining.count) 个",
+                note: nil, bytes: bytes, share: fraction(bytes, of: hostBytes)
+            ))
+        }
+        let identified = domains.reduce(Int64(0)) { saturatingAdd($0, $1.totalBytes) }
+        let unknown = max(hostBytes - identified, 0)
+        if unknown > 0 {
+            rows.append(DetailRow.Item(
+                id: "unknownDomain", marker: .symbol("questionmark"), name: "未识别域名",
+                note: nil, bytes: unknown, share: fraction(unknown, of: hostBytes),
+                help: "包括未经过 mihomo 的直连、未匹配到域名的连接和开启记录前的历史流量。"
+            ))
+        }
+        return rows
+    }
+
+    private func domainRouteNote(_ domain: ByteTraceExportDocument.DomainUsage) -> String? {
+        let node = domain.routeBytes[TrafficRoute.proxyNode.rawValue, default: 0]
+        let direct = domain.routeBytes[TrafficRoute.proxyRuleDirect.rawValue, default: 0]
+        let unknown = domain.routeBytes[TrafficRoute.proxied.rawValue, default: 0]
+        if unknown > 0, node == 0, direct == 0 { return "经代理" }
+        if node == domain.totalBytes { return "代理" }
+        if direct == domain.totalBytes { return "规则直连" }
+        if node > 0 {
+            return "代理 \(percentText(fraction(node, of: domain.totalBytes)))"
+        }
+        return direct > 0 ? "含规则直连" : nil
+    }
+
     // MARK: 用途说明与路径
 
     @ViewBuilder
@@ -1046,6 +1116,7 @@ private struct DetailRow: View {
         let note: String?
         let bytes: Int64
         let share: Double
+        var help: String? = nil
     }
 
     let item: Item
@@ -1084,7 +1155,7 @@ private struct DetailRow: View {
         .padding(.trailing, 8)
         .padding(.vertical, 7)
         .contentShape(Rectangle())
-        .help(item.note ?? "")
+        .help(item.help ?? item.note ?? "")
         .accessibilityElement(children: .combine)
     }
 
