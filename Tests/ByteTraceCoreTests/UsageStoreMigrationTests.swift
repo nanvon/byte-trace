@@ -5,6 +5,32 @@ import XCTest
 @testable import ByteTraceCore
 
 final class UsageStoreMigrationTests: XCTestCase {
+    func testVersionFourteenAddsEmptyDomainTableAndKeepsHistory() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("byte-trace-domain-migration-\(UUID().uuidString).sqlite3")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + "-wal")
+            try? FileManager.default.removeItem(atPath: url.path + "-shm")
+        }
+        let firstStore = try UsageStore(databaseURL: url)
+        let database = try SQLiteDatabase(url: url)
+        XCTAssertEqual(try database.scalarInt64("PRAGMA user_version;"), UsageStore.schemaVersion)
+        let now = Date()
+        try firstStore.apply([
+            DailyUsageAggregate(
+                day: "2026-11-12", appKey: "bundle:example", displayName: "示例", category: .userApp,
+                bundleID: nil, bundlePath: nil, executablePath: nil,
+                firstSeenAt: now, lastSeenAt: now, downloadBytes: 123, uploadBytes: 45, sampleCount: 1
+            )
+        ])
+        try database.execute("DROP TABLE daily_domain_usage; PRAGMA user_version = 13;")
+        let migrated = try UsageStore(databaseURL: url)
+        XCTAssertEqual(try database.scalarInt64("PRAGMA user_version;"), UsageStore.schemaVersion)
+        XCTAssertTrue(try migrated.domainUsage(from: "2026-11-12", through: "2026-11-12").isEmpty)
+        XCTAssertEqual(try migrated.dailyUsage(for: "2026-11-12").first?.downloadBytes, 123)
+    }
+
     func testLegacyCCBarUsageMovesToTheApplicationKey() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("byte-trace-migration-\(UUID().uuidString).sqlite3")

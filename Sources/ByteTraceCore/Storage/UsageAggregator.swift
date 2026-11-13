@@ -34,12 +34,20 @@ public final class UsageAggregator: @unchecked Sendable {
         let route: TrafficRoute
     }
 
+    private struct DomainKey: Hashable {
+        let day: String
+        let appKey: String
+        let domain: String
+        let route: TrafficRoute
+    }
+
     private let lock = NSLock()
     private let store: UsageStore
     private let calendar: Calendar
     private let maxPendingEntries: Int
     private var pending: [Key: Pending] = [:]
     private var pendingRoutes: [RouteKey: RouteUsageAggregate] = [:]
+    private var pendingDomains: [DomainKey: DomainUsageAggregate] = [:]
 
     public init(
         store: UsageStore,
@@ -63,6 +71,7 @@ public final class UsageAggregator: @unchecked Sendable {
         lock.lock()
         pending.removeAll(keepingCapacity: true)
         pendingRoutes.removeAll(keepingCapacity: true)
+        pendingDomains.removeAll(keepingCapacity: true)
         lock.unlock()
     }
 
@@ -94,6 +103,7 @@ public final class UsageAggregator: @unchecked Sendable {
             existing.daily = try merge(existing.daily, with: delta)
             existing.bucket = try merge(existing.bucket, with: delta)
             pending[key] = existing
+            recordDomain(delta, day: day)
             return
         }
 
@@ -133,6 +143,7 @@ public final class UsageAggregator: @unchecked Sendable {
                 program: delta.program
             )
         )
+        recordDomain(delta, day: day)
     }
 
     @discardableResult
@@ -146,11 +157,32 @@ public final class UsageAggregator: @unchecked Sendable {
         try store.apply(
             values.map(\.daily),
             bucketAggregates: values.map(\.bucket),
-            routeAggregates: Array(pendingRoutes.values)
+            routeAggregates: Array(pendingRoutes.values),
+            domainAggregates: Array(pendingDomains.values)
         )
         pending.removeAll(keepingCapacity: true)
         pendingRoutes.removeAll(keepingCapacity: true)
+        pendingDomains.removeAll(keepingCapacity: true)
         return values.count
+    }
+
+    private func recordDomain(_ delta: UsageDelta, day: String) {
+        guard delta.category != .proxyTransport, let route = delta.route, route.isProxied,
+              let domain = delta.domain, !domain.isEmpty else { return }
+        let key = DomainKey(day: day, appKey: delta.appKey, domain: domain, route: route)
+        let existing = pendingDomains[key]
+        guard existing != nil || pendingDomains.count < maxPendingEntries else { return }
+        pendingDomains[key] = DomainUsageAggregate(
+            day: day, appKey: delta.appKey, domain: domain, route: route,
+            lastSeenAt: max(existing?.lastSeenAt ?? delta.sampledAt, delta.sampledAt),
+            downloadBytes: saturatingAdd(existing?.downloadBytes ?? 0, delta.downloadBytes),
+            uploadBytes: saturatingAdd(existing?.uploadBytes ?? 0, delta.uploadBytes)
+        )
+    }
+
+    private func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int64.max : sum
     }
 
     private func merge(

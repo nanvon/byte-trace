@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 13
+    public static let schemaVersion: Int64 = 14
     public static let accountingVersion: Int64 = 3
 
     private let database: SQLiteDatabase
@@ -112,7 +112,8 @@ public final class UsageStore: @unchecked Sendable {
     public func apply(
         _ aggregates: [DailyUsageAggregate],
         bucketAggregates: [UsageBucketAggregate] = [],
-        routeAggregates: [RouteUsageAggregate] = []
+        routeAggregates: [RouteUsageAggregate] = [],
+        domainAggregates: [DomainUsageAggregate] = []
     ) throws {
         guard !aggregates.isEmpty || !bucketAggregates.isEmpty else { return }
 
@@ -173,6 +174,9 @@ public final class UsageStore: @unchecked Sendable {
             }
             for aggregate in routeAggregates {
                 try upsertRouteUsage(aggregate, using: routeStatement)
+            }
+            if !domainAggregates.isEmpty {
+                try applyDomainUsage(domainAggregates)
             }
             try database.execute("COMMIT;")
         } catch {
@@ -311,6 +315,59 @@ public final class UsageStore: @unchecked Sendable {
                     uploadBytes: $0.upload
                 )
             }
+        }
+    }
+
+    /// 按宿主、域名和路径汇总当前口径的日记录。省略宿主时返回所有应用。
+    public func domainUsage(
+        appKey: String? = nil,
+        from startDay: String,
+        through endDay: String
+    ) throws -> [DomainUsageRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        let appFilter = appKey == nil ? "" : "AND d.app_key = ?"
+        let statement = try database.prepare(
+            """
+            SELECT d.app_key, d.domain, d.route, d.download_bytes, d.upload_bytes
+            FROM daily_domain_usage AS d
+            JOIN apps AS a ON a.app_key = d.app_key
+            WHERE d.accounting_version = ? AND d.day >= ? AND d.day <= ?
+                AND a.category != ? \(appFilter);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try database.bind(Self.accountingVersion, at: 1, in: statement)
+        try database.bind(startDay, at: 2, in: statement)
+        try database.bind(endDay, at: 3, in: statement)
+        try database.bind(AppCategory.proxyTransport.rawValue, at: 4, in: statement)
+        if let appKey { try database.bind(appKey, at: 5, in: statement) }
+
+        struct Key: Hashable {
+            let appKey: String
+            let domain: String
+            let route: TrafficRoute
+        }
+        var totals: [Key: (download: Int64, upload: Int64)] = [:]
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw SQLiteDatabaseError.stepFailed(database.errorMessage)
+            }
+            guard let app = database.columnString(statement, at: 0),
+                  let domain = database.columnString(statement, at: 1),
+                  let route = TrafficRoute(rawValue: database.columnString(statement, at: 2) ?? "") else { continue }
+            let key = Key(appKey: app, domain: domain, route: route)
+            let existing = totals[key] ?? (0, 0)
+            totals[key] = (
+                Self.saturatingAdd(existing.download, sqlite3_column_int64(statement, 3)),
+                Self.saturatingAdd(existing.upload, sqlite3_column_int64(statement, 4))
+            )
+        }
+        return totals.map { key, bytes in
+            DomainUsageRecord(appKey: key.appKey, domain: key.domain, route: key.route,
+                              downloadBytes: bytes.download, uploadBytes: bytes.upload)
         }
     }
 
@@ -973,6 +1030,7 @@ public final class UsageStore: @unchecked Sendable {
         defer { lock.unlock() }
         try database.execute("DELETE FROM usage_buckets;")
         try database.execute("DELETE FROM daily_route_usage;")
+        try database.execute("DELETE FROM daily_domain_usage;")
         try database.execute("DELETE FROM process_names;")
         try database.execute("DELETE FROM daily_usage;")
         try database.execute("DELETE FROM programs;")
@@ -1234,6 +1292,26 @@ public final class UsageStore: @unchecked Sendable {
 
         if currentVersion <= 12 {
             try mergeLegacyHost()
+        }
+
+        if currentVersion <= 13 {
+            try database.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_domain_usage (
+                    accounting_version INTEGER NOT NULL CHECK (accounting_version > 0),
+                    day TEXT NOT NULL,
+                    app_key TEXT NOT NULL,
+                    domain TEXT NOT NULL,
+                    route TEXT NOT NULL,
+                    download_bytes INTEGER NOT NULL DEFAULT 0 CHECK (download_bytes >= 0),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (upload_bytes >= 0),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (accounting_version, day, app_key, domain, route),
+                    FOREIGN KEY (app_key) REFERENCES apps(app_key)
+                );
+                PRAGMA user_version = 14;
+                """
+            )
         }
     }
 
@@ -2227,6 +2305,37 @@ public final class UsageStore: @unchecked Sendable {
         try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 8, in: statement)
         try database.stepDone(statement)
         try database.reset(statement)
+    }
+
+    private func applyDomainUsage(_ aggregates: [DomainUsageAggregate]) throws {
+        let statement = try database.prepare(
+            """
+            INSERT INTO daily_domain_usage (
+                accounting_version, day, app_key, domain, route, download_bytes, upload_bytes, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(accounting_version, day, app_key, domain, route) DO UPDATE SET
+                download_bytes = CASE
+                    WHEN excluded.download_bytes > 9223372036854775807 - daily_domain_usage.download_bytes
+                    THEN 9223372036854775807 ELSE daily_domain_usage.download_bytes + excluded.download_bytes END,
+                upload_bytes = CASE
+                    WHEN excluded.upload_bytes > 9223372036854775807 - daily_domain_usage.upload_bytes
+                    THEN 9223372036854775807 ELSE daily_domain_usage.upload_bytes + excluded.upload_bytes END,
+                updated_at = MAX(daily_domain_usage.updated_at, excluded.updated_at);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        for aggregate in aggregates {
+            try database.bind(Self.accountingVersion, at: 1, in: statement)
+            try database.bind(aggregate.day, at: 2, in: statement)
+            try database.bind(aggregate.appKey, at: 3, in: statement)
+            try database.bind(aggregate.domain, at: 4, in: statement)
+            try database.bind(aggregate.route.rawValue, at: 5, in: statement)
+            try database.bind(aggregate.downloadBytes, at: 6, in: statement)
+            try database.bind(aggregate.uploadBytes, at: 7, in: statement)
+            try database.bind(Self.timestamp(aggregate.lastSeenAt), at: 8, in: statement)
+            try database.stepDone(statement)
+            try database.reset(statement)
+        }
     }
 
     private func upsertApp(

@@ -14,6 +14,7 @@ public struct UsageDelta: Equatable, Sendable {
     public let route: TrafficRoute?
     /// 宿主之下的程序；nil 为宿主应用自身。
     public let program: AttributedProgram?
+    public let domain: String?
 
     public var programKey: String { program?.key ?? "" }
 
@@ -28,10 +29,12 @@ public struct UsageDelta: Equatable, Sendable {
         downloadBytes: Int64,
         uploadBytes: Int64,
         route: TrafficRoute? = nil,
-        program: AttributedProgram? = nil
+        program: AttributedProgram? = nil,
+        domain: String? = nil
     ) {
         self.route = route
         self.program = program
+        self.domain = domain
         self.sampledAt = sampledAt
         self.appKey = appKey
         self.displayName = displayName
@@ -39,6 +42,43 @@ public struct UsageDelta: Equatable, Sendable {
         self.bundleID = bundleID
         self.bundlePath = bundlePath
         self.executablePath = executablePath
+        self.downloadBytes = downloadBytes
+        self.uploadBytes = uploadBytes
+    }
+}
+
+public struct DomainUsageAggregate: Equatable, Sendable {
+    public let day: String
+    public let appKey: String
+    public let domain: String
+    public let route: TrafficRoute
+    public let lastSeenAt: Date
+    public let downloadBytes: Int64
+    public let uploadBytes: Int64
+
+    public init(day: String, appKey: String, domain: String, route: TrafficRoute, lastSeenAt: Date,
+                downloadBytes: Int64, uploadBytes: Int64) {
+        self.day = day
+        self.appKey = appKey
+        self.domain = domain
+        self.route = route
+        self.lastSeenAt = lastSeenAt
+        self.downloadBytes = downloadBytes
+        self.uploadBytes = uploadBytes
+    }
+}
+
+public struct DomainUsageRecord: Equatable, Sendable {
+    public let appKey: String
+    public let domain: String
+    public let route: TrafficRoute
+    public let downloadBytes: Int64
+    public let uploadBytes: Int64
+
+    public init(appKey: String, domain: String, route: TrafficRoute, downloadBytes: Int64, uploadBytes: Int64) {
+        self.appKey = appKey
+        self.domain = domain
+        self.route = route
         self.downloadBytes = downloadBytes
         self.uploadBytes = uploadBytes
     }
