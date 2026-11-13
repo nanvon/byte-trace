@@ -70,6 +70,33 @@ final class MihomoTests: XCTestCase {
         }
     }
 
+    func testCacheExpiresOnReadAndKeepsClosedConnectionsWithinRetention() {
+        let tracker = MihomoRouteTracker(retention: 60)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let endpoint = NettopEndpoint(host: "127.0.0.1", port: 50001)
+        let connection = MihomoConnection(id: "a", source: endpoint, route: .proxyNode, downloadBytes: 0, uploadBytes: 0)
+        tracker.update(with: MihomoConnectionsSnapshot(downloadTotal: 0, uploadTotal: 0, connections: [connection]), at: now)
+        tracker.update(with: MihomoConnectionsSnapshot(downloadTotal: 0, uploadTotal: 0, connections: []), at: now.addingTimeInterval(1))
+        XCTAssertEqual(tracker.route(forLocalEndpoint: endpoint, at: now.addingTimeInterval(60)), .proxyNode)
+        XCTAssertNil(tracker.route(forLocalEndpoint: endpoint, at: now.addingTimeInterval(61)))
+        tracker.removeAll()
+        XCTAssertNil(tracker.route(forLocalEndpoint: endpoint, at: now.addingTimeInterval(2)))
+    }
+
+    func testConflictingRoutesForSameEndpointRemainUnknown() throws {
+        let snapshot = try MihomoConnectionsParser.parse(Data("""
+        {"connections": [
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001"},"chains":["node"]},
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001"},"chains":["DIRECT"]},
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001"},"chains":["PASS"]}
+        ]}
+        """.utf8))
+        let tracker = MihomoRouteTracker()
+        tracker.update(with: snapshot)
+        let endpoint = NettopEndpoint(host: "127.0.0.1", port: 50001)
+        XCTAssertEqual(tracker.route(forLocalEndpoint: endpoint), .proxied)
+    }
+
     func testProcessArgumentsOfCurrentProcess() throws {
         let arguments = try XCTUnwrap(MihomoControllerDiscovery.processArguments(pid: getpid()))
         XCTAssertEqual(arguments.count, CommandLine.arguments.count)

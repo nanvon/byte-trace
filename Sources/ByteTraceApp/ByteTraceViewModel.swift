@@ -439,8 +439,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private var recordedProcessNames: [String: ProcessNameAttribution] = [:]
     private var pendingProcessNames: [String: ProcessNameAttribution] = [:]
     private var mihomoController: MihomoController?
+    private var lastSuccessfulMihomoController: MihomoController?
     private var mihomoTimer: Timer?
-    private var mihomoFetchInFlight = false
+    private var mihomoRequestID: UUID?
     private var lastMihomoDiscoveryAt: Date?
     private var lastSupplementalTrafficAt: Date?
     /// 最近出现过流量的代理传输进程 pid，用来读取内核命令行参数找控制器。
@@ -1408,6 +1409,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             mihomoTimer?.invalidate()
             mihomoTimer = nil
             mihomoController = nil
+            lastSuccessfulMihomoController = nil
+            mihomoRequestID = nil
             mihomoRouteTracker.removeAll()
             mihomoStatus = readsMihomoConnections ? .idle : .disabled
             return
@@ -1432,7 +1435,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private func mihomoTimerFired() {
-        guard readsMihomoConnections, wantsCollection, !mihomoFetchInFlight else { return }
+        guard readsMihomoConnections, wantsCollection, mihomoRequestID == nil else { return }
         guard hasRecentSupplementalTraffic else {
             mihomoTimer?.invalidate()
             mihomoTimer = nil
@@ -1447,37 +1450,47 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 return
             }
             lastMihomoDiscoveryAt = now
-            mihomoController = discoverMihomoController()
-            guard mihomoController != nil else {
+            guard let discovered = discoverMihomoController() else {
                 mihomoStatus = .searching
                 return
             }
+            if discovered != lastSuccessfulMihomoController {
+                mihomoRouteTracker.removeAll()
+            }
+            mihomoController = discovered
         }
         guard let controller = mihomoController else { return }
 
-        mihomoFetchInFlight = true
+        let requestID = UUID()
+        mihomoRequestID = requestID
         let client = mihomoClient
-        let tracker = mihomoRouteTracker
         Task.detached(priority: .utility) { [weak self] in
-            let result: Result<Int, Error>
+            let result: Result<MihomoConnectionsSnapshot, Error>
             do {
                 let data = try await client.get("/connections", from: controller)
-                let snapshot = try MihomoConnectionsParser.parse(data)
-                tracker.update(with: snapshot)
-                result = .success(snapshot.connections.count)
+                result = .success(try MihomoConnectionsParser.parse(data))
             } catch {
                 result = .failure(error)
             }
             await MainActor.run { [weak self] in
-                self?.finishMihomoFetch(result, controller: controller)
+                self?.finishMihomoFetch(result, controller: controller, requestID: requestID)
             }
         }
     }
 
-    private func finishMihomoFetch(_ result: Result<Int, Error>, controller: MihomoController) {
-        mihomoFetchInFlight = false
+    private func finishMihomoFetch(
+        _ result: Result<MihomoConnectionsSnapshot, Error>,
+        controller: MihomoController,
+        requestID: UUID
+    ) {
+        guard mihomoRequestID == requestID else { return }
+        mihomoRequestID = nil
+        guard readsMihomoConnections, wantsCollection, mihomoController == controller else { return }
         switch result {
-        case let .success(count):
+        case let .success(snapshot):
+            mihomoRouteTracker.update(with: snapshot)
+            lastSuccessfulMihomoController = controller
+            let count = snapshot.connections.count
             if mihomoStatus != .connected(connectionCount: count) {
                 if case .connected = mihomoStatus {} else {
                     recordCollectorEvent(kind: "mihomo_connected")
@@ -1486,7 +1499,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             }
         case let .failure(error):
             // 内核重启后地址可能变化：清掉控制器，下一轮按间隔重新发现。
-            if mihomoController == controller { mihomoController = nil }
+            mihomoController = nil
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             if mihomoStatus != .failed(message) {
                 recordCollectorEvent(kind: "mihomo_unavailable", details: message)

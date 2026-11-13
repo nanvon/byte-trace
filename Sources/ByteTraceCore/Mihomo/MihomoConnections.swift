@@ -110,18 +110,29 @@ public final class MihomoRouteTracker: @unchecked Sendable {
     public func update(with snapshot: MihomoConnectionsSnapshot, at now: Date = Date()) {
         lock.lock()
         defer { lock.unlock() }
+        var snapshotRoutes: [NettopEndpoint: TrafficRoute] = [:]
         for connection in snapshot.connections {
-            entries[connection.source] = Entry(route: connection.route, lastSeen: now)
+            if let existing = snapshotRoutes[connection.source], existing != connection.route {
+                snapshotRoutes[connection.source] = .proxied
+            } else {
+                snapshotRoutes[connection.source] = connection.route
+            }
+        }
+        for (endpoint, route) in snapshotRoutes {
+            entries[endpoint] = Entry(route: route, lastSeen: now)
         }
         entries = entries.filter { now.timeIntervalSince($0.value.lastSeen) <= retention }
         lastUpdate = now
     }
 
-    public func route(forLocalEndpoint endpoint: NettopEndpoint?) -> TrafficRoute? {
+    public func route(forLocalEndpoint endpoint: NettopEndpoint?, at now: Date = Date()) -> TrafficRoute? {
         guard let endpoint else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        return entries[endpoint]?.route
+        guard let entry = entries[endpoint], now.timeIntervalSince(entry.lastSeen) <= retention else {
+            return nil
+        }
+        return entry.route
     }
 
     public var isActive: Bool {
