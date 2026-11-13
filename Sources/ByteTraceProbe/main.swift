@@ -73,6 +73,25 @@ private struct CurlResult {
     let status: Int32
 }
 
+private enum ProbeCheckOutcome {
+    case passed
+    case failed
+    case skipped
+}
+
+private func probeResult(_ checks: [(name: String, outcome: ProbeCheckOutcome)]) -> (status: Int32, line: String) {
+    let failed = checks.filter { $0.outcome == .failed }.map(\.name)
+    let skipped = checks.filter { $0.outcome == .skipped }.map(\.name)
+    let skippedDetails = skipped.isEmpty ? "" : " skipped=\(skipped.joined(separator: ","))"
+    if !failed.isEmpty {
+        return (1, "[result] FAIL failed=\(failed.joined(separator: ","))\(skippedDetails)")
+    }
+    if !skipped.isEmpty {
+        return (2, "[result] PARTIAL\(skippedDetails)")
+    }
+    return (0, "[result] PASS")
+}
+
 private enum ProbeLane: String {
     case external
     case supplemental
@@ -302,7 +321,7 @@ private func endpointLabel(_ endpoint: NettopEndpoint) -> String {
 private func runCurl(label: String, url: String, proxy: String?, extraArguments: [String] = []) -> CurlResult? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-    var arguments = ["-s", "-o", "/dev/null", "-w", "%{size_download} %{size_header} %{size_upload} %{size_request}"]
+    var arguments = ["-s", "--fail", "-o", "/dev/null", "-w", "%{size_download} %{size_header} %{size_upload} %{size_request}"]
     if let proxy {
         arguments += ["-x", proxy]
     } else {
@@ -395,6 +414,7 @@ private func discoverMihomoController() -> MihomoController {
 }
 
 private func runProbe(options: Options) -> Int32 {
+    var checks: [(name: String, outcome: ProbeCheckOutcome)] = []
     let runtime: ProbeRuntime
     do {
         runtime = try ProbeRuntime()
@@ -560,23 +580,35 @@ private func runProbe(options: Options) -> Int32 {
             RunLoop.main.run(until: Date().addingTimeInterval(11))
             if let direct = runCurl(label: "direct", url: url, proxy: nil) {
                 accuracyResults.append(direct)
+            } else {
+                checks.append(("direct", .failed))
             }
             if let endpoint = runtime.proxyEndpointMonitor.currentLoopbackEndpoints.first {
                 if let proxied = runCurl(label: "system_proxy", url: url, proxy: "http://\(endpointLabel(endpoint))") {
                     accuracyResults.append(proxied)
+                } else {
+                    checks.append(("system_proxy", .failed))
                 }
-                if options.checksRoutes,
-                   let ruleDirect = runCurl(
-                       label: "rule_direct",
-                       url: Options.ruleDirectURL,
-                       proxy: "http://\(endpointLabel(endpoint))",
-                       extraArguments: ["-r", "0-19999999"]
-                   ) {
-                    accuracyResults.append(ruleDirect)
+                if options.checksRoutes {
+                    if let ruleDirect = runCurl(
+                        label: "rule_direct",
+                        url: Options.ruleDirectURL,
+                        proxy: "http://\(endpointLabel(endpoint))",
+                        extraArguments: ["-r", "0-19999999"]
+                    ) {
+                        accuracyResults.append(ruleDirect)
+                    } else {
+                        checks.append(("rule_direct", .failed))
+                    }
                 }
                 routeExpectations = ["system_proxy": .proxyNode, "rule_direct": .proxyRuleDirect]
             } else {
                 print("[accuracy] case=system_proxy skipped reason=no_system_proxy")
+                checks.append(("system_proxy", .skipped))
+                if options.checksRoutes {
+                    print("[routes] case=rule_direct skipped reason=no_system_proxy")
+                    checks.append(("rule_direct", .skipped))
+                }
             }
             // curl 退出后至少再等一帧外部通道，让最后的增量落到计数里。
             RunLoop.main.run(until: Date().addingTimeInterval(7))
@@ -589,23 +621,17 @@ private func runProbe(options: Options) -> Int32 {
         runtime.supplementalCollector.stop()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
 
-        var accuracyPassed = true
         for result in accuracyResults {
-            accuracyPassed = reportAccuracy(result, counters: runtime.counters) && accuracyPassed
-        }
-        if options.checksRoutes {
-            var routesPassed = !accuracyResults.isEmpty
-            for result in accuracyResults {
+            let accuracyPassed = reportAccuracy(result, counters: runtime.counters)
+            var routesPassed = true
+            if options.checksRoutes {
                 routesPassed = reportRoutes(
                     result,
                     expected: routeExpectations[result.label],
                     counters: runtime.counters
-                ) && routesPassed
+                )
             }
-            print("[routes] result=\(routesPassed ? "PASS" : "FAIL")")
-        }
-        if options.accuracyURL != nil {
-            print("[accuracy] result=\(accuracyPassed && !accuracyResults.isEmpty ? "PASS" : "FAIL")")
+            checks.append((result.label, accuracyPassed && routesPassed ? .passed : .failed))
         }
 
         let flushedEntries = try runtime.aggregator.flush()
@@ -643,6 +669,21 @@ private func runProbe(options: Options) -> Int32 {
     print("[probe] supplemental_frames=\(summary.supplementalFrames)")
     print("[probe] external_samples=\(summary.externalSamples)")
     print("[probe] supplemental_samples=\(summary.supplementalSamples)")
+
+    if options.accuracyURL != nil {
+        if summary.externalFrames == 0 || summary.supplementalFrames == 0 {
+            checks.append(("collector_frames", .failed))
+        }
+        if summary.incompatibleSchemas > 0 {
+            checks.append(("collector_schema", .failed))
+        }
+        if summary.storageErrors > 0 {
+            checks.append(("storage", .failed))
+        }
+        let result = probeResult(checks)
+        print(result.line)
+        return result.status
+    }
 
     guard summary.externalFrames > 0, summary.supplementalFrames > 0 else {
         print("[result] FAIL: 未从两个 nettop 通道都获得完整 CSV 帧")
