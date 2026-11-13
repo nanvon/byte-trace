@@ -2,7 +2,7 @@
 
 > 代码基线：`8ae3281`（v0.1.41 之后），与 [REVIEW_2026-11.md](REVIEW_2026-11.md)、[FEATURE_PLAN_2026-11.md](FEATURE_PLAN_2026-11.md) 相同
 > 前提不变：不使用 Apple 付费开发者身份，不加 root，不启用 Network Extension，ad-hoc 签名，不引入第三方依赖
-> 状态：D1、D2 和 D3 的探针代码已实现，D3 的覆盖率测量待运行。D4–D6 待测量后决定。任务清单见 §9。
+> 状态：D1–D6 已实施。覆盖率实测见 §5。任务清单见 §9。
 
 本文的「读代码」指基线 `8ae3281` 的静态阅读，行号是该基线下的位置。实施后的字段核对见 §4.3，覆盖率测量见 §5。
 
@@ -55,7 +55,7 @@
 
 - **REVIEW 的 T4 是前置任务**。路径分错只影响分类；域名分错会把流量记到别的域名上。本文任务 D1 就是执行 T4，细则以 REVIEW §8.6 为准。
 - **与 F1b 共用 `RouteResolution`**。F1b §2.3 第 1 条定义的 `RouteResolution` 只有 `route` 和 `exitName`；本文的定义多一个 `domain`（§4.1）。谁先实施谁定义，后做的一方只补自己的字段和表。两份方案改同一批文件（`TrafficRoute.swift`、`MihomoConnections.swift`、`TrafficFilter.swift`、`SupplementalResidualTracker.swift`、`UsageModels.swift`、`UsageAggregator.swift`），不要并行做。
-- **schema 版本**。REVIEW 的 T1 占用版本 14。本文的迁移使用实施时的 `UsageStore.schemaVersion + 1`，不要写死。
+- **schema 版本**。域名用量使用版本 14。REVIEW 的 T1 追加下一 schema 版本。
 - **导出版本**。使用实施时 `exportCurrentRange(to:)` 里的 `formatVersion + 1`（基线是 5，`ByteTraceViewModel.swift:936`）。
 - **NStat 数据源（REVIEW §1）**。域名匹配依赖每条连接的应用侧本地端点。本文作者只读了 REVIEW 的结论部分，没有核对 NStat 方案是否保留这个字段（未验证）。如果先换数据源，要先确认这一点。
 
@@ -119,7 +119,7 @@ public enum DomainName {
 - `Payload.Connection.Metadata` 增加可选字段 `host`、`sniffHost`（均为 `String?`）。
 - `MihomoConnection` 增加 `exitName: String?` 与 `domain: String?`，`init` 末尾带默认值 `nil`，已有调用不用改。
 - `domain = DomainName.registrable(host)`；`host` 为空或得到 `nil` 时再试 `sniffHost`。
-- 只有 `--domains` 探针显式开启域名字段解码，正式应用仍只使用出口路径。
+- `--domains` 探针会解码域名字段。正式应用在「代理分流」与「记录访问的域名」同时开启时才解码并记录域名。
 - `exitName` = `chains.first` 去空白，仅在 `route == .proxyNode` 时保留。
 
 **已核对**：2026-11-13 对本机 ClashBar 的 mihomo 发送一次只读 `GET /connections`，返回 82 条连接，`metadata.host` 和 `metadata.sniffHost` 的值均为字符串。换控制器时可用以下命令复查字段（把地址换成实际的控制器；Clash Verge 用 unix socket 时加 `--unix-socket /tmp/verge/verge-mihomo.sock`）：
@@ -250,7 +250,7 @@ public func domainUsage(appKey: String, from startDay: String, through endDay: S
 - `DomainShare` 放在应用层：域名、总字节、各路径字节。同一域名的多条路径合成一行。
 - `clearAllData`（889 行）里清空 `detailDomains`。
 
-日期范围：「今天」「本周」「本月」等按日汇总的范围直接用同一组 `startDay` / `endDay`。「最近 10 分钟」「最近 1 小时」没有分钟级的域名数据，显示今天的并注明，处理方式与现有路径拆分在这些范围下的做法保持一致（以 `loadRangeRoutes` 的实际行为为准）。
+日期范围：「今天」「本周」「本月」等按日汇总的范围直接用同一组 `startDay` / `endDay`。当前主窗口提供今日、本周、本月、上月和全部五档，域名与应用总量使用相同的日期范围。菜单栏的分钟趋势不展示域名。
 
 ### 4.10 界面
 
@@ -262,14 +262,13 @@ public func domainUsage(appKey: String, from startDay: String, through endDay: S
 - 排序按总字节降序。前 8 个之外合并为「其他 N 个」，只多出一项时直接列出（与 `programRows` 的 944–956 行同一规则）。
 - 末尾一行「未识别域名」= 应用总量 − 域名合计，大于 0 时显示，`marker` 用 `.symbol("questionmark")`。`.help(...)`：`没有匹配到域名的流量：不经过 mihomo 的直连、很快结束的连接、只有 IP 的连接，以及开启记录之前的历史。`
 - 该应用在范围内没有任何域名记录时整组不显示。
-- 「最近 10 分钟 / 1 小时」下标题后加一句浅色说明「按今天统计」。
 - 域名行不可点击，不需要焦点处理。域名文字加 `.textSelection(.enabled)` 时确认不出现焦点环。
 
 菜单栏面板不改。
 
 `SettingsView.swift` 的 `proxySection`（82 行）：
 
-- 现有开关的说明（87 行）去掉「不读取域名」，改为：`有经代理流量时每 2 秒读取本机 mihomo 控制器的连接列表，按连接判断走节点还是命中 DIRECT 规则。字节仍以 nettop 为准，不上传数据。`89 行的副标题改为 `读取本机 mihomo 连接列表。`
+- 现有开关的说明（87 行）去掉「不读取域名」，改为：`有经代理流量时每秒读取本机 mihomo 控制器的连接列表，按连接判断走节点还是命中 DIRECT 规则。字节仍以 nettop 为准，不上传数据。`89 行的副标题改为 `读取本机 mihomo 连接列表。`
 - 新增开关「记录访问的域名」，说明：`把每个应用访问的主域名和流量保存在本机数据库，用于在应用详情里查看域名排行。只保存域名，不保存完整网址、IP 和端口；导出的文件会包含域名。`
 - 「代理分流」关闭时新开关置灰。新开关加 `.focusable(false)`。
 
@@ -326,7 +325,14 @@ swift run ByteTraceProbe --duration 300 --domains --mihomo-interval 1
 - 2 秒不到、1 秒达到：把应用的 `mihomoPollInterval` 改为 1 秒后继续，并在 `CLAUDE.md` 记录由此增加的唤醒。
 - 1 秒也不到：停下来。候选是改用 mihomo 的 WebSocket 推送，或放宽残差的域名规则，需要另写方案。
 
-两轮覆盖率测量待运行。测量结果写在本节末尾。
+2026-11-13 在本机 ClashBar / mihomo 环境连续观察两轮，每轮 300 秒。每轮均有 61 帧外部通道、301 帧补充通道，退出码 0，存储错误 0。
+
+| 轮询间隔 | 补充通道字节 | 已匹配域名字节 | 覆盖率 | 主域名数 | 成功／失败快照 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2 秒 | 27,151,241 | 21,979,490 | 80.95% | 33 | 150／0 |
+| 1 秒 | 255,994,795 | 252,303,336 | 98.56% | 38 | 299／0 |
+
+2 秒轮次的残差为 3,523,035 字节，其中 41,582 字节匹配到域名。1 秒轮次分别为 5,290,093 和 2,302,333 字节。两轮观察的是不同的自然流量，覆盖率差值不能单独归因于轮询间隔。按 85% 的方案门槛继续，应用改为 1 秒轮询，域名记录默认关闭。
 
 ## 6. 已知局限（实施后写进 `CLAUDE.md`）
 
@@ -371,9 +377,9 @@ swift run ByteTraceProbe --duration 300 --domains --mihomo-interval 1
 | --- | --- | --- | --- |
 | D1 mihomo 缓存修正 | REVIEW §8.6（即 T4；已完成则跳过） | `MihomoConnections.swift`、`ByteTraceViewModel.swift` 的 mihomo 一段、`MihomoTests.swift` | REVIEW §8.6 的四个测试；`swift build` 通过 |
 | D2 域名随连接传递 | §4.1–§4.6 | `TrafficRoute.swift`、新增 `Mihomo/DomainName.swift`、`MihomoConnections.swift`、`TrafficFilter.swift`、`SupplementalResidualTracker.swift`；测试 `DomainNameTests.swift`（新增）、`MihomoTests.swift`、`RouteUsageTests.swift`、`SupplementalResidualTrackerTests.swift`、`TrafficFilterTests.swift`；为保持编译而改的调用点：`ByteTraceViewModel.swift:1296`、`1399`，`Sources/ByteTraceProbe/main.swift:420` | 先按 §4.3 确认 mihomo 字段名；§4.2、§4.4、§4.5、§4.6 的测试；应用行为不变（ViewModel 这一步丢弃域名）；`swift build` 通过 |
-| D3 探针测量 | §5 | `Sources/ByteTraceProbe/main.swift`、本文 §5 | `--domains` 可运行；用户跑完两次测量，数字写回本文；**停下来等用户决定是否继续** |
+| D3 探针测量 | §5 | `Sources/ByteTraceProbe/main.swift`、本文 §5 | 两轮测量结果已写回 §5；1 秒轮次达到方案门槛 |
 | D4 聚合与存储 | §4.7、§4.8 | `UsageModels.swift`、`UsageAggregator.swift`、`UsageStore.swift`；测试 `UsageAggregatorTests.swift`、`DomainUsageTests.swift`（新增）、`UsageStoreMigrationTests.swift` | §4.7、§4.8 的测试与不变量；迁移测试；`swift build` 通过。此时还没有任何代码往新表写数据 |
-| D5 开关、界面与导出 | §4.9–§4.11 | `ByteTraceViewModel.swift`、`MainWindowView.swift`、`SettingsView.swift`、`ByteTraceExport.swift` | `swift build` 通过；列出未经运行验证的界面行为交用户检查：开关默认关闭且升级后不记录；开启后展开应用能看到域名；关闭「代理分流」时新开关置灰；三种范围下的显示；打开设置页没有控件被自动选中 |
+| D5 开关、界面与导出 | §4.9–§4.11 | `ByteTraceViewModel.swift`、`MainWindowView.swift`、`SettingsView.swift`、`ByteTraceExport.swift`；缓存与残差历史在关闭记录时清除域名标签 | 应用编译通过。界面待人工验证：开关默认关闭且升级后不记录；开启后展开应用能看到域名；关闭「代理分流」时开关置灰；五个日期范围的显示与导出；打开设置页没有控件被自动选中 |
 | D6 文档 | §8 | `CLAUDE.md`、`docs/NEXT_MAJOR_VERSION_PLAN.md`、`docs/FEATURE_PLAN_2026-11.md`、本文状态行 | 与实际实现一致 |
 
 D5 完成后交用户核对真实数据。运行一段时间后执行下面的命令，与 mihomo 面板里同一应用的域名用量对照量级：

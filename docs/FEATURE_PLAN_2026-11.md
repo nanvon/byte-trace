@@ -28,7 +28,7 @@
 | F3 | 新出现的应用与程序 | 列表里标出本期首次联网的应用和程序 | 否 | 低 |
 | F4 | 隐藏、置顶与右键菜单 | 列表可整理；行上可直接打开访达、拷贝路径 | 否 | 低–中 |
 
-与 REVIEW 任务的关系：F1b 与 REVIEW 的 T4 都改 `MihomoRouteTracker`，先做 T4。REVIEW 的 T1 占用 schema 版本 14；F1b 的迁移使用实施时的 `UsageStore.schemaVersion + 1`，不要写死版本号。其余互不依赖。
+与 REVIEW 任务的关系：F1b 依赖 REVIEW 的 T4（已完成），并复用域名方案已实现的 `RouteResolution`。域名统计已使用 schema 14，F1b 的迁移使用实施时的 `UsageStore.schemaVersion + 1`。其余互不依赖。
 
 ## 2. F1：代理用量周期与节点统计
 
@@ -112,7 +112,9 @@ public func routeTotals(from startDay: String, through endDay: String) throws ->
 
 ### 2.3 F1b：按节点统计（新增一张表）
 
-**需用户先确认的一点**：现在的约定是连接表「不落库」（`CLAUDE.md`「mihomo 连接表」一节）。本项会把**节点名称**写入本机数据库，域名、IP、端口仍然不保存。用户同意后再实施。
+**需用户先确认的一点**：现在的约定是连接表「不落库」（`CLAUDE.md`「mihomo 连接表」一节）。本项会把**节点名称**写入本机数据库。域名用量由独立开关控制，连接 IP 和端口不保存。用户同意后再实施。
+
+域名方案已实现 `RouteResolution`（含 `route`、`exitName`、`domain`）、连接快照匹配和归并传递。以下原方案的第 1–3 项已有实现，后续只需补节点残差、应用写入、节点表及界面。沿用当前的冲突处理：出口路径不同时记出口未知，同路径时只舍弃不一致的字段。
 
 **数据怎么流过去**。节点名要从 mihomo 缓存一路带到聚合器，中间有两处会按路径合并连接（`SupplementalTrafficReducer`、`SupplementalResidualTracker`），合并键里要加上节点名，否则同一进程走不同节点的连接会被并成一条。
 
