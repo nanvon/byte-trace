@@ -23,6 +23,7 @@ struct SettingsView: View {
             aboutSection
         }
         .formStyle(.grouped)
+        .scrollIndicators(.never, axes: .vertical)
         .frame(maxWidth: Self.maxContentWidth)
         .frame(maxWidth: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -81,22 +82,30 @@ struct SettingsView: View {
 
     private var proxySection: some View {
         Section("代理分流") {
-            Toggle(isOn: $model.readsMihomoConnections) {
-                titleWithInfo(
-                    "区分代理节点与规则直连",
-                    info: "有经代理流量时每秒读取本机 mihomo 的连接列表，区分代理节点与规则直连。字节由 nettop 统计，数据保存在本机。"
-                )
+            LabeledContent {
+                HStack(spacing: 8) {
+                    infoIcon("有经代理流量时每秒读取本机 mihomo 的连接列表，区分代理节点与规则直连。字节由 nettop 统计，数据保存在本机。")
+                    Toggle("区分代理节点与规则直连", isOn: $model.readsMihomoConnections)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+            } label: {
+                Text("区分代理节点与规则直连")
                 Text("读取本机 mihomo 连接列表。")
             }
-            Toggle(isOn: $model.recordsDomains) {
-                titleWithInfo(
-                    "记录访问的域名",
-                    info: "在本机保存主域名和流量，供应用详情和 JSON 导出使用。保存范围为主域名，不含完整网址、IP 和端口。"
-                )
+            LabeledContent {
+                HStack(spacing: 8) {
+                    infoIcon("在本机保存主域名和流量，供应用详情和 JSON 导出使用。保存范围为主域名，不含完整网址、IP 和端口。")
+                    Toggle("记录访问的域名", isOn: $model.recordsDomains)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(!model.readsMihomoConnections)
+                        .focusable(false)
+                }
+            } label: {
+                Text("记录访问的域名")
                 Text("开启后，应用详情会显示域名用量。导出的 JSON 包含已记录的域名。")
             }
-            .disabled(!model.readsMihomoConnections)
-            .focusable(false)
             LabeledContent("连接状态") {
                 Text(model.mihomoStatus.title)
                     .lineLimit(1)
@@ -195,28 +204,20 @@ struct SettingsView: View {
                     "上次检查：\($0.formatted(date: .abbreviated, time: .shortened))。下载与安装由你确认。"
                 } ?? "只自动检查新版本，下载与安装由你确认。")
             }
-            LabeledContent {
-                Text("系统 nettop")
-            } label: {
-                titleWithInfo(
-                    "数据来源",
-                    info: "统计应用逻辑流量；代理传输流量单独显示，不计入应用总量。所有数据只保存在本机。"
-                )
+            LabeledContent("数据来源") {
+                HStack(spacing: 8) {
+                    infoIcon("统计应用逻辑流量；代理传输流量单独显示，不计入应用总量。所有数据只保存在本机。")
+                    Text("系统 nettop")
+                }
             }
         }
     }
 
     // MARK: - 控件
 
-    /// 行标题后跟一个 ⓘ，悬停显示完整说明。
-    private func titleWithInfo(_ title: String, info: String) -> some View {
-        HStack(spacing: 4) {
-            Text(title)
-            Image(systemName: "info.circle")
-                .foregroundStyle(.secondary)
-                .help(info)
-                .accessibilityLabel(info)
-        }
+    /// 行右侧控件前的 ⓘ，点击弹出完整说明。设置页里 `.help` 悬停提示不显示，改用 popover。
+    private func infoIcon(_ info: String) -> some View {
+        SettingsInfoButton(text: info)
     }
 
     private func valueText(_ value: String) -> some View {
@@ -252,6 +253,33 @@ struct SettingsView: View {
                 exportMessage = "导出失败：\(error.localizedDescription)"
                 exportedFileURL = nil
             }
+        }
+    }
+}
+
+/// 点击 ⓘ 弹出说明文字。
+private struct SettingsInfoButton: View {
+    let text: String
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .accessibilityLabel("说明")
+        .accessibilityHint(text)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            Text(text)
+                .font(.callout)
+                .frame(width: 260, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
         }
     }
 }
