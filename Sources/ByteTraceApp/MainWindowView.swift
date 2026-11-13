@@ -828,6 +828,8 @@ private enum DetailLayout {
     static let textLeading: CGFloat = rowLeading + markerWidth + 10
     /// 父行右侧占比列的终点到行尾：箭头 12 + 间距 10 + 行内边距 8。
     static let trailingToShareColumn: CGFloat = 30
+    /// 子行上行、下行两列的宽度，容纳「↑ 999.9 MB」。
+    static let directionColumnWidth: CGFloat = 76
 }
 
 /// 行下展开的详情：趋势小图，一行上行 / 下行与直连 / 代理图例，宿主里的程序排行，最后是用途说明与路径。
@@ -939,6 +941,8 @@ private struct AppDetailPanel: View {
                 marker: .icon(program.iconRecord),
                 name: program.name,
                 note: note.isEmpty ? nil : note,
+                uploadBytes: program.uploadBytes,
+                downloadBytes: program.downloadBytes,
                 bytes: program.bytes,
                 share: fraction(program.bytes, of: hostBytes)
             )
@@ -946,12 +950,16 @@ private struct AppDetailPanel: View {
         if rows.count > Self.programLimit + 1 {
             let rest = rows.dropFirst(Self.programLimit)
             let restBytes = rest.reduce(Int64(0)) { saturatingAdd($0, $1.bytes) }
+            let restUpload = rest.reduce(Int64(0)) { saturatingAdd($0, $1.uploadBytes) }
+            let restDownload = rest.reduce(Int64(0)) { saturatingAdd($0, $1.downloadBytes) }
             rows = Array(rows.prefix(Self.programLimit))
             rows.append(DetailRow.Item(
                 id: "otherPrograms",
                 marker: .symbol("ellipsis"),
                 name: "其他 \(rest.count) 个",
                 note: nil,
+                uploadBytes: restUpload,
+                downloadBytes: restDownload,
                 bytes: restBytes,
                 share: fraction(restBytes, of: hostBytes)
             ))
@@ -990,6 +998,8 @@ private struct AppDetailPanel: View {
                 marker: .symbol("globe"),
                 name: domain.domain,
                 note: domainRouteNote(domain),
+                uploadBytes: domain.uploadBytes,
+                downloadBytes: domain.downloadBytes,
                 bytes: domain.totalBytes,
                 share: fraction(domain.totalBytes, of: hostBytes)
             )
@@ -997,17 +1007,25 @@ private struct AppDetailPanel: View {
         let remaining = domains.dropFirst(displayedCount)
         if !remaining.isEmpty {
             let bytes = remaining.reduce(Int64(0)) { saturatingAdd($0, $1.totalBytes) }
+            let upload = remaining.reduce(Int64(0)) { saturatingAdd($0, $1.uploadBytes) }
+            let download = remaining.reduce(Int64(0)) { saturatingAdd($0, $1.downloadBytes) }
             rows.append(DetailRow.Item(
                 id: "otherDomains", marker: .symbol("ellipsis"), name: "其他 \(remaining.count) 个",
-                note: nil, bytes: bytes, share: fraction(bytes, of: hostBytes)
+                note: nil, uploadBytes: upload, downloadBytes: download,
+                bytes: bytes, share: fraction(bytes, of: hostBytes)
             ))
         }
         let identified = domains.reduce(Int64(0)) { saturatingAdd($0, $1.totalBytes) }
+        let identifiedUpload = domains.reduce(Int64(0)) { saturatingAdd($0, $1.uploadBytes) }
+        let identifiedDownload = domains.reduce(Int64(0)) { saturatingAdd($0, $1.downloadBytes) }
         let unknown = max(hostBytes - identified, 0)
         if unknown > 0 {
             rows.append(DetailRow.Item(
                 id: "unknownDomain", marker: .symbol("questionmark"), name: "未识别域名",
-                note: nil, bytes: unknown, share: fraction(unknown, of: hostBytes),
+                note: nil,
+                uploadBytes: max(record.uploadBytes - identifiedUpload, 0),
+                downloadBytes: max(record.downloadBytes - identifiedDownload, 0),
+                bytes: unknown, share: fraction(unknown, of: hostBytes),
                 help: "包括未经过 mihomo 的直连、未匹配到域名的连接和开启记录前的历史流量。"
             ))
         }
@@ -1114,6 +1132,8 @@ private struct DetailRow: View {
         let marker: Marker
         let name: String
         let note: String?
+        let uploadBytes: Int64
+        let downloadBytes: Int64
         let bytes: Int64
         let share: Double
         var help: String? = nil
@@ -1141,6 +1161,9 @@ private struct DetailRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            // 上行在前、下行在后；放在总量之前，保证总量与占比两列仍与父行对齐。
+            directionText("↑", color: TrafficColor.upload, bytes: item.uploadBytes)
+            directionText("↓", color: TrafficColor.download, bytes: item.downloadBytes)
             Text(ByteTraceViewModel.formatBytes(item.bytes))
             Text(percentText(item.share))
                 .font(.caption)
@@ -1157,6 +1180,14 @@ private struct DetailRow: View {
         .contentShape(Rectangle())
         .help(item.help ?? item.note ?? "")
         .accessibilityElement(children: .combine)
+    }
+
+    private func directionText(_ arrow: String, color: Color, bytes: Int64) -> some View {
+        Text("\(Text(arrow).foregroundStyle(color)) \(ByteTraceViewModel.formatBytes(bytes))")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .frame(width: DetailLayout.directionColumnWidth, alignment: .trailing)
     }
 
     @ViewBuilder

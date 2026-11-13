@@ -188,6 +188,8 @@ struct HostProgramShare: Identifiable, Equatable {
     let programKey: String
     let name: String
     let iconRecord: DailyUsageRecord
+    let uploadBytes: Int64
+    let downloadBytes: Int64
     let bytes: Int64
     /// 系统进程的中文用途（如「系统软件更新下载」）；其他程序为空。
     let description: String?
@@ -872,6 +874,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                 programKey: program.programKey,
                 name: program.programKey.isEmpty ? "应用本身" : program.programName ?? program.programKey,
                 iconRecord: iconRecord,
+                uploadBytes: program.uploadBytes,
+                downloadBytes: program.downloadBytes,
                 bytes: program.totalBytes,
                 description: iconRecord.category == .userApp
                     ? nil
