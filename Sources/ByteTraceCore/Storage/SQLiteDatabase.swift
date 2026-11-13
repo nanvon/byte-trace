@@ -7,6 +7,10 @@ enum SQLiteDatabaseError: LocalizedError {
     case bindFailed(String)
     case stepFailed(String)
     case executeFailed(String)
+    /// 文件损坏或不是 SQLite 数据库（`SQLITE_CORRUPT` / `SQLITE_NOTADB`）。
+    case corrupt(String)
+    /// 数据库由更新版本的 ByteTrace 创建（`user_version` 高于本版本支持的值）。
+    case unsupportedSchema(Int64)
 
     var errorDescription: String? {
         switch self {
@@ -15,6 +19,8 @@ enum SQLiteDatabaseError: LocalizedError {
         case let .bindFailed(message): return "SQLite bind failed: \(message)"
         case let .stepFailed(message): return "SQLite step failed: \(message)"
         case let .executeFailed(message): return "SQLite execute failed: \(message)"
+        case let .corrupt(message): return "SQLite database is corrupt: \(message)"
+        case let .unsupportedSchema(version): return "unsupported schema version \(version)"
         }
     }
 }
@@ -82,7 +88,21 @@ final class SQLiteDatabase: @unchecked Sendable {
             } else {
                 message = errorMessage
             }
-            throw SQLiteDatabaseError.executeFailed(message)
+            throw Self.classify(result, message: message, as: SQLiteDatabaseError.executeFailed)
+        }
+    }
+
+    /// 主结果码为损坏类时归为 `.corrupt`，其余保持调用处原来的错误类型。
+    private static func classify(
+        _ code: Int32,
+        message: String,
+        as fallback: (String) -> SQLiteDatabaseError
+    ) -> SQLiteDatabaseError {
+        switch code & 0xFF {
+        case SQLITE_CORRUPT, SQLITE_NOTADB:
+            return .corrupt(message)
+        default:
+            return fallback(message)
         }
     }
 
@@ -92,7 +112,7 @@ final class SQLiteDatabase: @unchecked Sendable {
 
         let result = sqlite3_step(statement)
         guard result == SQLITE_ROW else {
-            throw SQLiteDatabaseError.stepFailed(errorMessage)
+            throw Self.classify(result, message: errorMessage, as: SQLiteDatabaseError.stepFailed)
         }
         return sqlite3_column_int64(statement, 0)
     }
@@ -103,7 +123,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             sqlite3_prepare_v2(handle, sqlPointer, -1, &statement, nil)
         }
         guard result == SQLITE_OK, let statement else {
-            throw SQLiteDatabaseError.prepareFailed(errorMessage)
+            throw Self.classify(result, message: errorMessage, as: SQLiteDatabaseError.prepareFailed)
         }
         return statement
     }
@@ -129,8 +149,9 @@ final class SQLiteDatabase: @unchecked Sendable {
     }
 
     func stepDone(_ statement: OpaquePointer) throws {
-        guard sqlite3_step(statement) == SQLITE_DONE else {
-            throw SQLiteDatabaseError.stepFailed(errorMessage)
+        let result = sqlite3_step(statement)
+        guard result == SQLITE_DONE else {
+            throw Self.classify(result, message: errorMessage, as: SQLiteDatabaseError.stepFailed)
         }
     }
 

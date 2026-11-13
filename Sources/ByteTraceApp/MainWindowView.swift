@@ -354,6 +354,27 @@ struct MainWindowView: View {
     private var statusBar: some View {
         VStack(spacing: 0) {
             Divider()
+            if let notice = model.storageNotice {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.caption)
+                    Text(notice)
+                        .font(.caption)
+                        .lineLimit(2)
+                        .help(notice)
+                    Spacer(minLength: 8)
+                    Button("在访达中显示") { model.revealQuarantinedDatabase() }
+                        .controlSize(.small)
+                        .focusable(false)
+                    Button("知道了") { model.dismissStorageNotice() }
+                        .controlSize(.small)
+                        .focusable(false)
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 7)
+                Divider()
+            }
             HStack(spacing: 6) {
                 Circle()
                     .fill(model.status.tint)

@@ -345,6 +345,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     @Published private(set) var todayRouteSplit: RouteSplit = .empty
     @Published private(set) var status: MonitorStatus = .stopped
     @Published private(set) var lastError: String?
+    /// 数据库损坏后已隔离重建的提示；持久化到用户点「知道了」为止（`lastError` 会在 start() 清空，不能承载它）。
+    @Published private(set) var storageNotice: String?
     /// 菜单栏「全部应用」请求主窗口列出全部应用并滚动到列表；主窗口处理后置回 false。
     @Published var requestsMainWindowAppList = false
     /// 从菜单栏点击某个应用后，主窗口据此选中该行并打开详情栏；处理后置回 nil。
@@ -421,6 +423,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     private static let detectedProxyExecutablesKey = "ByteTrace.detectedProxyExecutables"
     private static let readsMihomoConnectionsKey = "ByteTrace.readsMihomoConnections"
     private static let recordsDomainsKey = "ByteTrace.recordsDomains"
+    private static let storageRecoveryNoticeKey = "ByteTrace.storageRecoveryNotice"
+    private static let storageRecoveryFileKey = "ByteTrace.storageRecoveryFile"
     /// 只在最近有经代理流量时轮询，空闲时不访问控制器。
     private static let mihomoActiveWindow: TimeInterval = 30
     private static let mihomoPollInterval: TimeInterval = 1
@@ -520,10 +524,17 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
 
         var storageError: String?
-        do {
-            let store = try UsageStore(databaseURL: databaseURL)
+        let opened = Self.openStore(at: databaseURL)
+        var quarantinedName: String?
+        if let store = opened.store {
             self.store = store
             aggregator = UsageAggregator(store: store)
+            if let quarantined = opened.quarantinedURL {
+                quarantinedName = quarantined.lastPathComponent
+                let notice = "数据库已损坏，旧文件已另存为 \(quarantined.lastPathComponent)，统计从现在重新开始。"
+                UserDefaults.standard.set(notice, forKey: Self.storageRecoveryNoticeKey)
+                UserDefaults.standard.set(quarantined.path, forKey: Self.storageRecoveryFileKey)
+            }
             if let remembered = try? store.rememberedProcessAttributions() {
                 attributionCache.seed(remembered)
                 recordedProcessNames = Dictionary(
@@ -533,16 +544,22 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
                     uniquingKeysWith: { first, _ in first }
                 )
             }
-        } catch {
+        } else {
             store = nil
             aggregator = nil
-            storageError = "无法打开本地数据库：\(error.localizedDescription)"
+            storageError = opened.error
         }
+        _storageNotice = Published(
+            initialValue: UserDefaults.standard.string(forKey: Self.storageRecoveryNoticeKey)
+        )
 
         super.init()
         if let storageError {
             lastError = storageError
             status = .failed(storageError)
+        }
+        if let quarantinedName {
+            recordCollectorEvent(kind: "database_quarantined", details: quarantinedName)
         }
         configureCollector()
         configureProxyEndpointMonitor()
@@ -1805,6 +1822,52 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     /// 退出路径不能用它（应用终止前 async block 不保证执行），shutdown() 单独同步排空。
     /// `releasingInstanceLock` 为真时在落库之后才释放数据目录锁，另一个实例接管前，
     /// 本实例已收到的尾帧都已写入；其间又调用了 start() 则保留锁。
+    /// 打开数据库。文件损坏时在持有数据目录锁的前提下改名保留旧文件并新建；
+    /// 版本过新和其他错误（权限、磁盘满、被占用）不隔离。
+    private static func openStore(
+        at url: URL
+    ) -> (store: UsageStore?, error: String?, quarantinedURL: URL?) {
+        let firstError: Error
+        do {
+            return (try UsageStore(databaseURL: url), nil, nil)
+        } catch {
+            firstError = error
+        }
+        if UsageStore.isNewerSchema(firstError) {
+            return (nil, "数据库由更新版本的 ByteTrace 创建，请升级应用后再使用。", nil)
+        }
+        guard UsageStore.isCorruption(firstError) else {
+            return (nil, "无法打开本地数据库：\(firstError.localizedDescription)", nil)
+        }
+        // init 里还不能用 self.instanceLock，临时建一个同路径的锁，用完释放。
+        let lock = DataDirectoryLock(url: DataDirectoryLock.defaultLockURL(bundleIdentifier: bundleIdentifier))
+        guard lock.tryAcquire() else {
+            return (nil, "数据库无法读取，另一个 ByteTrace 正在运行；请退出它之后重新打开。", nil)
+        }
+        defer { lock.release() }
+        do {
+            let quarantined = try UsageStore.quarantineDatabase(at: url)
+            return (try UsageStore(databaseURL: url), nil, quarantined)
+        } catch {
+            return (nil, "数据库已损坏，重建失败：\(error.localizedDescription)", nil)
+        }
+    }
+
+    func dismissStorageNotice() {
+        storageNotice = nil
+        UserDefaults.standard.removeObject(forKey: Self.storageRecoveryNoticeKey)
+        UserDefaults.standard.removeObject(forKey: Self.storageRecoveryFileKey)
+    }
+
+    func revealQuarantinedDatabase() {
+        let path = UserDefaults.standard.string(forKey: Self.storageRecoveryFileKey)
+        if let path, FileManager.default.fileExists(atPath: path) {
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([databaseURL])
+        }
+    }
+
     private func flushAfterStop(releasingInstanceLock: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

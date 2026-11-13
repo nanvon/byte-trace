@@ -117,6 +117,8 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 
 自己封装的 `SQLiteDatabase`（直接调 SQLite3 C API，无第三方依赖），WAL + `busy_timeout=5000` + `foreign_keys=ON`。路径：`~/Library/Application Support/com.nanvon.ByteTrace/usage.sqlite3`。
 
+**打开失败**（`ByteTraceViewModel.openStore`）：`SQLiteDatabase` 把主结果码 `SQLITE_CORRUPT` / `SQLITE_NOTADB` 归为 `.corrupt`，`migrate()` 遇到更高的 `user_version` 抛 `.unsupportedSchema`，应用层用 `UsageStore.isCorruption` / `isNewerSchema` 判断。损坏时先临时获取数据目录锁（拿不到说明另一个实例在用，不动文件），`UsageStore.quarantineDatabase` 把主文件和 `-wal`、`-shm` 改名为 `usage.corrupt-<时间>.sqlite3` 保留在同目录，再新建空库并记 `database_quarantined` 事件，主窗口状态栏提示到用户点「知道了」。版本过新只提示升级，**绝不隔离重建**；权限、磁盘满等其他错误照旧报错。只覆盖打开与迁移阶段读到的损坏，运行期读取循环里的 `stepFailed` 不识别；旧文件不自动删除、不抢救数据。
+
 八张表：`apps`（宿主：GUI 应用、虚拟宿主 `host:*`、代理 `proxy:*`）、`programs`（键 `program_key`，程序的展示名、分类、可执行路径）、`daily_usage`（键 `accounting_version`+`day`+`app_key`+`program_key`）、`usage_buckets`（键 `accounting_version`+`bucket_start`+`app_key`+`program_key`，分钟粒度）、`daily_route_usage`（键 `accounting_version`+`day`+`app_key`+`program_key`+`route`）、`daily_domain_usage`（键 `accounting_version`+`day`+`app_key`+`domain`+`route`）、`process_names`（键 nettop 进程名 → 最近一次解析到的 `app_key` + `program_key`，覆盖写入，只用于重启后预填名称缓存）、`collector_events`。`program_key` 为空串表示宿主应用自身。应用级查询（`dailyUsage`、`bucketUsage`）跨程序 GROUP BY；程序级查询是 `programUsage`、`bucketProgramUsage`、`programRouteUsage`，`bucketTimeline(programIdentity:)` 按程序身份过滤，都排除代理传输。
 
 **流量路径**（`TrafficRoute`）：外部通道的非代理进程记 `direct`；补充通道（系统代理 lo0 / TUN utun）记 `proxied`，读到 mihomo 连接表时细分为 `proxy_node` / `proxy_rule_direct`。路径只写 `daily_route_usage` 一张旁表，`daily_usage` / `usage_buckets` 的总量与口径不变；代理传输不记路径。路径上线前的历史没有路径行，界面把「日汇总 − 路径合计」显示为「未区分」。「最近 1 小时」没有分钟级路径，按今天的拆分近似并注明。卡片标题与列表行的「走节点 X%」／「经代理 X%」只在已区分路径的流量里计算，且已区分部分不足全部流量的一半时不显示（`RouteBreakdown.Share.isRepresentative`），避免升级初期被「未区分」压成接近 0；覆盖不足 99% 时标题加「已区分部分中」。
@@ -146,7 +148,7 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
   **因此数据保留策略不能挂在 `refresh()` 里**——它已移到 `flushTimerFired`，否则无人打开界面时清理永远不会执行。
 - **「今天」是双数据源**：汇总数字来自 `daily_usage`，趋势图来自 `usage_buckets`（`usesBucketSummary` 与 `usesFineGrainedTimeline` 两个开关分别控制）。「最近 10 分钟 / 1 小时」两者都用分钟桶，「本周 / 本月」两者都用日汇总。
 - **nettop 的时间字段只有时钟没有日期**，`NettopSampleClock.date(for:)` 把「今天」的年月日嫁接上去；结果比当前时间晚 1 小时以上时回退一天，零点前采样、零点后处理的帧仍记入前一天。
-- 设置持久化：`UserDefaults` 键 `ByteTrace.usageRetentionPolicy`（默认 90 天）、`ByteTrace.readsMihomoConnections`（默认开启）、`ByteTrace.recordsDomains`（默认关闭，仅在代理分流开启时有效）、`ByteTrace.detectedProxyExecutables`（运行时识别出的代理内核路径）；登录时启动用 `SMAppService.mainApp`。
+- 设置持久化：`UserDefaults` 键 `ByteTrace.usageRetentionPolicy`（默认 90 天）、`ByteTrace.readsMihomoConnections`（默认开启）、`ByteTrace.recordsDomains`（默认关闭，仅在代理分流开启时有效）、`ByteTrace.detectedProxyExecutables`（运行时识别出的代理内核路径）、`ByteTrace.storageRecoveryNotice` / `ByteTrace.storageRecoveryFile`（数据库隔离后的提示与旧文件路径，点「知道了」清除）；登录时启动用 `SMAppService.mainApp`。
 - **主窗口只有一个应用列表**（按宿主），默认显示前 20 个（`collapsedRowLimit`），其余折叠到「显示其余 N 个」，只多出一两个时直接全部列出；菜单栏面板默认 10 个。没有单独的程序列表：点击应用行在行下展开详情：趋势小图、一行上行/下行与直连/代理图例（与顶部总览共用 `LegendLabel`），宿主里运行过其他程序时再列出程序排行（前 8 个，其余合并为「其他 N 个」，「应用本身」单独一项；列宽与应用行对齐），最后是用途说明与路径。只有程序这类实体用列表行，比例用图例。界面各处上行在前、下行在后。菜单栏与主窗口的行副标题写「含 X、Y 等 N 个程序」。虚拟宿主用 SF Symbols 图标（`AppIconView`）。
 - 导出 `formatVersion` 硬编码在 `exportCurrentRange(to:)`，结构变更时需同步 bump；当前为 6，含 `programUsage` 和 `domainUsage`。域名只在应用详情展开时查询，导出时按所选日期范围查询所有宿主。
 

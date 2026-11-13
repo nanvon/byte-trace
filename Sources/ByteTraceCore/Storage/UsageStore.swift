@@ -102,6 +102,51 @@ public final class UsageStore: @unchecked Sendable {
         try migrate()
     }
 
+    /// 打开失败是因为文件损坏或不是数据库，可以隔离后重建。
+    public static func isCorruption(_ error: Error) -> Bool {
+        if case .corrupt = error as? SQLiteDatabaseError { return true }
+        return false
+    }
+
+    /// 打开失败是因为数据库由更新版本的 ByteTrace 创建；这种情况绝不能隔离重建。
+    public static func isNewerSchema(_ error: Error) -> Bool {
+        if case .unsupportedSchema = error as? SQLiteDatabaseError { return true }
+        return false
+    }
+
+    /// 把数据库主文件与 -wal、-shm 一起改名保留在同一目录，返回改名后的主文件路径。
+    /// 目标名 `usage.corrupt-<yyyyMMdd-HHmmss>.sqlite3`，重名时在时间后加 `-2`、`-3`。只移动，不复制、不删除。
+    public static func quarantineDatabase(at url: URL, now: Date = Date()) throws -> URL {
+        let fileManager = FileManager.default
+        let directory = url.deletingLastPathComponent()
+        let stem = url.deletingPathExtension().lastPathComponent
+        let pathExtension = url.pathExtension
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let timestamp = formatter.string(from: now)
+        let sidecars = ["-wal", "-shm"]
+
+        func candidate(_ index: Int) -> URL {
+            let suffix = index == 1 ? "" : "-\(index)"
+            let name = "\(stem).corrupt-\(timestamp)\(suffix)"
+            return directory.appendingPathComponent(pathExtension.isEmpty ? name : "\(name).\(pathExtension)")
+        }
+
+        var index = 1
+        var target = candidate(index)
+        while ([target.path] + sidecars.map { target.path + $0 }).contains(where: fileManager.fileExists(atPath:)) {
+            index += 1
+            target = candidate(index)
+        }
+
+        try fileManager.moveItem(at: url, to: target)
+        for sidecar in sidecars where fileManager.fileExists(atPath: url.path + sidecar) {
+            try fileManager.moveItem(atPath: url.path + sidecar, toPath: target.path + sidecar)
+        }
+        return target
+    }
+
     public static func defaultDatabaseURL(bundleIdentifier: String) -> URL {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -1145,9 +1190,7 @@ public final class UsageStore: @unchecked Sendable {
     private func migrate() throws {
         let currentVersion = try database.scalarInt64("PRAGMA user_version;")
         guard currentVersion <= Self.schemaVersion else {
-            throw SQLiteDatabaseError.executeFailed(
-                "unsupported schema version \(currentVersion)"
-            )
+            throw SQLiteDatabaseError.unsupportedSchema(currentVersion)
         }
 
         if currentVersion == 0 {
