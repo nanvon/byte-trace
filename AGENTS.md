@@ -24,7 +24,10 @@ swift run ByteTraceProbe --duration 15 # 应用级采集
 swift run ByteTraceProbe --accuracy    # 用 curl 直连／经系统代理各下载 20 MB，对照两个通道的计数（会产生真实下载流量）
 swift run ByteTraceProbe --routes        # 在 --accuracy 基础上轮询 mihomo 连接表，再加一次经代理命中规则直连的下载，核对路径分类
 swift run ByteTraceProbe --restart-check  # 两个外部通道同时采集，一个中途重启并做间隙补偿，对照不中断的通道（会产生真实下载流量）
+swift run ByteTraceProbe --duration 300 --domains  # 观察现有流量，测量补充通道的域名字节覆盖率
 ```
+
+`--accuracy`、`--routes` 和 `--domains` 以最后一行 `[result]` 和退出码汇报结果：0 为全部通过，1 为存在失败，2 为存在跳过且没有失败。`--domains` 默认每 2 秒轮询，可用 `--mihomo-interval 1` 对照。默认只输出统计数字，`--show-domains` 会显示流量最多的 10 个主域名。
 
 `package_app.sh` 环境变量：`BYTE_TRACE_SIGNING_IDENTITY`（默认 `-`，ad-hoc）、`BYTE_TRACE_SWIFT_TRIPLE`（仅接受 `arm64` 目标，默认跟随 `Info.plist` 的最低系统版本）。
 

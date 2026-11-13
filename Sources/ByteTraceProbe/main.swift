@@ -12,6 +12,9 @@ private struct Options {
     /// `--routes`：在 `--accuracy` 基础上轮询 mihomo 连接表，再加一次经代理命中规则直连的下载，
     /// 核对每个用例的字节被分到哪条出口路径。
     let checksRoutes: Bool
+    let measuresDomains: Bool
+    let showsDomains: Bool
+    let mihomoInterval: TimeInterval
 
     static let defaultAccuracyURL = "https://speed.cloudflare.com/__down?bytes=20000000"
     /// 国内 CDN 上的大文件，常见分流规则（`cn_domain` / `GEOSITE,cn`）会走 DIRECT；只取前 20 MB。
@@ -22,6 +25,9 @@ private struct Options {
         var accuracyURL: String?
         var restartCheckURL: String?
         var checksRoutes = false
+        var measuresDomains = false
+        var showsDomains = false
+        var mihomoInterval: TimeInterval = 2
         var index = 1
 
         while index < arguments.count {
@@ -40,6 +46,16 @@ private struct Options {
             } else if arguments[index] == "--routes" {
                 checksRoutes = true
                 index += 1
+            } else if arguments[index] == "--domains" {
+                measuresDomains = true
+                index += 1
+            } else if arguments[index] == "--show-domains" {
+                showsDomains = true
+                index += 1
+            } else if arguments[index] == "--mihomo-interval", index + 1 < arguments.count,
+                      let value = TimeInterval(arguments[index + 1]), value.isFinite, value > 0 {
+                mihomoInterval = value
+                index += 2
             } else if arguments[index] == "--restart-check" {
                 if index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") {
                     restartCheckURL = arguments[index + 1]
@@ -57,6 +73,9 @@ private struct Options {
         self.accuracyURL = accuracyURL ?? (checksRoutes ? Self.defaultAccuracyURL : nil)
         self.restartCheckURL = restartCheckURL
         self.checksRoutes = checksRoutes
+        self.measuresDomains = measuresDomains
+        self.showsDomains = showsDomains
+        self.mihomoInterval = mihomoInterval
     }
 }
 
@@ -258,6 +277,12 @@ private final class ProbeRuntime: @unchecked Sendable {
     let mihomoTracker = MihomoRouteTracker()
     let mihomoClient = MihomoClient()
     var mihomoController: MihomoController?
+    var mihomoTimer: Timer?
+    var mihomoFetchInFlight = false
+    var lastSupplementalTrafficAt: Date?
+    var mihomoSuccessfulFetches = 0
+    var mihomoFailedFetches = 0
+    var domainCoverage = DomainCoverage()
     let resolver = SystemProcessIdentityResolver()
     let attributionCache = ProcessAttributionCache()
     let store: UsageStore
@@ -308,6 +333,49 @@ private final class ProbeRuntime: @unchecked Sendable {
             components.month ?? 0,
             components.day ?? 0
         )
+    }
+}
+
+private struct DomainCoverage {
+    private(set) var supplementalBytes: Int64 = 0
+    private var withDomain: Int64 = 0
+    private var withoutDomain: Int64 = 0
+    private var residualBytes: Int64 = 0
+    private var residualWithDomain: Int64 = 0
+    private var bytesByDomain: [String: Int64] = [:]
+
+    mutating func record(_ routed: RoutedDelta, isResidual: Bool) {
+        let bytes = saturatingAdd(routed.delta.downloadBytes, routed.delta.uploadBytes)
+        supplementalBytes = saturatingAdd(supplementalBytes, bytes)
+        if let domain = routed.domain {
+            withDomain = saturatingAdd(withDomain, bytes)
+            bytesByDomain[domain] = saturatingAdd(bytesByDomain[domain, default: 0], bytes)
+            if isResidual { residualWithDomain = saturatingAdd(residualWithDomain, bytes) }
+        } else {
+            withoutDomain = saturatingAdd(withoutDomain, bytes)
+        }
+        if isResidual { residualBytes = saturatingAdd(residualBytes, bytes) }
+    }
+
+    func report(showDomains: Bool) {
+        print("[domains] supplemental_bytes=\(supplementalBytes) with_domain=\(withDomain) without_domain=\(withoutDomain) residual_bytes=\(residualBytes) residual_with_domain=\(residualWithDomain)")
+        let coverage = supplementalBytes > 0
+            ? String(format: "%.4f", Double(withDomain) / Double(supplementalBytes))
+            : "n/a"
+        print("[domains] coverage=\(coverage) distinct_domains=\(bytesByDomain.count)")
+        if showDomains {
+            let topDomains = bytesByDomain.sorted {
+                $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value
+            }.prefix(10)
+            for (domain, bytes) in topDomains {
+                print("[domains] domain=\(domain) bytes=\(bytes)")
+            }
+        }
+    }
+
+    private func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let (value, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int64.max : value
     }
 }
 
@@ -423,6 +491,44 @@ private func runProbe(options: Options) -> Int32 {
         return 1
     }
 
+    // 定时器和 nettop 的帧回调都在主线程，处理一帧时连接快照不会中途改变。
+    @Sendable func fetchMihomo() {
+        guard !runtime.mihomoFetchInFlight, let controller = runtime.mihomoController else { return }
+        if options.measuresDomains, !options.checksRoutes {
+            guard let lastTrafficAt = runtime.lastSupplementalTrafficAt,
+                  Date().timeIntervalSince(lastTrafficAt) <= 30 else {
+                runtime.mihomoTimer?.invalidate()
+                runtime.mihomoTimer = nil
+                return
+            }
+        }
+        runtime.mihomoFetchInFlight = true
+        Task.detached {
+            let result: Result<MihomoConnectionsSnapshot, Error>
+            do {
+                let data = try await runtime.mihomoClient.get("/connections", from: controller)
+                result = .success(try MihomoConnectionsParser.parse(data, includeDomains: options.measuresDomains))
+            } catch {
+                result = .failure(error)
+            }
+            await MainActor.run {
+                runtime.mihomoFetchInFlight = false
+                switch result {
+                case let .success(snapshot):
+                    runtime.mihomoSuccessfulFetches += 1
+                    runtime.mihomoTracker.update(with: snapshot)
+                case let .failure(error):
+                    runtime.mihomoFailedFetches += 1
+                    if options.checksRoutes {
+                        print("[routes] mihomo_fetch_failed error=\(error.localizedDescription)")
+                    } else if runtime.mihomoFailedFetches == 1 {
+                        print("[domains] mihomo_fetch_failed error=\(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+    }
+
     func handleCollectorEvent(_ event: NettopCollectorEvent, lane: ProbeLane) {
         switch event {
         case let .started(pid):
@@ -432,20 +538,23 @@ private func runProbe(options: Options) -> Int32 {
             switch parserEvent {
             case let .frameCompleted(rowCount, deltas, isBaseline):
                 let acceptedDeltas: [RoutedDelta]
+                var residualCount = 0
                 switch lane {
                 case .external:
                     acceptedDeltas = deltas.map { RoutedDelta(delta: $0, route: .direct) }
                 case .supplemental:
                     let proxyEndpoints = runtime.proxyEndpointMonitor.currentLoopbackEndpoints
                     let tracker = runtime.mihomoTracker
+                    let now = Date()
                     let route: (NettopDelta) -> RouteResolution = {
-                        RouteResolution(route: tracker.route(forLocalEndpoint: $0.localEndpoint) ?? .proxied)
+                        let resolution = tracker.resolution(forLocalEndpoint: $0.localEndpoint, at: now) ?? .proxied
+                        return options.measuresDomains ? resolution : RouteResolution(route: resolution.route)
                     }
                     let residuals = isBaseline ? [] : runtime.residualTracker.residuals(
                         processTotals: runtime.pendingProcessTotals,
                         connections: deltas,
                         proxyEndpoints: proxyEndpoints,
-                        at: Date(),
+                        at: now,
                         route: route
                     )
                     runtime.pendingProcessTotals = []
@@ -454,17 +563,31 @@ private func runProbe(options: Options) -> Int32 {
                         proxyEndpoints: proxyEndpoints,
                         route: route
                     ) + residuals
+                    residualCount = residuals.count
                     if !residuals.isEmpty {
                         print("[parser] lane=supplemental residual_processes=\(residuals.count) residual_download=\(residuals.reduce(0) { $0 + $1.delta.downloadBytes })")
                     }
+                    if options.measuresDomains, !options.checksRoutes, !acceptedDeltas.isEmpty {
+                        runtime.lastSupplementalTrafficAt = now
+                        if runtime.mihomoTimer == nil {
+                            runtime.mihomoTimer = Timer.scheduledTimer(withTimeInterval: options.mihomoInterval, repeats: true) { _ in
+                                fetchMihomo()
+                            }
+                            fetchMihomo()
+                        }
+                    }
                 }
-                let samples = acceptedDeltas.compactMap { routed -> ProbeSample? in
+                let samples = acceptedDeltas.enumerated().compactMap { index, routed -> ProbeSample? in
                     let delta = routed.delta
                     let token = NettopProcessToken(rawValue: delta.processName)
                     let identity = runtime.resolver.resolve(token)
                     let attributed = runtime.attributionCache.attribute(identity)
                     if !TrafficFilter.shouldKeepAfterAttribution(delta, category: attributed.category) {
                         return nil
+                    }
+                    if options.measuresDomains, lane == .supplemental, attributed.category != .proxyTransport {
+                        let isResidual = index >= acceptedDeltas.count - residualCount
+                        runtime.domainCoverage.record(routed, isResidual: isResidual)
                     }
 
                     do {
@@ -553,25 +676,17 @@ private func runProbe(options: Options) -> Int32 {
         try runtime.externalCollector.start()
         try runtime.supplementalCollector.start()
 
-        var mihomoTimer: Timer?
-        if options.checksRoutes {
+        if options.checksRoutes || options.measuresDomains {
             let controller = discoverMihomoController()
             runtime.mihomoController = controller
+        }
+        if options.checksRoutes, let controller = runtime.mihomoController {
             print("[routes] mihomo_controller=\(controller.transport)")
-            let client = runtime.mihomoClient
-            let tracker = runtime.mihomoTracker
-            mihomoTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-                Task.detached {
-                    do {
-                        let data = try await client.get("/connections", from: controller)
-                        tracker.update(with: try MihomoConnectionsParser.parse(data))
-                    } catch {
-                        print("[routes] mihomo_fetch_failed error=\(error.localizedDescription)")
-                    }
-                }
+            runtime.mihomoTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                fetchMihomo()
             }
         }
-        defer { mihomoTimer?.invalidate() }
+        defer { runtime.mihomoTimer?.invalidate() }
 
         var accuracyResults: [CurlResult] = []
         var routeExpectations: [String: TrafficRoute] = [:]
@@ -670,7 +785,19 @@ private func runProbe(options: Options) -> Int32 {
     print("[probe] external_samples=\(summary.externalSamples)")
     print("[probe] supplemental_samples=\(summary.supplementalSamples)")
 
-    if options.accuracyURL != nil {
+    if options.measuresDomains {
+        runtime.domainCoverage.report(showDomains: options.showsDomains)
+        print("[domains] mihomo_successful_fetches=\(runtime.mihomoSuccessfulFetches) mihomo_failed_fetches=\(runtime.mihomoFailedFetches)")
+        if runtime.domainCoverage.supplementalBytes == 0 {
+            checks.append(("domain_coverage_no_traffic", .skipped))
+        } else if runtime.mihomoSuccessfulFetches == 0 {
+            checks.append(("mihomo_snapshots", .failed))
+        } else if runtime.mihomoFailedFetches > 0 {
+            checks.append(("mihomo_snapshots", .skipped))
+        }
+    }
+
+    if options.accuracyURL != nil || options.measuresDomains {
         if summary.externalFrames == 0 || summary.supplementalFrames == 0 {
             checks.append(("collector_frames", .failed))
         }

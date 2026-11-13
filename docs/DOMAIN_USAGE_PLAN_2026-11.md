@@ -2,9 +2,9 @@
 
 > 代码基线：`8ae3281`（v0.1.41 之后），与 [REVIEW_2026-11.md](REVIEW_2026-11.md)、[FEATURE_PLAN_2026-11.md](FEATURE_PLAN_2026-11.md) 相同
 > 前提不变：不使用 Apple 付费开发者身份，不加 root，不启用 Network Extension，ad-hoc 签名，不引入第三方依赖
-> 状态：方案，均未实施。交付时从 §9 的任务清单开始读。
+> 状态：D1、D2 和 D3 的探针代码已实现，D3 的覆盖率测量待运行。D4–D6 待测量后决定。任务清单见 §9。
 
-本文的「读代码」指基线 `8ae3281` 的静态阅读，行号是该基线下的位置。没有运行构建、测试、探针或应用，没有读取正式数据库，没有请求过真实的 mihomo 控制器。标了「未验证」的地方，实施时要先确认再写代码。
+本文的「读代码」指基线 `8ae3281` 的静态阅读，行号是该基线下的位置。实施后的字段核对见 §4.3，覆盖率测量见 §5。
 
 ## 0. 实施者守则
 
@@ -119,9 +119,10 @@ public enum DomainName {
 - `Payload.Connection.Metadata` 增加可选字段 `host`、`sniffHost`（均为 `String?`）。
 - `MihomoConnection` 增加 `exitName: String?` 与 `domain: String?`，`init` 末尾带默认值 `nil`，已有调用不用改。
 - `domain = DomainName.registrable(host)`；`host` 为空或得到 `nil` 时再试 `sniffHost`。
+- 只有 `--domains` 探针显式开启域名字段解码，正式应用仍只使用出口路径。
 - `exitName` = `chains.first` 去空白，仅在 `route == .proxyNode` 时保留。
 
-**未验证**：`metadata.host`、`metadata.sniffHost` 是按 mihomo 公开的连接元数据写的，本文作者没有对照真实响应。D2 开始前，执行者先向用户说明，再用下面的命令看一条真实连接的 `metadata` 键名（把地址换成实际的控制器；Clash Verge 用 unix socket 时加 `--unix-socket /tmp/verge/verge-mihomo.sock`），与本节不符时停下来报告：
+**已核对**：2026-11-13 对本机 ClashBar 的 mihomo 发送一次只读 `GET /connections`，返回 82 条连接，`metadata.host` 和 `metadata.sniffHost` 的值均为字符串。换控制器时可用以下命令复查字段（把地址换成实际的控制器；Clash Verge 用 unix socket 时加 `--unix-socket /tmp/verge/verge-mihomo.sock`）：
 
 ```bash
 curl -s http://127.0.0.1:9090/connections | python3 -c "import json,sys; c=json.load(sys.stdin)['connections']; print(sorted(c[0]['metadata'].keys()) if c else 'no connections')"
@@ -307,7 +308,7 @@ struct DomainUsage: Encodable {
 
   `coverage = with_domain / supplemental_bytes`，分母包含残差。
 - **不打印域名本身**，只打印数量。用户要看明细时加 `--show-domains`，打印字节最多的 10 个域名。
-- 退出码按 REVIEW §8.5 的规则；T3 未完成时这个模式固定返回 0，并在文档里注明它只是测量。
+- 退出码按 REVIEW §8.5 的规则。采集或存储检查失败，或有补充流量却始终读不到连接表时返回 1。没有补充流量时覆盖率显示 `n/a` 并返回 2；只读到部分连接表时也返回 2。成功完成测量返回 0，覆盖率另行判断。
 
 需要用户运行的测量（各 300 秒，期间正常使用浏览器和常用应用）：
 
@@ -325,7 +326,7 @@ swift run ByteTraceProbe --duration 300 --domains --mihomo-interval 1
 - 2 秒不到、1 秒达到：把应用的 `mihomoPollInterval` 改为 1 秒后继续，并在 `CLAUDE.md` 记录由此增加的唤醒。
 - 1 秒也不到：停下来。候选是改用 mihomo 的 WebSocket 推送，或放宽残差的域名规则，需要另写方案。
 
-测量结果写回本文 §5 末尾。
+两轮覆盖率测量待运行。测量结果写在本节末尾。
 
 ## 6. 已知局限（实施后写进 `CLAUDE.md`）
 
