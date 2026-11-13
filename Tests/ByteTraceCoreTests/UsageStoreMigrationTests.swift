@@ -31,6 +31,46 @@ final class UsageStoreMigrationTests: XCTestCase {
         XCTAssertEqual(try migrated.dailyUsage(for: "2026-11-12").first?.downloadBytes, 123)
     }
 
+    func testVersionFifteenDropsRedundantBucketIndexAndKeepsBuckets() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("byte-trace-index-migration-\(UUID().uuidString).sqlite3")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + "-wal")
+            try? FileManager.default.removeItem(atPath: url.path + "-shm")
+        }
+        let indexCount = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_buckets_start';"
+        let firstStore = try UsageStore(databaseURL: url)
+        let database = try SQLiteDatabase(url: url)
+        XCTAssertEqual(try database.scalarInt64(indexCount), 0)
+
+        let now = Date()
+        try firstStore.apply(
+            [],
+            bucketAggregates: [
+                UsageBucketAggregate(
+                    bucketStart: now, appKey: "bundle:example", displayName: "示例", category: .userApp,
+                    bundleID: nil, bundlePath: nil, executablePath: nil,
+                    firstSeenAt: now, lastSeenAt: now, downloadBytes: 123, uploadBytes: 45, sampleCount: 1
+                )
+            ]
+        )
+        try database.execute(
+            """
+            CREATE INDEX idx_usage_buckets_start ON usage_buckets(accounting_version, bucket_start);
+            PRAGMA user_version = 14;
+            """
+        )
+        XCTAssertEqual(try database.scalarInt64(indexCount), 1)
+
+        let migrated = try UsageStore(databaseURL: url)
+        XCTAssertEqual(try database.scalarInt64("PRAGMA user_version;"), UsageStore.schemaVersion)
+        XCTAssertEqual(try database.scalarInt64(indexCount), 0)
+        XCTAssertEqual(try migrated.bucketStats().bucketCount, 1)
+        let buckets = try migrated.bucketUsage(from: now.addingTimeInterval(-120), to: now.addingTimeInterval(120))
+        XCTAssertEqual(buckets.first?.downloadBytes, 123)
+    }
+
     func testLegacyCCBarUsageMovesToTheApplicationKey() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("byte-trace-migration-\(UUID().uuidString).sqlite3")

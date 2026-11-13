@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class UsageStore: @unchecked Sendable {
-    public static let schemaVersion: Int64 = 14
+    public static let schemaVersion: Int64 = 15
     public static let accountingVersion: Int64 = 3
 
     private let database: SQLiteDatabase
@@ -1310,6 +1310,16 @@ public final class UsageStore: @unchecked Sendable {
                     FOREIGN KEY (app_key) REFERENCES apps(app_key)
                 );
                 PRAGMA user_version = 14;
+                """
+            )
+        }
+
+        if currentVersion <= 14 {
+            // (accounting_version, bucket_start) 是主键的前缀，分钟桶查询改走主键索引，查询计划不变。
+            try database.execute(
+                """
+                DROP INDEX IF EXISTS idx_usage_buckets_start;
+                PRAGMA user_version = 15;
                 """
             )
         }
