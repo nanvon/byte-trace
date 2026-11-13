@@ -139,6 +139,7 @@ supplemental nettop (loopback+undefined) ┘  → 系统代理/TUN 精确过滤 
 
 - **并发约定**：`NettopCollector` / `UsageStore` / `UsageAggregator` / `ProcessAttributionCache` / `SystemProxyEndpointMonitor` 都是 `@unchecked Sendable` + 锁；两个采集器分别在串行队列解析，回调经 `Task { @MainActor }` 跳回主线程。`SystemProcessIdentityResolver` 读 `NSRunningApplication` 时若不在主线程会 `DispatchQueue.main.sync`——不要从任何会阻塞主线程的路径调用它。
   `UsageStore` 用 **`NSRecursiveLock` 保护每个 public 方法**（可重入是因为 `dailyUsage(for:)` 转调 `dailyUsage(from:through:)`）。锁必须留在 `UsageStore` 这一层：`apply` 与 `purgeBuckets` 都是 `BEGIN IMMEDIATE … COMMIT` 的多语句事务，下沉到 `SQLiteDatabase` 的单条语句上保护不了事务边界。主线程落库与后台队列的保留策略共用同一个 sqlite3 连接，无锁并发会撞上 `cannot start a transaction within a transaction` **并真的丢样本**（见 `UsageStoreConcurrencyTests`）。
+- **停止时的尾帧**：`collector.stop()` 解析出的最后一帧经 `DispatchQueue.main.async` 投递，`receive` 对主线程上的解析事件用 `MainActor.assumeIsolated` 就地处理，不再包一层 `Task`，否则会排到 `flushAfterStop` 的落库之后。`stop()` 的数据目录锁在 `flushAfterStop(releasingInstanceLock: true)` 落库之后才释放（其间又 `start()` 则保留），另一个实例接管前尾帧已写入。
 - **两个通道独立重连**，退避均为 `[1, 2, 5, 10, 30]` 秒；睡眠/唤醒（`NSWorkspace` 通知）与网络路径切换（`NWPathMonitor`）都会先停两个采集器 + `flushNow()` 再走重连。
 - **UI 刷新由 5 秒 flush 定时器驱动**（`flushNow()` 内部调 `refresh()`），没有独立的轮询。定时器带 `tolerance = 1`，允许系统合并唤醒以降低能耗；落库最多晚 1 秒，聚合结果仍在内存里，一条不丢。
 - **UI 刷新受可见性门控**：`refreshIfNeeded` 在 `visibleSurfaceCount == 0` 时直接返回，菜单栏面板与主窗口各自用 `beginObservingUsage()` / `endObservingUsage()` 加减计数（`onAppear` / `onDisappear`），从 0 变 1 时立即补一次刷新。终止路径（`stop` / `shutdown` / 网络切换）传 `force: true` 绕过门控。采集与落库完全不受影响。

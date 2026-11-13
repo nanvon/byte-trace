@@ -664,10 +664,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             loopbackCollector.stop()
         }
         proxyEndpointMonitor.stop()
-        flushAfterStop()
         cancelInstanceLockWait()
-        instanceLock.release()
-        externalGapRecovery.reset()
+        flushAfterStop(releasingInstanceLock: true)
         updateMihomoPolling()
         status = .stopped
         recordCollectorEvent(kind: "collector_stopped")
@@ -1156,6 +1154,14 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private nonisolated func receive(_ event: NettopCollectorEvent, lane: CollectorLane) {
+        // 解析事件由采集器经 DispatchQueue.main.async 投递，到这里已在主线程：就地处理。
+        // 再包一层 Task 会排到 flushAfterStop 的落库之后，停止时最后一帧就赶不上这次落库。
+        if case .parser = event, Thread.isMainThread {
+            MainActor.assumeIsolated {
+                handle(event, lane: lane)
+            }
+            return
+        }
         Task { @MainActor [weak self] in
             self?.handle(event, lane: lane)
         }
@@ -1797,9 +1803,16 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     /// 停止采集后调用：采集器最后一帧事件经 `DispatchQueue.main.async` 投递，
     /// 这里同样入主队列并排在其后，保证最后一帧先进入聚合器再落库。
     /// 退出路径不能用它（应用终止前 async block 不保证执行），shutdown() 单独同步排空。
-    private func flushAfterStop() {
+    /// `releasingInstanceLock` 为真时在落库之后才释放数据目录锁，另一个实例接管前，
+    /// 本实例已收到的尾帧都已写入；其间又调用了 start() 则保留锁。
+    private func flushAfterStop(releasingInstanceLock: Bool = false) {
         DispatchQueue.main.async { [weak self] in
-            self?.flushNow(forceRefresh: true)
+            guard let self else { return }
+            self.flushNow(forceRefresh: true)
+            if releasingInstanceLock, !self.wantsCollection {
+                self.instanceLock.release()
+                self.externalGapRecovery.reset()
+            }
         }
     }
 
