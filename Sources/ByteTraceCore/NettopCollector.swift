@@ -68,13 +68,15 @@ public final class NettopCollector: @unchecked Sendable {
 
     private let stateLock = NSLock()
     private let parserQueue = DispatchQueue(label: "com.nanvon.ByteTrace.nettop-parser")
+    private let parserEventLock = NSLock()
+    private var pendingParserEvents: [NettopParserEvent] = []
     private var currentState: NettopCollectorState = .stopped
     private var process: Process?
     private var processIdentifier: Int32?
     private var readGroup: DispatchGroup?
     private var stdinPipe: Pipe?
     private var parser: NettopCSVParser
-    private var didReportExit = false
+    private var activeRunID: UUID?
     private var stderrData = Data()
 
     public init(scope: NettopCollectorScope = .externalProcessSummary) {
@@ -103,7 +105,8 @@ public final class NettopCollector: @unchecked Sendable {
         currentState = .starting
         parser = NettopCSVParser(mode: scope.parserMode)
         stderrData.removeAll(keepingCapacity: false)
-        didReportExit = false
+        let runID = UUID()
+        activeRunID = runID
         stateLock.unlock()
 
         let process = Process()
@@ -130,13 +133,16 @@ public final class NettopCollector: @unchecked Sendable {
         process.standardInput = stdinPipe
 
         process.terminationHandler = { [weak self] process in
-            self?.reportTermination(status: process.terminationStatus)
+            self?.reportTermination(status: process.terminationStatus, runID: runID)
         }
 
         do {
             try process.run()
         } catch {
-            updateState(.failed(error.localizedDescription))
+            stateLock.lock()
+            activeRunID = nil
+            currentState = .failed(error.localizedDescription)
+            stateLock.unlock()
             throw NettopCollectorError.launchFailed(error.localizedDescription)
         }
 
@@ -171,10 +177,16 @@ public final class NettopCollector: @unchecked Sendable {
         stateLock.lock()
         let process = self.process
         let readGroup = self.readGroup
+        activeRunID = nil
         stateLock.unlock()
 
-        if let process {
-            Self.terminate(process)
+        if let process, let readGroup {
+            // waitUntilExit() 会转动调用线程的 RunLoop。在后台等待，避免主线程重入收尾。
+            readGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                Self.terminate(process)
+                readGroup.leave()
+            }
         }
         readGroup?.wait()
 
@@ -196,6 +208,9 @@ public final class NettopCollector: @unchecked Sendable {
         if !stderr.isEmpty {
             emit(.stderr(stderr))
         }
+        if Thread.isMainThread {
+            deliverParserEvents()
+        }
     }
 
     private func consumeStdout(_ data: Data) {
@@ -212,6 +227,7 @@ public final class NettopCollector: @unchecked Sendable {
     }
 
     private func handleParserEvents(_ events: [NettopParserEvent]) {
+        guard !events.isEmpty else { return }
         for event in events {
             switch event {
             case let .frameCompleted(_, _, isBaseline):
@@ -221,19 +237,25 @@ public final class NettopCollector: @unchecked Sendable {
             case .malformedRow, .schemaChanged, .baselineCaptured, .processTotals:
                 break
             }
-            emitParserEvent(event)
+        }
+        parserEventLock.lock()
+        let shouldSchedule = pendingParserEvents.isEmpty
+        pendingParserEvents.append(contentsOf: events)
+        parserEventLock.unlock()
+        if shouldSchedule {
+            DispatchQueue.main.async { [weak self] in self?.deliverParserEvents() }
         }
     }
 
-    private func reportTermination(status: Int32) {
-        stateLock.lock()
-        guard !didReportExit else {
-            stateLock.unlock()
-            return
+    private func reportTermination(status: Int32, runID: UUID) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            let isCurrentRun = self.activeRunID == runID
+            self.stateLock.unlock()
+            // 主动 stop 已接管清理，旧进程的退出通知不能触发新一轮重连。
+            if isCurrentRun { self.emit(.exited(status: status)) }
         }
-        didReportExit = true
-        stateLock.unlock()
-        emit(.exited(status: status))
     }
 
     private func updateState(_ newState: NettopCollectorState) {
@@ -246,10 +268,14 @@ public final class NettopCollector: @unchecked Sendable {
         onEvent?(event)
     }
 
-    private func emitParserEvent(_ event: NettopParserEvent) {
-        guard let callback = onEvent else { return }
-        DispatchQueue.main.async {
-            callback(.parser(event))
+    // 主线程停止时，管道已经读完，直接交付尚未处理的帧和最后一帧。
+    private func deliverParserEvents() {
+        parserEventLock.lock()
+        let events = pendingParserEvents
+        pendingParserEvents = []
+        parserEventLock.unlock()
+        for event in events {
+            emit(.parser(event))
         }
     }
 

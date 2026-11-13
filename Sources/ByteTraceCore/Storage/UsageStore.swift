@@ -140,9 +140,32 @@ public final class UsageStore: @unchecked Sendable {
             target = candidate(index)
         }
 
-        try fileManager.moveItem(at: url, to: target)
-        for sidecar in sidecars where fileManager.fileExists(atPath: url.path + sidecar) {
-            try fileManager.moveItem(atPath: url.path + sidecar, toPath: target.path + sidecar)
+        let files = [(source: url, destination: target)] + sidecars.compactMap { suffix in
+            let source = URL(fileURLWithPath: url.path + suffix)
+            guard fileManager.fileExists(atPath: source.path) else { return nil }
+            return (source, URL(fileURLWithPath: target.path + suffix))
+        }
+        var moved: [(source: URL, destination: URL)] = []
+        do {
+            for file in files {
+                try fileManager.moveItem(at: file.source, to: file.destination)
+                moved.append(file)
+            }
+        } catch {
+            var unrestored: [String] = []
+            for file in moved.reversed() {
+                do {
+                    try fileManager.moveItem(at: file.destination, to: file.source)
+                } catch {
+                    unrestored.append(file.destination.lastPathComponent)
+                }
+            }
+            if !unrestored.isEmpty {
+                throw CocoaError(.fileWriteUnknown, userInfo: [
+                    NSLocalizedDescriptionKey: "隔离失败，以下文件未能移回原位：\(unrestored.joined(separator: "、"))。\(error.localizedDescription)"
+                ])
+            }
+            throw error
         }
         return target
     }
@@ -1073,14 +1096,25 @@ public final class UsageStore: @unchecked Sendable {
     public func clearAll() throws {
         lock.lock()
         defer { lock.unlock() }
-        try database.execute("DELETE FROM usage_buckets;")
-        try database.execute("DELETE FROM daily_route_usage;")
-        try database.execute("DELETE FROM daily_domain_usage;")
-        try database.execute("DELETE FROM process_names;")
-        try database.execute("DELETE FROM daily_usage;")
-        try database.execute("DELETE FROM programs;")
-        try database.execute("DELETE FROM apps;")
-        try database.execute("DELETE FROM collector_events;")
+        try database.execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try database.execute(
+                """
+                DELETE FROM usage_buckets;
+                DELETE FROM daily_route_usage;
+                DELETE FROM daily_domain_usage;
+                DELETE FROM process_names;
+                DELETE FROM daily_usage;
+                DELETE FROM programs;
+                DELETE FROM apps;
+                DELETE FROM collector_events;
+                """
+            )
+            try database.execute("COMMIT;")
+        } catch {
+            try? database.execute("ROLLBACK;")
+            throw error
+        }
     }
 
     /// nettop 进程名最近一次解析到的宿主与程序，覆盖写入；只用于重启后预填名称缓存。

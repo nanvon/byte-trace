@@ -104,7 +104,6 @@ struct MenuBarView: View {
                 openSettingsWindow()
             }
             headerButton(symbolName: "power", label: "退出 ByteTrace") {
-                model.shutdown()
                 NSApplication.shared.terminate(nil)
             }
         }

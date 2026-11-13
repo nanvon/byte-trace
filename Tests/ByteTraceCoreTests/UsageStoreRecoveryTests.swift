@@ -84,4 +84,76 @@ final class UsageStoreRecoveryTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: first), Data("first".utf8))
         XCTAssertEqual(try Data(contentsOf: second), Data("second".utf8))
     }
+
+    func testQuarantineRestoresDatabaseWhenSidecarMoveFails() throws {
+        // APFS 单个文件名最多 255 字节。隔离后的主文件名是 253 字节，
+        // 追加 -wal 后超限，让旁文件移动在主文件移动成功后失败。
+        let name = String(repeating: "x", count: 221) + ".sqlite3"
+        let url = directory.appendingPathComponent(name)
+        let wal = URL(fileURLWithPath: url.path + "-wal")
+        let original = Data("database".utf8)
+        let journal = Data("journal".utf8)
+        try original.write(to: url)
+        try journal.write(to: wal)
+
+        XCTAssertThrowsError(try UsageStore.quarantineDatabase(at: url))
+
+        XCTAssertEqual(try Data(contentsOf: url), original)
+        XCTAssertEqual(try Data(contentsOf: wal), journal)
+        XCTAssertEqual(
+            Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)),
+            Set([url.lastPathComponent, wal.lastPathComponent])
+        )
+    }
+
+    func testClearAllRollsBackEarlierDeletesOnFailure() throws {
+        let url = directory.appendingPathComponent("usage.sqlite3")
+        let store = try UsageStore(databaseURL: url)
+        let aggregator = UsageAggregator(store: store)
+        try aggregator.ingest(UsageDelta(
+            sampledAt: Date(), appKey: "bundle:example", displayName: "示例",
+            category: .userApp, downloadBytes: 10, uploadBytes: 2,
+            route: .proxyNode, domain: "example.com"
+        ))
+        try aggregator.flush()
+        try store.recordCollectorEvent(kind: "example")
+        let fault = try SQLiteDatabase(url: url)
+        try fault.execute("""
+            CREATE TRIGGER fail_clear BEFORE DELETE ON collector_events
+            BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;
+            """)
+
+        XCTAssertThrowsError(try store.clearAll())
+
+        XCTAssertEqual(try store.bucketStats().bucketCount, 1)
+        XCTAssertEqual(try store.dailyUsage(from: "0001-01-01", through: "9999-12-31").first?.downloadBytes, 10)
+        XCTAssertEqual(try store.routeUsage(from: "0001-01-01", through: "9999-12-31").first?.downloadBytes, 10)
+        XCTAssertEqual(try store.domainUsage(from: "0001-01-01", through: "9999-12-31").first?.downloadBytes, 10)
+        XCTAssertEqual(try fault.scalarInt64("SELECT COUNT(*) FROM collector_events;"), 1)
+    }
+
+    func testFailedUsageWriteCanBeRetriedWithoutCountingTwice() throws {
+        let url = directory.appendingPathComponent("usage.sqlite3")
+        let store = try UsageStore(databaseURL: url)
+        let aggregator = UsageAggregator(store: store)
+        try aggregator.ingest(UsageDelta(
+            sampledAt: Date(), appKey: "bundle:example", displayName: "示例",
+            category: .userApp, downloadBytes: 10, uploadBytes: 2,
+            route: .proxyNode, domain: "example.com"
+        ))
+        let fault = try SQLiteDatabase(url: url)
+        try fault.execute("""
+            CREATE TRIGGER fail_usage_write BEFORE INSERT ON daily_domain_usage
+            BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;
+            """)
+
+        XCTAssertThrowsError(try aggregator.flush())
+        XCTAssertEqual(aggregator.pendingEntryCount, 1)
+        XCTAssertTrue(try store.dailyUsage(from: "0001-01-01", through: "9999-12-31").isEmpty)
+
+        try fault.execute("DROP TRIGGER fail_usage_write;")
+        XCTAssertEqual(try aggregator.flush(), 1)
+        XCTAssertEqual(try aggregator.flush(), 0)
+        XCTAssertEqual(try store.dailyUsage(from: "0001-01-01", through: "9999-12-31").first?.downloadBytes, 10)
+    }
 }

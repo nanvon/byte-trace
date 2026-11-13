@@ -344,7 +344,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     /// 今日应用侧流量的直连 / 代理拆分，供菜单栏今日卡片使用；与主窗口「今天」范围同一口径。
     @Published private(set) var todayRouteSplit: RouteSplit = .empty
     @Published private(set) var status: MonitorStatus = .stopped
-    @Published private(set) var lastError: String?
+    @Published private var diagnosticError: String?
+    @Published private var usageWriteError: String?
+    private(set) var lastError: String? {
+        get { usageWriteError ?? diagnosticError }
+        set { diagnosticError = newValue }
+    }
     /// 数据库损坏后已隔离重建的提示；持久化到用户点「知道了」为止（`lastError` 会在 start() 清空，不能承载它）。
     @Published private(set) var storageNotice: String?
     /// 菜单栏「全部应用」请求主窗口列出全部应用并滚动到列表；主窗口处理后置回 false。
@@ -525,16 +530,17 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
 
         var storageError: String?
         let opened = Self.openStore(at: databaseURL)
-        var quarantinedName: String?
+        let quarantinedName = opened.quarantinedURL?.lastPathComponent
+        if let quarantined = opened.quarantinedURL {
+            let notice = opened.store == nil
+                ? "数据库已损坏，旧文件已另存为 \(quarantined.lastPathComponent)。"
+                : "数据库已损坏，旧文件已另存为 \(quarantined.lastPathComponent)，统计从现在重新开始。"
+            UserDefaults.standard.set(notice, forKey: Self.storageRecoveryNoticeKey)
+            UserDefaults.standard.set(quarantined.path, forKey: Self.storageRecoveryFileKey)
+        }
         if let store = opened.store {
             self.store = store
             aggregator = UsageAggregator(store: store)
-            if let quarantined = opened.quarantinedURL {
-                quarantinedName = quarantined.lastPathComponent
-                let notice = "数据库已损坏，旧文件已另存为 \(quarantined.lastPathComponent)，统计从现在重新开始。"
-                UserDefaults.standard.set(notice, forKey: Self.storageRecoveryNoticeKey)
-                UserDefaults.standard.set(quarantined.path, forKey: Self.storageRecoveryFileKey)
-            }
             if let remembered = try? store.rememberedProcessAttributions() {
                 attributionCache.seed(remembered)
                 recordedProcessNames = Dictionary(
@@ -647,7 +653,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             return
         }
         cancelInstanceLockWait()
+        beginCollection()
+    }
 
+    private func beginCollection() {
         wantsCollection = true
         externalGapRecovery.arm()
         supplementalResidualTracker.reset()
@@ -662,6 +671,12 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     func stop() {
+        stopCollection()
+        finishStoppingIfPossible()
+    }
+
+    private func stopCollection() {
+        let wasCollecting = wantsCollection
         wantsCollection = false
         isSleeping = false
         restartTimer?.invalidate()
@@ -672,8 +687,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         loopbackRestartAttempt = 0
         isStarted = false
         isLoopbackStarted = false
-        flushTimer?.invalidate()
-        flushTimer = nil
         if collector.state != .stopped {
             collector.stop()
         }
@@ -682,10 +695,9 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         }
         proxyEndpointMonitor.stop()
         cancelInstanceLockWait()
-        flushAfterStop(releasingInstanceLock: true)
         updateMihomoPolling()
-        status = .stopped
-        recordCollectorEvent(kind: "collector_stopped")
+        if status != .incompatible { status = .stopped }
+        if wasCollecting { recordCollectorEvent(kind: "collector_stopped") }
     }
 
     /// 另一个实例（已安装版与 Xcode 运行版、或更新重启时的旧进程）持有数据目录锁时，
@@ -739,49 +751,27 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         instanceLockWaitStartedAt = nil
     }
 
-    /// 更新退出前确认最终采样已保存；失败时交由更新窗口提供重试。
-    func prepareForUpdate() throws {
-        let wasCollecting = isCollecting
-        stop()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    func prepareForTermination() throws {
+        stopCollection()
+        try finishStoppingCollection()
+    }
+
+    private func finishStoppingIfPossible() {
         do {
-            _ = try aggregator?.flush()
+            try finishStoppingCollection()
+            refreshIfNeeded(force: true)
         } catch {
-            if wasCollecting { start() }
-            throw error
+            // 保留锁和定时器，写入恢复后再交给等待中的实例。
         }
     }
 
-    func shutdown() {
-        wantsCollection = false
-        isSleeping = false
-        restartTimer?.invalidate()
-        restartTimer = nil
-        loopbackRestartTimer?.invalidate()
-        loopbackRestartTimer = nil
-        isStarted = false
-        isLoopbackStarted = false
+    private func finishStoppingCollection() throws {
+        try saveUsage()
+        saveProcessNames()
         flushTimer?.invalidate()
         flushTimer = nil
-        if collector.state != .stopped {
-            collector.stop()
-        }
-        if loopbackCollector.state != .stopped {
-            loopbackCollector.stop()
-        }
-        proxyEndpointMonitor.stop()
-        // 退出路径必须同步排空主队列：采集器最后一帧事件是 main.async 投递的，
-        // 应用终止后排队 block 不保证执行，这里转一圈 runloop 让最后一帧先入聚合器，
-        // 随后 flushNow 才能把它落库（仅退出瞬间发生一次，代价可忽略）。
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
-        networkPathMonitor.cancel()
-        flushNow(forceRefresh: true)
-        cancelInstanceLockWait()
         instanceLock.release()
         externalGapRecovery.reset()
-        updateMihomoPolling()
-        status = .stopped
     }
 
     func refresh() {
@@ -925,12 +915,30 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         )
     }
 
-    func clearAllData() {
-        guard let store, let aggregator else { return }
-
+    func clearAllData() throws {
+        guard let store, let aggregator else {
+            throw CocoaError(.fileReadUnknown, userInfo: [
+                NSLocalizedDescriptionKey: lastError ?? "本地数据库不可用。"
+            ])
+        }
+        let alreadyHeld = instanceLock.isHeld
+        guard instanceLock.tryAcquire() else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [
+                NSLocalizedDescriptionKey: "无法取得数据目录锁，请关闭正在使用同一数据库的其他 ByteTrace 实例后重试。"
+            ])
+        }
+        let shouldRestart = isStarted || isLoopbackStarted
+        if shouldRestart { stopCollection() }
+        defer {
+            if shouldRestart { beginCollection() }
+            if !alreadyHeld { instanceLock.release() }
+        }
         do {
             try store.clearAll()
             aggregator.discardPending()
+            usageWriteError = nil
+            if wantsCollection { externalGapRecovery.arm() }
+            supplementalResidualTracker.reset()
             pendingProcessNames = [:]
             recordedProcessNames = [:]
             records = []
@@ -959,6 +967,7 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         } catch {
             lastError = "清空统计失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
+            throw error
         }
     }
 
@@ -1171,9 +1180,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private nonisolated func receive(_ event: NettopCollectorEvent, lane: CollectorLane) {
-        // 解析事件由采集器经 DispatchQueue.main.async 投递，到这里已在主线程：就地处理。
-        // 再包一层 Task 会排到 flushAfterStop 的落库之后，停止时最后一帧就赶不上这次落库。
-        if case .parser = event, Thread.isMainThread {
+        // 在同一次主线程回调里处理尾帧，也避免退出事件跨到下一次启动后才处理。
+        if Thread.isMainThread {
             MainActor.assumeIsolated {
                 handle(event, lane: lane)
             }
@@ -1284,7 +1292,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         if loopbackCollector.state != .stopped {
             loopbackCollector.stop()
         }
-        flushAfterStop()
+        flushNow(forceRefresh: true)
+        guard wantsCollection else { return }
 
         if isSatisfied {
             lastError = nil
@@ -1303,6 +1312,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private func handle(_ event: NettopParserEvent, lane: CollectorLane) {
+        if lane == .external, status == .incompatible { return }
+        if lane == .loopback, !loopbackCollectorCompatible { return }
         switch event {
         case let .baselineCaptured(rows):
             guard lane == .external else { return }
@@ -1385,22 +1396,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         case let .incompatibleSchema(missingColumns):
             let message = "CSV 格式不兼容，缺少：\(missingColumns.joined(separator: "、"))"
             if lane == .external {
-                wantsCollection = false
-                restartTimer?.invalidate()
-                restartTimer = nil
-                loopbackRestartTimer?.invalidate()
-                loopbackRestartTimer = nil
-                isStarted = false
-                isLoopbackStarted = false
-                if collector.state != .stopped {
-                    collector.stop()
-                }
-                if loopbackCollector.state != .stopped {
-                    loopbackCollector.stop()
-                }
-                proxyEndpointMonitor.stop()
+                guard wantsCollection else { return }
                 status = .incompatible
                 lastError = message
+                stop()
                 recordCollectorEvent(kind: "parse_schema_changed", details: message)
             } else {
                 loopbackCollectorCompatible = false
@@ -1659,6 +1658,10 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     @objc private func flushTimerFired(_ timer: Timer) {
+        guard wantsCollection else {
+            finishStoppingIfPossible()
+            return
+        }
         flushNow()
         // 保留策略从 refresh() 移到这里：refresh() 受可见性门控，挂在那边会让清理永不执行。
         // 内部有 lastRetentionCleanupDay 日级守卫，每天最多真正执行一次。
@@ -1695,7 +1698,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
         if loopbackCollector.state != .stopped {
             loopbackCollector.stop()
         }
-        flushAfterStop()
+        flushNow(forceRefresh: true)
+        guard wantsCollection else { return }
         status = .stopped
         recordCollectorEvent(kind: "sample_gap", details: "system_sleep")
     }
@@ -1802,26 +1806,41 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
     }
 
     private func flushNow(forceRefresh: Bool = false) {
-        guard let aggregator else { return }
         do {
-            _ = try aggregator.flush()
-            if !pendingProcessNames.isEmpty, let store {
-                try store.recordProcessNames(pendingProcessNames)
-                recordedProcessNames.merge(pendingProcessNames) { _, new in new }
-                pendingProcessNames = [:]
-            }
-            refreshIfNeeded(force: forceRefresh)
+            try saveUsage()
         } catch {
-            lastError = "数据库写入失败：\(error.localizedDescription)"
+            return
+        }
+        saveProcessNames()
+        refreshIfNeeded(force: forceRefresh)
+    }
+
+    private func saveUsage() throws {
+        do {
+            _ = try aggregator?.flush()
+        } catch {
+            let message = "数据库写入失败：\(error.localizedDescription)"
+            if usageWriteError != message {
+                usageWriteError = message
+                recordCollectorEvent(kind: "database_error", details: message)
+            }
+            throw error
+        }
+        if usageWriteError != nil { usageWriteError = nil }
+    }
+
+    private func saveProcessNames() {
+        guard !pendingProcessNames.isEmpty, let store else { return }
+        do {
+            try store.recordProcessNames(pendingProcessNames)
+            recordedProcessNames.merge(pendingProcessNames) { _, new in new }
+            pendingProcessNames = [:]
+        } catch {
+            lastError = "进程归属缓存写入失败：\(error.localizedDescription)"
             recordCollectorEvent(kind: "database_error", details: lastError)
         }
     }
 
-    /// 停止采集后调用：采集器最后一帧事件经 `DispatchQueue.main.async` 投递，
-    /// 这里同样入主队列并排在其后，保证最后一帧先进入聚合器再落库。
-    /// 退出路径不能用它（应用终止前 async block 不保证执行），shutdown() 单独同步排空。
-    /// `releasingInstanceLock` 为真时在落库之后才释放数据目录锁，另一个实例接管前，
-    /// 本实例已收到的尾帧都已写入；其间又调用了 start() 则保留锁。
     /// 打开数据库。文件损坏时在持有数据目录锁的前提下改名保留旧文件并新建；
     /// 版本过新和其他错误（权限、磁盘满、被占用）不隔离。
     private static func openStore(
@@ -1845,11 +1864,27 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             return (nil, "数据库无法读取，另一个 ByteTrace 正在运行；请退出它之后重新打开。", nil)
         }
         defer { lock.release() }
+        // 另一实例可能已在本实例等待加锁期间完成恢复，必须用锁内的结果判断。
         do {
-            let quarantined = try UsageStore.quarantineDatabase(at: url)
+            return (try UsageStore(databaseURL: url), nil, nil)
+        } catch {
+            if UsageStore.isNewerSchema(error) {
+                return (nil, "数据库由更新版本的 ByteTrace 创建，请升级应用后再使用。", nil)
+            }
+            guard UsageStore.isCorruption(error) else {
+                return (nil, "无法打开本地数据库：\(error.localizedDescription)", nil)
+            }
+        }
+        let quarantined: URL
+        do {
+            quarantined = try UsageStore.quarantineDatabase(at: url)
+        } catch {
+            return (nil, "数据库已损坏，隔离失败：\(error.localizedDescription)", nil)
+        }
+        do {
             return (try UsageStore(databaseURL: url), nil, quarantined)
         } catch {
-            return (nil, "数据库已损坏，重建失败：\(error.localizedDescription)", nil)
+            return (nil, "旧数据库已另存为 \(quarantined.lastPathComponent)，重建失败：\(error.localizedDescription)", quarantined)
         }
     }
 
@@ -1865,17 +1900,6 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         } else {
             NSWorkspace.shared.activateFileViewerSelecting([databaseURL])
-        }
-    }
-
-    private func flushAfterStop(releasingInstanceLock: Bool = false) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.flushNow(forceRefresh: true)
-            if releasingInstanceLock, !self.wantsCollection {
-                self.instanceLock.release()
-                self.externalGapRecovery.reset()
-            }
         }
     }
 

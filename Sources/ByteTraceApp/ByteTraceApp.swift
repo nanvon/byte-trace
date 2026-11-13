@@ -12,20 +12,26 @@ final class ByteTraceAppDelegate: NSObject, NSApplicationDelegate {
         AppUpdater.shared.start()
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        Self.model?.shutdown()
-    }
-
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if AppUpdater.shared.phase == .installing {
-            do {
-                try Self.model?.prepareForUpdate()
-            } catch {
+        do {
+            try Self.model?.prepareForTermination()
+            return .terminateNow
+        } catch {
+            if AppUpdater.shared.phase == .installing {
                 AppUpdater.shared.terminationPreparationFailed(error)
-                return .terminateCancel
+            } else {
+                let message = error.localizedDescription
+                DispatchQueue.main.async {
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "未能保存统计，已取消退出"
+                    alert.informativeText = "ByteTrace 会保留待保存的统计并自动重试。请在存储恢复后再次退出。\n\n\(message)"
+                    alert.runModal()
+                }
             }
+            return .terminateCancel
         }
-        return .terminateNow
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

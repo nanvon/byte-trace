@@ -7,6 +7,7 @@ struct SettingsView: View {
     @ObservedObject var model: ByteTraceViewModel
 
     @State private var isShowingClearConfirmation = false
+    @State private var clearError: String?
     @State private var pendingRetentionPolicy: UsageRetentionPolicy?
     @State private var exportMessage: String?
     @State private var exportedFileURL: URL?
@@ -37,11 +38,23 @@ struct SettingsView: View {
             titleVisibility: .visible
         ) {
             Button("清空统计", role: .destructive) {
-                model.clearAllData()
+                do {
+                    try model.clearAllData()
+                } catch {
+                    clearError = error.localizedDescription
+                }
             }
             Button("取消", role: .cancel) {}
         } message: {
             Text("此操作会删除本机保存的每日应用流量和采集诊断记录，不能撤销。")
+        }
+        .alert("清空统计失败", isPresented: Binding(
+            get: { clearError != nil },
+            set: { if !$0 { clearError = nil } }
+        )) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text(clearError ?? "")
         }
         .confirmationDialog(
             "启用分钟级数据保留？",
