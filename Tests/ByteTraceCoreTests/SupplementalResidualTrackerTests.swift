@@ -40,7 +40,7 @@ final class SupplementalResidualTrackerTests: XCTestCase {
             connections: [],
             proxyEndpoints: [proxy],
             at: start.addingTimeInterval(1),
-            route: { _ in .proxyNode }
+            route: { _ in RouteResolution(route: .proxyNode) }
         )
         XCTAssertEqual(second.map(\.delta.downloadBytes), [6_100_000])
         XCTAssertEqual(second.map(\.delta.interface), ["lo0"])
@@ -93,5 +93,38 @@ final class SupplementalResidualTrackerTests: XCTestCase {
             at: start.addingTimeInterval(SupplementalResidualTracker.historyWindow + 1)
         )
         XCTAssertEqual(expired, [])
+    }
+
+    func testResidualDomainRequiresSingleRecentDomainAndNoUnlabeledConnections() {
+        let scenarios: [(domains: [String?], expected: String?)] = [
+            (["example.com", "example.com"], "example.com"),
+            (["example.com", "example.net"], nil),
+            (["example.com", nil], nil)
+        ]
+        for scenario in scenarios {
+            var tracker = SupplementalResidualTracker()
+            let deltas = [
+                connection("Dia.4", "127.0.0.1:50000<->127.0.0.1:7890", "lo0", 100),
+                connection("Dia.4", "127.0.0.1:50001<->127.0.0.1:7890", "lo0", 200)
+            ]
+            _ = tracker.residuals(processTotals: [], connections: deltas, proxyEndpoints: [proxy], at: start) {
+                let index = $0.localEndpoint?.port == 50000 ? 0 : 1
+                return RouteResolution(route: .proxyNode, exitName: "node", domain: scenario.domains[index])
+            }
+            let residuals = tracker.residuals(
+                processTotals: [total("Dia.4", 50)], connections: [], proxyEndpoints: [proxy], at: start.addingTimeInterval(1)
+            )
+            XCTAssertEqual(residuals.count, 1)
+            XCTAssertEqual(residuals.first?.domain, scenario.expected)
+            XCTAssertEqual(residuals.first?.route, .proxyNode)
+            XCTAssertNil(residuals.first?.exitName)
+
+            let next = tracker.residuals(
+                processTotals: [total("Dia.4", 150)], connections: [deltas[0]], proxyEndpoints: [proxy],
+                at: start.addingTimeInterval(SupplementalResidualTracker.historyWindow + 1)
+            ) { _ in RouteResolution(route: .proxyNode, domain: "fresh.example") }
+            XCTAssertEqual(next.count, 1)
+            XCTAssertEqual(next.first?.domain, "fresh.example")
+        }
     }
 }

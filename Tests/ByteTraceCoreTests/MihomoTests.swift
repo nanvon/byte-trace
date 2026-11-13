@@ -86,15 +86,37 @@ final class MihomoTests: XCTestCase {
     func testConflictingRoutesForSameEndpointRemainUnknown() throws {
         let snapshot = try MihomoConnectionsParser.parse(Data("""
         {"connections": [
-          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001"},"chains":["node"]},
-          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001"},"chains":["DIRECT"]},
-          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001"},"chains":["PASS"]}
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001","host":"a.example.com"},"chains":["node"]},
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001","host":"b.example.com"},"chains":["DIRECT"]},
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001","host":"c.example.com"},"chains":["PASS"]}
         ]}
-        """.utf8))
+        """.utf8), includeDomains: true)
         let tracker = MihomoRouteTracker()
         tracker.update(with: snapshot)
         let endpoint = NettopEndpoint(host: "127.0.0.1", port: 50001)
-        XCTAssertEqual(tracker.route(forLocalEndpoint: endpoint), .proxied)
+        XCTAssertEqual(tracker.resolution(forLocalEndpoint: endpoint), .proxied)
+    }
+
+    func testParsesDomainFallbackAndPreservesAgreedMetadata() throws {
+        let data = Data("""
+        {"connections": [
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001","host":"www.Example.com","sniffHost":"other.com"},"chains":[" node "]},
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50001","host":"1.2.3.4","sniffHost":"api.example.com"},"chains":["other node"]},
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50002","host":"","sniffHost":"news.example.co.uk"},"chains":["DIRECT"]},
+          {"metadata":{"sourceIP":"127.0.0.1","sourcePort":"50002","host":"other.co.uk"},"chains":["DIRECT"]}
+        ]}
+        """.utf8)
+        XCTAssertTrue(try MihomoConnectionsParser.parse(data).connections.allSatisfy { $0.domain == nil })
+        let snapshot = try MihomoConnectionsParser.parse(data, includeDomains: true)
+        XCTAssertEqual(snapshot.connections.map(\.domain), ["example.com", "example.com", "example.co.uk", "other.co.uk"])
+        XCTAssertEqual(snapshot.connections.map(\.exitName), ["node", "other node", nil, nil])
+
+        let tracker = MihomoRouteTracker()
+        tracker.update(with: snapshot)
+        let nodeEndpoint = NettopEndpoint(host: "127.0.0.1", port: 50001)
+        XCTAssertEqual(tracker.resolution(forLocalEndpoint: nodeEndpoint), RouteResolution(route: .proxyNode, domain: "example.com"))
+        let directEndpoint = NettopEndpoint(host: "127.0.0.1", port: 50002)
+        XCTAssertEqual(tracker.resolution(forLocalEndpoint: directEndpoint), RouteResolution(route: .proxyRuleDirect))
     }
 
     func testProcessArgumentsOfCurrentProcess() throws {

@@ -78,11 +78,21 @@ final class RouteUsageTests: XCTestCase {
         let reduced = SupplementalTrafficReducer().reduceWithRoutes(
             [connection(50001, download: 10), connection(50002, download: 20), connection(50003, download: 5)],
             proxyEndpoints: [endpoint],
-            route: { $0.localEndpoint?.port == 50002 ? .proxyRuleDirect : .proxyNode }
+            route: { RouteResolution(route: $0.localEndpoint?.port == 50002 ? .proxyRuleDirect : .proxyNode) }
         )
 
         XCTAssertEqual(reduced.count, 2)
         XCTAssertEqual(reduced.first { $0.route == .proxyNode }?.delta.downloadBytes, 15)
         XCTAssertEqual(reduced.first { $0.route == .proxyRuleDirect }?.delta.downloadBytes, 20)
+
+        let byDomain = SupplementalTrafficReducer().reduceWithRoutes(
+            [connection(50001, download: 10), connection(50002, download: 20), connection(50003, download: 5)],
+            proxyEndpoints: [endpoint],
+            route: {
+                RouteResolution(route: .proxyNode, domain: $0.localEndpoint?.port == 50002 ? "example.net" : "example.com")
+            }
+        )
+        XCTAssertEqual(byDomain.map(\.domain), ["example.com", "example.net"])
+        XCTAssertEqual(byDomain.map(\.delta.downloadBytes), [15, 20])
     }
 }

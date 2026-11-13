@@ -26,8 +26,20 @@ public struct SupplementalResidualTracker: Sendable {
 
     private struct History: Sendable {
         var kinds: [Kind: KindUsage] = [:]
+        var domains: [String: Date] = [:]
+        var lastUnlabeledAt: Date?
         var lastDiscardedAt: Date?
         var lastActiveAt: Date
+
+        func singleDomain(since cutoff: Date) -> String? {
+            if let lastUnlabeledAt, lastUnlabeledAt >= cutoff { return nil }
+            var onlyDomain: String?
+            for (domain, lastSeenAt) in domains where lastSeenAt >= cutoff {
+                if onlyDomain != nil { return nil }
+                onlyDomain = domain
+            }
+            return onlyDomain
+        }
     }
 
     private var histories: [String: History] = [:]
@@ -46,9 +58,10 @@ public struct SupplementalResidualTracker: Sendable {
         connections: [NettopDelta],
         proxyEndpoints: Set<NettopEndpoint>,
         at date: Date,
-        route: (NettopDelta) -> TrafficRoute = { _ in .proxied }
+        route: (NettopDelta) -> RouteResolution = { _ in .proxied }
     ) -> [RoutedDelta] {
         let filter = TrafficFilter(proxyEndpoints: proxyEndpoints)
+        let cutoff = date.addingTimeInterval(-Self.historyWindow)
         var connectionTotals: [String: (download: Int64, upload: Int64)] = [:]
 
         for delta in connections {
@@ -69,11 +82,17 @@ public struct SupplementalResidualTracker: Sendable {
                 interface = nil
             }
             if let interface {
-                let kind = Kind(interface: interface, route: route(delta))
+                let resolution = route(delta)
+                let kind = Kind(interface: interface, route: resolution.route)
                 var usage = history.kinds[kind] ?? KindUsage(bytes: 0, lastSeenAt: date)
                 usage.bytes = saturatingAdd(usage.bytes, saturatingAdd(delta.downloadBytes, delta.uploadBytes))
                 usage.lastSeenAt = date
                 history.kinds[kind] = usage
+                if let domain = resolution.domain {
+                    history.domains[domain] = date
+                } else {
+                    history.lastUnlabeledAt = date
+                }
             } else {
                 history.lastDiscardedAt = date
             }
@@ -111,7 +130,8 @@ public struct SupplementalResidualTracker: Sendable {
                         uploadBytes: upload,
                         interface: dominant.interface
                     ),
-                    route: dominant.route
+                    route: dominant.route,
+                    domain: history.singleDomain(since: cutoff)
                 )
             )
         }
@@ -119,8 +139,10 @@ public struct SupplementalResidualTracker: Sendable {
         framesSincePrune += 1
         if framesSincePrune >= 60 {
             framesSincePrune = 0
-            histories = histories.filter {
-                date.timeIntervalSince($0.value.lastActiveAt) <= Self.historyWindow
+            histories = histories.filter { $0.value.lastActiveAt >= cutoff }.mapValues { history in
+                var history = history
+                history.domains = history.domains.filter { $0.value >= cutoff }
+                return history
             }
         }
         return residuals

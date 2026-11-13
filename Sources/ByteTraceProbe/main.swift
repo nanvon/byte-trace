@@ -438,8 +438,8 @@ private func runProbe(options: Options) -> Int32 {
                 case .supplemental:
                     let proxyEndpoints = runtime.proxyEndpointMonitor.currentLoopbackEndpoints
                     let tracker = runtime.mihomoTracker
-                    let route: (NettopDelta) -> TrafficRoute = {
-                        tracker.route(forLocalEndpoint: $0.localEndpoint) ?? .proxied
+                    let route: (NettopDelta) -> RouteResolution = {
+                        RouteResolution(route: tracker.route(forLocalEndpoint: $0.localEndpoint) ?? .proxied)
                     }
                     let residuals = isBaseline ? [] : runtime.residualTracker.residuals(
                         processTotals: runtime.pendingProcessTotals,

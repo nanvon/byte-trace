@@ -77,10 +77,14 @@ public struct TrafficFilter: Sendable {
 public struct RoutedDelta: Equatable, Sendable {
     public let delta: NettopDelta
     public let route: TrafficRoute
+    public let exitName: String?
+    public let domain: String?
 
-    public init(delta: NettopDelta, route: TrafficRoute) {
+    public init(delta: NettopDelta, route: TrafficRoute, exitName: String? = nil, domain: String? = nil) {
         self.delta = delta
         self.route = route
+        self.exitName = exitName
+        self.domain = domain
     }
 }
 
@@ -95,7 +99,7 @@ public struct SupplementalTrafficReducer: Sendable {
     private struct Key: Hashable {
         let processName: String
         let source: Source
-        let route: TrafficRoute
+        let resolution: RouteResolution
     }
 
     public func reduce(
@@ -110,7 +114,7 @@ public struct SupplementalTrafficReducer: Sendable {
     public func reduceWithRoutes(
         _ deltas: [NettopDelta],
         proxyEndpoints: Set<NettopEndpoint>,
-        route: (NettopDelta) -> TrafficRoute = { _ in .proxied }
+        route: (NettopDelta) -> RouteResolution = { _ in .proxied }
     ) -> [RoutedDelta] {
         guard !deltas.isEmpty else { return [] }
         let filter = TrafficFilter(proxyEndpoints: proxyEndpoints)
@@ -119,7 +123,7 @@ public struct SupplementalTrafficReducer: Sendable {
 
         for delta in deltas where filter.shouldKeepSupplemental(delta) {
             let source: Source = filter.shouldKeepLoopback(delta) ? .loopback : .tunnel
-            let key = Key(processName: delta.processName, source: source, route: route(delta))
+            let key = Key(processName: delta.processName, source: source, resolution: route(delta))
             let normalizedInterface = source == .loopback ? "lo0" : "utun"
             if let existing = grouped[key] {
                 grouped[key] = NettopDelta(
@@ -142,7 +146,14 @@ public struct SupplementalTrafficReducer: Sendable {
         }
 
         return order.compactMap { key in
-            grouped[key].map { RoutedDelta(delta: $0, route: key.route) }
+            grouped[key].map {
+                RoutedDelta(
+                    delta: $0,
+                    route: key.resolution.route,
+                    exitName: key.resolution.exitName,
+                    domain: key.resolution.domain
+                )
+            }
         }
     }
 

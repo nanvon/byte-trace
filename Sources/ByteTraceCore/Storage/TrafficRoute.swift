@@ -27,6 +27,21 @@ public enum TrafficRoute: String, CaseIterable, Codable, Equatable, Hashable, Se
     }
 }
 
+public struct RouteResolution: Hashable, Sendable {
+    public let route: TrafficRoute
+    public let exitName: String?
+    public let domain: String?
+
+    public init(route: TrafficRoute, exitName: String? = nil, domain: String? = nil) {
+        self.route = route
+        let name = exitName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.exitName = route == .proxyNode && !name.isEmpty ? String(name.prefix(128)) : nil
+        self.domain = route.isProxied && domain != "" ? domain : nil
+    }
+
+    public static let proxied = RouteResolution(route: .proxied)
+}
+
 public struct RouteUsageAggregate: Equatable, Sendable {
     public let day: String
     public let appKey: String

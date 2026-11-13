@@ -1294,8 +1294,8 @@ final class ByteTraceViewModel: NSObject, ObservableObject {
             if lane == .loopback {
                 let proxyEndpoints = proxyEndpointMonitor.currentLoopbackEndpoints
                 detectProxyListeners(in: deltas, proxyEndpoints: proxyEndpoints)
-                let route: (NettopDelta) -> TrafficRoute = { [weak self] in
-                    self?.supplementalRoute(for: $0) ?? .proxied
+                let route: (NettopDelta) -> RouteResolution = { [weak self] in
+                    RouteResolution(route: self?.supplementalRoute(for: $0) ?? .proxied)
                 }
                 let residuals = supplementalResidualTracker.residuals(
                     processTotals: processTotals,
